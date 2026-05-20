@@ -1,3 +1,4 @@
+mod composite;
 mod webrtc;
 
 use async_trait::async_trait;
@@ -8,6 +9,7 @@ use crate::{
     Result,
 };
 
+pub use composite::CompositePublisher;
 pub use webrtc::WebRtcPublisher;
 
 #[async_trait]

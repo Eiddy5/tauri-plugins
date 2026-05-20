@@ -103,7 +103,7 @@ mod macos {
                 ));
             }
 
-            let mut data = frame.data.clone();
+            let mut data = frame.data.to_vec();
             let pixel_buffer = unsafe {
                 CVPixelBuffer::create_with_bytes(
                     frame.width as usize,

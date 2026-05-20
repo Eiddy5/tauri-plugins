@@ -501,7 +501,7 @@ mod real {
             height: positive_usize_u32(height),
             pixel_format: PixelFormat::Bgra,
             timestamp_ns: sample.display_time().unwrap_or_default(),
-            data,
+            data: data.into(),
         })
     }
 
