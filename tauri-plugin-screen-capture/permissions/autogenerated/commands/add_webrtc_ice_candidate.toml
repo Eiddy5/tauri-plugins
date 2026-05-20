@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-add-webrtc-ice-candidate"
+description = "Enables the add_webrtc_ice_candidate command without any pre-configured scope."
+commands.allow = ["add_webrtc_ice_candidate"]
+
+[[permission]]
+identifier = "deny-add-webrtc-ice-candidate"
+description = "Denies the add_webrtc_ice_candidate command without any pre-configured scope."
+commands.deny = ["add_webrtc_ice_candidate"]

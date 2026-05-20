@@ -1,0 +1,17 @@
+[default]
+description = "Default permissions for the plugin"
+permissions = [
+  "allow-get-capabilities",
+  "allow-check-permission",
+  "allow-request-permission",
+  "allow-list-sources",
+  "allow-start-capture",
+  "allow-pause-capture",
+  "allow-resume-capture",
+  "allow-stop-capture",
+  "allow-get-capture-session",
+  "allow-get-capture-stats",
+  "allow-create-webrtc-offer",
+  "allow-accept-webrtc-answer",
+  "allow-add-webrtc-ice-candidate",
+]

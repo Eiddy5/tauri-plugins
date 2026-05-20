@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-create-webrtc-offer"
+description = "Enables the create_webrtc_offer command without any pre-configured scope."
+commands.allow = ["create_webrtc_offer"]
+
+[[permission]]
+identifier = "deny-create-webrtc-offer"
+description = "Denies the create_webrtc_offer command without any pre-configured scope."
+commands.deny = ["create_webrtc_offer"]
