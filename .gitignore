@@ -1,0 +1,127 @@
+# See http://help.github.com/ignore-files/ for more about ignoring files.
+
+
+
+# compiled output
+/dist
+/tmp
+/out-tsc
+/app-builds
+/release
+main.js
+app/**/*.js
+src/**/*.js
+*.js.map
+app/browser
+/figma-src
+/.kiro
+/old
+.angular
+
+# dependencies
+node_modules
+
+# IDEs and editors
+.idea
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
+.qoder
+.shared
+
+# IDE - VSCode
+.vscode/*
+.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# misc
+/.angular/cache
+/.sass-cache
+/connect.lock
+/coverage
+/libpeerconnection.log
+npm-debug.log
+testem.log
+/typings
+
+# e2e
+/e2e/*.js
+!/e2e/protractor.conf.js
+/e2e/*.map
+/e2e/tracing
+/e2e/screenshots
+
+# System Files
+.DS_Store
+Thumbs.db
+**/*.lock
+**/package-lock.json
+**/pnpm-lock.yml
+.nx
+/src-tauri/target
+/src-tauri/gen/schemas/**
+/.tauri
+/.cargo
+/.claude/
+CLAUDE.md
+CLAUDE.local.md
+# by ai
+.npm-cache
+.playwright-browsers
+/src-tauri/plugins/*/target/
+/src-tauri/plugins/*/permissions/
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+dev-debug.log
+# Dependency directories
+node_modules/
+# Environment variables
+
+# release.json 的本地 override（每人独立，不污染他人 / release）
+/release.local.json
+# Editor directories and files
+.vscode
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+# OS specific
+
+# Task files
+# tasks.json
+# tasks/
+/.taskmaster/
+output/
+# Worktrees
+.worktrees/
+/CLAUDE.md
+/CLAUDE.local.md
+/.playwright-cli
+/test-results
+/.superpowers
+/LESSONS.md
+.node_modules-*
+# 测试环境本地配置（含账号密码）
+tests/bug-regression/context.sh
+.omx/
+/src-tauri/src/plugins
+/.omx
+/.codex-fixtures
+/src-tauri/resources/macos/staged/
+/src-tauri/resources/windows/staged/
+/.codex
+/.auto-task
+/.syp/
+/src/environments/environment.local.ts
+
