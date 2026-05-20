@@ -5,7 +5,6 @@ use webrtc::{
         media_engine::{MediaEngine, MIME_TYPE_H264},
         APIBuilder,
     },
-    data_channel::RTCDataChannel,
     ice_transport::ice_candidate::RTCIceCandidateInit,
     peer_connection::{
         configuration::RTCConfiguration, sdp::session_description::RTCSessionDescription,
@@ -23,7 +22,6 @@ use crate::{
 
 pub struct WebRtcSignalingState {
     peer_connection: Arc<RTCPeerConnection>,
-    frame_channel: Arc<RTCDataChannel>,
     video_track: Arc<TrackLocalStaticSample>,
 }
 
@@ -44,31 +42,22 @@ impl WebRtcSignalingState {
                 mime_type: MIME_TYPE_H264.to_string(),
                 clock_rate: 90_000,
                 channels: 0,
-                sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
-                    .to_string(),
+                sdp_fmtp_line:
+                    "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+                        .to_string(),
                 rtcp_feedback: vec![],
             },
-            "screen-capture-video".to_string(),
-            "screen-capture".to_string(),
+            "video".to_string(),
+            "capture".to_string(),
         ));
         peer_connection
             .add_track(Arc::clone(&video_track) as Arc<dyn TrackLocal + Send + Sync>)
             .await
             .map_err(|err| webrtc_error("failed to add WebRTC video track", err))?;
-        let frame_channel = peer_connection
-            .create_data_channel("screen-capture-frames", None)
-            .await
-            .map_err(|err| webrtc_error("failed to create frame data channel", err))?;
-
         Ok(Self {
             peer_connection,
-            frame_channel,
             video_track,
         })
-    }
-
-    pub fn frame_channel(&self) -> Arc<RTCDataChannel> {
-        Arc::clone(&self.frame_channel)
     }
 
     pub fn video_track(&self) -> Arc<TrackLocalStaticSample> {
@@ -127,7 +116,6 @@ impl WebRtcSignalingState {
     }
 
     pub async fn close(&self) -> Result<()> {
-        let _ = self.frame_channel.close().await;
         self.peer_connection
             .close()
             .await

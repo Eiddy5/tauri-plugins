@@ -1,5 +1,3 @@
-mod agora;
-mod null;
 mod webrtc;
 
 use async_trait::async_trait;
@@ -10,9 +8,7 @@ use crate::{
     Result,
 };
 
-pub use agora::AgoraPublisher;
-pub use null::NullPublisher;
-pub use webrtc::WebRtcLoopbackPublisher;
+pub use webrtc::WebRtcPublisher;
 
 #[async_trait]
 pub trait CapturePublisher: Send + Sync {

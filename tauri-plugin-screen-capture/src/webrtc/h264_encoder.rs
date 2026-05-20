@@ -1,15 +1,15 @@
 #[cfg(target_os = "macos")]
 mod macos {
     use std::{
-        ffi::CString,
         ffi::c_void,
+        ffi::CString,
         ptr,
         sync::mpsc::{self, Receiver, Sender},
         time::Duration,
     };
 
     use apple_cf::{
-        cm::{CMTime, CMSampleBuffer},
+        cm::{CMSampleBuffer, CMTime},
         cv::CVPixelBuffer,
     };
 
@@ -113,7 +113,9 @@ mod macos {
                     frame.width as usize * 4,
                 )
             }
-            .map_err(|status| video_toolbox_error("failed to create encoder pixel buffer", status))?;
+            .map_err(|status| {
+                video_toolbox_error("failed to create encoder pixel buffer", status)
+            })?;
             let timestamp = Box::into_raw(Box::new(frame.timestamp_ns));
             let pts = CMTime::new(
                 i64::try_from(frame.timestamp_ns / 1_000).unwrap_or(i64::MAX),
@@ -251,14 +253,23 @@ mod macos {
         )
     }
 
-    fn configure_session(session: VTCompressionSessionRef, width: u32, height: u32, fps: u32) -> Result<()> {
+    fn configure_session(
+        session: VTCompressionSessionRef,
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> Result<()> {
         set_bool_property(session, "RealTime", true)?;
         set_i32_property(
             session,
             "AverageBitRate",
             recommended_bitrate(width, height, fps),
         )?;
-        set_i32_property(session, "MaxKeyFrameInterval", i32::try_from(fps.max(1) * 2).unwrap_or(60))?;
+        set_i32_property(
+            session,
+            "MaxKeyFrameInterval",
+            i32::try_from(fps.max(1) * 2).unwrap_or(60),
+        )?;
         set_string_property(session, "ProfileLevel", "H264_Baseline_AutoLevel")?;
         Ok(())
     }
@@ -268,9 +279,19 @@ mod macos {
         let fps = u64::from(fps.max(1));
         let bits = pixels
             .saturating_mul(fps)
-            .saturating_mul(14)
+            .saturating_mul(16)
             .saturating_div(100);
-        i32::try_from(bits.clamp(4_000_000, 24_000_000)).unwrap_or(12_000_000)
+        i32::try_from(bits.clamp(6_000_000, 32_000_000)).unwrap_or(16_000_000)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::recommended_bitrate;
+
+        #[test]
+        fn bitrate_is_high_enough_for_2k_screen_text() {
+            assert!(recommended_bitrate(2560, 1440, 30) >= 16_000_000);
+        }
     }
 
     fn set_bool_property(session: VTCompressionSessionRef, key: &str, value: bool) -> Result<()> {
@@ -286,23 +307,38 @@ mod macos {
             if status == 0 {
                 Ok(())
             } else {
-                Err(video_toolbox_error("failed to set VideoToolbox bool property", status))
+                Err(video_toolbox_error(
+                    "failed to set VideoToolbox bool property",
+                    status,
+                ))
             }
         })
     }
 
     fn set_i32_property(session: VTCompressionSessionRef, key: &str, value: i32) -> Result<()> {
         with_cf_string(key, |key| {
-            let number = unsafe { CFNumberCreate(ptr::null(), K_CF_NUMBER_SINT32_TYPE, (&value as *const i32).cast()) };
+            let number = unsafe {
+                CFNumberCreate(
+                    ptr::null(),
+                    K_CF_NUMBER_SINT32_TYPE,
+                    (&value as *const i32).cast(),
+                )
+            };
             if number.is_null() {
-                return Err(video_toolbox_error("failed to create CoreFoundation number", -1));
+                return Err(video_toolbox_error(
+                    "failed to create CoreFoundation number",
+                    -1,
+                ));
             }
             let status = unsafe { VTSessionSetProperty(session, key, number.cast()) };
             unsafe { CFRelease(number.cast()) };
             if status == 0 {
                 Ok(())
             } else {
-                Err(video_toolbox_error("failed to set VideoToolbox integer property", status))
+                Err(video_toolbox_error(
+                    "failed to set VideoToolbox integer property",
+                    status,
+                ))
             }
         })
     }
@@ -314,7 +350,10 @@ mod macos {
                 if status == 0 {
                     Ok(())
                 } else {
-                    Err(video_toolbox_error("failed to set VideoToolbox string property", status))
+                    Err(video_toolbox_error(
+                        "failed to set VideoToolbox string property",
+                        status,
+                    ))
                 }
             })
         })
@@ -332,7 +371,10 @@ mod macos {
             CFStringCreateWithCString(ptr::null(), c_value.as_ptr(), K_CF_STRING_ENCODING_UTF8)
         };
         if cf_string.is_null() {
-            return Err(video_toolbox_error("failed to create CoreFoundation string", -1));
+            return Err(video_toolbox_error(
+                "failed to create CoreFoundation string",
+                -1,
+            ));
         }
         let result = f(cf_string.cast());
         unsafe { CFRelease(cf_string.cast()) };
@@ -355,9 +397,7 @@ mod macos {
             encoder_specification: *const c_void,
             image_buffer_attributes: *const c_void,
             compressed_data_allocator: *const c_void,
-            output_callback: Option<
-                extern "C" fn(*mut c_void, *mut c_void, i32, u32, *mut c_void),
-            >,
+            output_callback: Option<extern "C" fn(*mut c_void, *mut c_void, i32, u32, *mut c_void)>,
             output_callback_ref_con: *mut c_void,
             compression_session_out: *mut VTCompressionSessionRef,
         ) -> i32;
@@ -423,6 +463,14 @@ pub struct H264Encoder;
 
 #[cfg(not(target_os = "macos"))]
 impl H264Encoder {
+    pub fn new(_width: u32, _height: u32, _fps: u32) -> crate::Result<Self> {
+        Err(crate::error::Error::new(
+            crate::models::CaptureErrorCode::WebRtcTrackFailed,
+            "H264 screen capture preview is only implemented on macOS",
+            true,
+        ))
+    }
+
     pub fn encode_frame(
         &self,
         _frame: &crate::pipeline::frame::VideoFrame,

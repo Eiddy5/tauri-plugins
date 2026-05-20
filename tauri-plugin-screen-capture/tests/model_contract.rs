@@ -46,7 +46,7 @@ fn list_sources_options_deserializes_partial_frontend_options() {
 }
 
 #[test]
-fn start_capture_options_defaults_to_webrtc_loopback() {
+fn start_capture_options_use_video_defaults() {
     let options = StartCaptureOptions {
         source_id: "display:1".to_string(),
         source_kind: CaptureSourceKind::Display,
@@ -54,26 +54,10 @@ fn start_capture_options_defaults_to_webrtc_loopback() {
         width: None,
         height: None,
         capture_cursor: None,
-        publisher: None,
     };
 
     assert_eq!(options.effective_fps(), 30);
     assert!(options.effective_capture_cursor());
-    assert_eq!(
-        options.effective_publisher(),
-        CapturePublisherKind::WebRtcLoopback
-    );
-}
-
-#[test]
-fn webrtc_publisher_kind_uses_documented_wire_name() {
-    let json =
-        serde_json::to_value(CapturePublisherKind::WebRtcLoopback).expect("serialize publisher");
-    assert_eq!(json, "webrtcLoopback");
-
-    let parsed: CapturePublisherKind =
-        serde_json::from_str("\"webrtcLoopback\"").expect("deserialize publisher");
-    assert_eq!(parsed, CapturePublisherKind::WebRtcLoopback);
 }
 
 #[test]

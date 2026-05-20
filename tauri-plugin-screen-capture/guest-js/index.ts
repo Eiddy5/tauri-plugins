@@ -1,7 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 
 export type CaptureSourceKind = 'display' | 'window'
-export type CapturePublisherKind = 'null' | 'webrtcLoopback' | 'agora'
 export type CaptureStatus =
   | 'idle'
   | 'starting'
@@ -18,8 +17,7 @@ export interface Capabilities {
   supportsWindowCapture: boolean
   supportsThumbnails: boolean
   supportsCursorCapture: boolean
-  supportsWebrtcLoopback: boolean
-  supportsAgora: boolean
+  supportsWebrtc: boolean
 }
 
 export interface CaptureSource {
@@ -52,7 +50,6 @@ export interface StartCaptureOptions {
   width?: number
   height?: number
   captureCursor?: boolean
-  publisher?: CapturePublisherKind
 }
 
 export interface CaptureErrorPayload {
@@ -67,7 +64,6 @@ export interface CaptureSession {
   sourceId: string
   sourceKind: CaptureSourceKind
   status: CaptureStatus
-  publisher: CapturePublisherKind
   startedAtMs: number
   lastError?: CaptureErrorPayload | null
 }

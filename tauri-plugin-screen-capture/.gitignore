@@ -15,3 +15,6 @@ node_modules/
 
 dist-js
 dist
+
+!/examples/tauri-app/src/main.js
+!/examples/tauri-app/src/lib/screenCapture.js

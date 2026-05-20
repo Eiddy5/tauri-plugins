@@ -19,21 +19,6 @@ pub enum PermissionStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum CapturePublisherKind {
-    Null,
-    #[serde(rename = "webrtcLoopback")]
-    WebRtcLoopback,
-    Agora,
-}
-
-impl Default for CapturePublisherKind {
-    fn default() -> Self {
-        Self::WebRtcLoopback
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub enum CaptureStatus {
     Idle,
     Starting,
@@ -61,8 +46,7 @@ pub struct Capabilities {
     pub supports_window_capture: bool,
     pub supports_thumbnails: bool,
     pub supports_cursor_capture: bool,
-    pub supports_webrtc_loopback: bool,
-    pub supports_agora: bool,
+    pub supports_webrtc: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -114,7 +98,6 @@ pub struct StartCaptureOptions {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub capture_cursor: Option<bool>,
-    pub publisher: Option<CapturePublisherKind>,
 }
 
 impl StartCaptureOptions {
@@ -125,10 +108,6 @@ impl StartCaptureOptions {
     pub fn effective_capture_cursor(&self) -> bool {
         self.capture_cursor.unwrap_or(true)
     }
-
-    pub fn effective_publisher(&self) -> CapturePublisherKind {
-        self.publisher.unwrap_or_default()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -138,7 +117,6 @@ pub struct CaptureSession {
     pub source_id: String,
     pub source_kind: CaptureSourceKind,
     pub status: CaptureStatus,
-    pub publisher: CapturePublisherKind,
     pub started_at_ms: u128,
     pub last_error: Option<CaptureErrorPayload>,
 }
@@ -199,7 +177,6 @@ pub enum CaptureErrorCode {
     SourceUnavailable,
     CaptureStartFailed,
     CaptureRuntimeFailed,
-    PublisherUnsupported,
     #[serde(rename = "webrtcNegotiationFailed")]
     WebRtcNegotiationFailed,
     #[serde(rename = "webrtcTrackFailed")]

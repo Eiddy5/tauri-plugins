@@ -1,0 +1,416 @@
+import "./style.css"
+import {
+  checkPermission,
+  getCaptureStats,
+  listSources,
+  pauseCapture,
+  requestPermission,
+  resumeCapture,
+  startCapture,
+  stopCapture,
+} from "tauri-plugin-screen-capture-api"
+import { connectVideo } from "./lib/screenCapture.js"
+
+const state = {
+  sources: [],
+  selected: null,
+  session: null,
+  stats: null,
+  error: "",
+  loading: false,
+  debugRawSources: false,
+  includeCurrentApp: false,
+  includeSystemUi: false,
+  activeKind: "display",
+  peerConnection: null,
+  pollTimer: null,
+}
+
+const captureMaxWidth = 2560
+const captureFps = 30
+
+const app = document.querySelector("#app")
+
+app.innerHTML = `
+  <main class="app-shell">
+    <aside class="sidebar">
+      <header class="sidebar-header">
+        <div>
+          <h1>选择共享内容</h1>
+          <p data-source-summary>0 个可共享来源</p>
+        </div>
+        <button type="button" class="refresh-button" data-refresh>刷新</button>
+      </header>
+
+      <div class="source-tabs" role="tablist" aria-label="共享类型">
+        <button type="button" role="tab" data-kind="display">共享屏幕 <span data-display-count>0</span></button>
+        <button type="button" role="tab" data-kind="window">共享窗口 <span data-window-count>0</span></button>
+      </div>
+
+      <div class="options">
+        <label><input type="checkbox" data-option="debugRawSources" /> Debug raw</label>
+        <label><input type="checkbox" data-option="includeCurrentApp" /> Current app</label>
+        <label><input type="checkbox" data-option="includeSystemUi" /> System UI</label>
+      </div>
+
+      <section class="source-list" data-source-list></section>
+    </aside>
+
+    <section class="preview">
+      <div class="toolbar">
+        <div>
+          <strong data-selected-title>未选择共享源</strong>
+          <span data-session-status>idle</span>
+        </div>
+        <div class="actions">
+          <button type="button" data-start>开始共享</button>
+          <button type="button" data-pause>暂停</button>
+          <button type="button" data-resume>继续</button>
+          <button type="button" class="danger" data-stop>停止</button>
+        </div>
+      </div>
+
+      <div class="canvas-wrap">
+        <div class="preview-idle" data-preview-idle>
+          <strong data-preview-title>请选择左侧来源</strong>
+          <span data-preview-subtitle>选择后点击开始共享</span>
+        </div>
+        <video data-video autoplay playsinline muted></video>
+      </div>
+
+      <div class="status-strip">
+        <span data-captured>Captured 0</span>
+        <span data-published>Published 0</span>
+        <span data-dropped>Dropped 0</span>
+        <span data-streaming>Stopped</span>
+      </div>
+
+      <div class="error" data-error hidden></div>
+    </section>
+  </main>
+`
+
+const elements = {
+  sourceSummary: app.querySelector("[data-source-summary]"),
+  refresh: app.querySelector("[data-refresh]"),
+  kindButtons: [...app.querySelectorAll("[data-kind]")],
+  displayCount: app.querySelector("[data-display-count]"),
+  windowCount: app.querySelector("[data-window-count]"),
+  optionInputs: [...app.querySelectorAll("[data-option]")],
+  sourceList: app.querySelector("[data-source-list]"),
+  selectedTitle: app.querySelector("[data-selected-title]"),
+  sessionStatus: app.querySelector("[data-session-status]"),
+  start: app.querySelector("[data-start]"),
+  pause: app.querySelector("[data-pause]"),
+  resume: app.querySelector("[data-resume]"),
+  stop: app.querySelector("[data-stop]"),
+  previewIdle: app.querySelector("[data-preview-idle]"),
+  previewTitle: app.querySelector("[data-preview-title]"),
+  previewSubtitle: app.querySelector("[data-preview-subtitle]"),
+  video: app.querySelector("[data-video]"),
+  captured: app.querySelector("[data-captured]"),
+  published: app.querySelector("[data-published]"),
+  dropped: app.querySelector("[data-dropped]"),
+  streaming: app.querySelector("[data-streaming]"),
+  error: app.querySelector("[data-error]"),
+}
+
+elements.refresh.addEventListener("click", refreshSources)
+elements.start.addEventListener("click", start)
+elements.pause.addEventListener("click", pause)
+elements.resume.addEventListener("click", resume)
+elements.stop.addEventListener("click", stop)
+
+for (const button of elements.kindButtons) {
+  button.addEventListener("click", () => selectKind(button.dataset.kind))
+}
+
+for (const input of elements.optionInputs) {
+  input.addEventListener("change", () => {
+    state[input.dataset.option] = input.checked
+    render()
+  })
+}
+
+render()
+
+async function refreshSources() {
+  state.loading = true
+  state.error = ""
+  render()
+
+  try {
+    console.info("[screen-capture] refreshing sources")
+    state.sources = await listSources({
+      kinds: ["display", "window"],
+      includeThumbnails: true,
+      includeCurrentApp: state.includeCurrentApp,
+      includeSystemUi: state.includeSystemUi,
+      debugRawSources: state.debugRawSources,
+    })
+    console.info("[screen-capture] sources refreshed", {
+      total: state.sources.length,
+      displays: displays().length,
+      windows: windows().length,
+    })
+    if (!state.selected || !state.sources.some((source) => source.id === state.selected.id)) {
+      state.selected =
+        state.sources.find((source) => source.kind === state.activeKind) ?? state.sources[0] ?? null
+    }
+  } catch (err) {
+    state.error = errorMessage(err)
+    console.error("[screen-capture] refresh sources failed", err)
+  } finally {
+    state.loading = false
+    render()
+  }
+}
+
+async function start() {
+  if (!state.selected || state.session) return
+  state.error = ""
+  render()
+
+  try {
+    const currentPermission = await checkPermission()
+    console.info("[screen-capture] permission before request", currentPermission)
+    const permission = await requestPermission()
+    console.info("[screen-capture] permission after request", permission)
+    if (permission !== "granted") {
+      throw new Error(`Screen recording permission is ${permission}`)
+    }
+
+    console.info("[screen-capture] starting capture", {
+      sourceId: state.selected.id,
+      sourceKind: state.selected.kind,
+      name: state.selected.name,
+    })
+    const captureSize = scaledCaptureSize(state.selected, captureMaxWidth)
+    state.session = await startCapture({
+      sourceId: state.selected.id,
+      sourceKind: state.selected.kind,
+      fps: captureFps,
+      width: captureSize.width,
+      height: captureSize.height,
+      captureCursor: true,
+    })
+    console.info("[screen-capture] capture session started", state.session)
+    state.peerConnection = await connectVideo(state.session, elements.video)
+    console.info("[screen-capture] WebRTC connected")
+    state.pollTimer = setInterval(updateStats, 1000)
+    await updateStats()
+  } catch (err) {
+    state.error = errorMessage(err)
+    console.error("[screen-capture] start failed", err)
+    await stop()
+  } finally {
+    render()
+  }
+}
+
+async function updateStats() {
+  if (!state.session) return
+  state.stats = await getCaptureStats(state.session.sessionId)
+  console.info("[screen-capture] stats", state.stats)
+  renderStats()
+}
+
+async function pause() {
+  if (!state.session) return
+  await pauseCapture(state.session.sessionId)
+  await updateStats()
+}
+
+async function resume() {
+  if (!state.session) return
+  await resumeCapture(state.session.sessionId)
+  await updateStats()
+}
+
+async function stop() {
+  const activeSession = state.session
+  state.session = null
+  state.stats = null
+  if (state.pollTimer) clearInterval(state.pollTimer)
+  state.pollTimer = null
+  if (state.peerConnection) state.peerConnection.close()
+  state.peerConnection = null
+  elements.video.srcObject = null
+
+  if (activeSession) {
+    try {
+      await stopCapture(activeSession.sessionId)
+    } catch (err) {
+      state.error = errorMessage(err)
+    }
+  }
+  render()
+}
+
+function selectKind(kind) {
+  if (state.session) return
+  state.activeKind = kind
+  if (state.selected?.kind !== kind) {
+    state.selected = state.sources.find((source) => source.kind === kind) ?? null
+  }
+  render()
+}
+
+function selectSource(sourceId) {
+  if (state.session) return
+  state.selected = state.sources.find((source) => source.id === sourceId) ?? null
+  render()
+}
+
+function render() {
+  const displaySources = displays()
+  const windowSources = windows()
+  const activeSources = state.activeKind === "display" ? displaySources : windowSources
+  const hasSession = Boolean(state.session)
+
+  elements.sourceSummary.textContent = state.loading
+    ? "正在更新可共享列表"
+    : `${state.sources.length} 个可共享来源`
+  elements.refresh.textContent = state.loading ? "刷新中" : "刷新"
+  elements.refresh.disabled = state.loading || hasSession
+  elements.displayCount.textContent = String(displaySources.length)
+  elements.windowCount.textContent = String(windowSources.length)
+
+  for (const button of elements.kindButtons) {
+    const active = button.dataset.kind === state.activeKind
+    button.classList.toggle("active", active)
+    button.setAttribute("aria-selected", String(active))
+    button.disabled = hasSession
+  }
+
+  for (const input of elements.optionInputs) {
+    input.checked = Boolean(state[input.dataset.option])
+    input.disabled = hasSession
+  }
+
+  renderSourceList(activeSources)
+  renderPreview()
+  renderStats()
+
+  elements.start.disabled = !state.selected || hasSession
+  elements.pause.disabled = !hasSession
+  elements.resume.disabled = !hasSession
+  elements.stop.disabled = !hasSession
+
+  elements.error.hidden = !state.error
+  elements.error.textContent = state.error
+}
+
+function renderSourceList(activeSources) {
+  elements.sourceList.setAttribute(
+    "aria-label",
+    state.activeKind === "display" ? "共享屏幕列表" : "共享窗口列表",
+  )
+
+  if (activeSources.length === 0) {
+    elements.sourceList.innerHTML = `
+      <div class="empty-state">
+        <strong>暂无可共享${state.activeKind === "display" ? "屏幕" : "窗口"}</strong>
+        <span>点击刷新重新获取列表</span>
+      </div>
+    `
+    return
+  }
+
+  elements.sourceList.innerHTML = `
+    <div class="source-grid">
+      ${activeSources.map(sourceCardTemplate).join("")}
+    </div>
+  `
+
+  for (const card of elements.sourceList.querySelectorAll("[data-source-id]")) {
+    card.addEventListener("click", () => selectSource(card.dataset.sourceId))
+  }
+}
+
+function sourceCardTemplate(source) {
+  const selected = state.selected?.id === source.id
+  const thumbnail = previewSrc(source)
+    ? `<img src="${escapeAttribute(previewSrc(source))}" alt="" loading="lazy" />`
+    : `<span class="thumbnail-placeholder"><span>${source.kind === "display" ? "Screen" : "Window"}</span></span>`
+  const filteredReason = source.filteredReason
+    ? `<em>${escapeHtml(source.filteredReason)}</em>`
+    : ""
+
+  return `
+    <button
+      type="button"
+      class="source-card${selected ? " selected" : ""}"
+      data-source-id="${escapeAttribute(source.id)}"
+    >
+      <span class="thumbnail">${thumbnail}</span>
+      <span class="source-meta">
+        <strong title="${escapeAttribute(source.name)}">${escapeHtml(source.name)}</strong>
+        <span>${escapeHtml(sourceSubtitle(source))}</span>
+        ${filteredReason}
+      </span>
+      <span class="selected-mark" aria-hidden="true"></span>
+    </button>
+  `
+}
+
+function renderPreview() {
+  elements.selectedTitle.textContent = state.selected ? state.selected.name : "未选择共享源"
+  elements.sessionStatus.textContent = state.session ? state.session.status : "idle"
+  elements.previewIdle.hidden = Boolean(state.session)
+  elements.previewTitle.textContent = state.selected ? state.selected.name : "请选择左侧来源"
+  elements.previewSubtitle.textContent = state.selected
+    ? sourceSubtitle(state.selected)
+    : "选择后点击开始共享"
+}
+
+function renderStats() {
+  elements.captured.textContent = `Captured ${state.stats?.framesCaptured ?? 0}`
+  elements.published.textContent = `Published ${state.stats?.framesPublished ?? 0}`
+  elements.dropped.textContent = `Dropped ${state.stats?.framesDropped ?? 0}`
+  elements.streaming.textContent = state.stats?.started ? "Streaming" : "Stopped"
+}
+
+function displays() {
+  return state.sources.filter((source) => source.kind === "display")
+}
+
+function windows() {
+  return state.sources.filter((source) => source.kind === "window")
+}
+
+function previewSrc(source) {
+  return source.thumbnailBase64 ? `data:image/png;base64,${source.thumbnailBase64}` : null
+}
+
+function sourceSubtitle(source) {
+  const size = `${source.width} x ${source.height}`
+  if (source.kind === "window") return `${source.appName ?? "Application"} · ${size}`
+  return size
+}
+
+function scaledCaptureSize(source, maxWidth) {
+  const scale = Math.min(1, maxWidth / Math.max(source.width, 1))
+  return {
+    width: Math.max(1, Math.round(source.width * scale)),
+    height: Math.max(1, Math.round(source.height * scale)),
+  }
+}
+
+function errorMessage(err) {
+  if (err && typeof err === "object" && "message" in err) return err.message
+  return typeof err === "string" ? err : JSON.stringify(err)
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;")
+}
+
+function escapeAttribute(value) {
+  return escapeHtml(value)
+}

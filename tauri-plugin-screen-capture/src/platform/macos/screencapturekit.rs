@@ -8,7 +8,7 @@ use crate::{
 #[cfg(feature = "macos-screencapturekit")]
 mod real {
     use std::sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     };
 
@@ -20,12 +20,18 @@ mod real {
             PixelFormat as ScPixelFormat, SCContentFilter, SCShareableContent, SCStream,
             SCStreamConfiguration, SCStreamOutputType,
         },
+        screenshot_manager::SCScreenshotManager,
         stream::delegate_trait::StreamCallbacks,
     };
+    use tokio::{runtime::Handle, sync::Notify, task::JoinHandle};
 
     use super::*;
     use crate::models::{CaptureSourceKind, PixelFormat};
-    use crate::sources::{filter_sources, SourceFilterOptions};
+    use crate::pipeline::frame::VideoFrame;
+    use crate::sources::{filter_sources, thumbnails::encode_png_base64, SourceFilterOptions};
+
+    const THUMBNAIL_MAX_WIDTH: u32 = 320;
+    const THUMBNAIL_MAX_HEIGHT: u32 = 180;
 
     pub async fn list_sources(options: ListSourcesOptions) -> Result<Vec<CaptureSource>> {
         let content = shareable_content()?;
@@ -94,7 +100,7 @@ mod real {
             }));
         }
 
-        let sources = filter_sources(
+        let mut sources = filter_sources(
             sources,
             SourceFilterOptions {
                 current_pid: Some(std::process::id()),
@@ -103,6 +109,9 @@ mod real {
                 debug_raw_sources: options.debug_raw_sources,
             },
         );
+        if options.include_thumbnails {
+            attach_thumbnails(&content, &mut sources);
+        }
         eprintln!(
             "[screen-capture] ScreenCaptureKit sources displays={} windows={} filtered={}",
             display_count,
@@ -110,6 +119,37 @@ mod real {
             sources.len()
         );
         Ok(sources)
+    }
+
+    fn attach_thumbnails(content: &SCShareableContent, sources: &mut [CaptureSource]) {
+        for source in sources {
+            source.thumbnail_base64 = capture_thumbnail(content, source);
+        }
+    }
+
+    fn capture_thumbnail(content: &SCShareableContent, source: &CaptureSource) -> Option<String> {
+        let (width, height) = thumbnail_size(source.width, source.height)?;
+        let filter = content_filter_for_source(content, source).ok()?;
+        let config = SCStreamConfiguration::new()
+            .with_width(width)
+            .with_height(height)
+            .with_shows_cursor(false);
+        let image = SCScreenshotManager::capture_image(&filter, &config).ok()?;
+        let rgba = image.rgba_data().ok()?;
+        encode_png_base64(&rgba, image.width() as u32, image.height() as u32)
+    }
+
+    fn thumbnail_size(width: u32, height: u32) -> Option<(u32, u32)> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+
+        let scale = (f64::from(THUMBNAIL_MAX_WIDTH) / f64::from(width))
+            .min(f64::from(THUMBNAIL_MAX_HEIGHT) / f64::from(height))
+            .min(1.0);
+        let thumbnail_width = (f64::from(width) * scale).round().max(1.0) as u32;
+        let thumbnail_height = (f64::from(height) * scale).round().max(1.0) as u32;
+        Some((thumbnail_width, thumbnail_height))
     }
 
     pub async fn start_capture(
@@ -143,7 +183,7 @@ mod real {
                 true,
             )
         })?;
-        let consumer: Arc<dyn FrameConsumer> = Arc::from(consumer);
+        let dispatcher = LatestFrameDispatcher::new(Arc::from(consumer), runtime_handle);
         let delegate = StreamCallbacks::new()
             .on_error(|error| {
                 tracing::error!(?error, "ScreenCaptureKit stream error");
@@ -157,9 +197,12 @@ mod real {
             });
         let mut stream = SCStream::new_with_delegate(&filter, &config, delegate);
         let sample_count = Arc::new(AtomicU64::new(0));
+        let conversion_skip_count = Arc::new(AtomicU64::new(0));
         let output_handler_id = stream.add_output_handler(
             {
                 let sample_count = Arc::clone(&sample_count);
+                let conversion_skip_count = Arc::clone(&conversion_skip_count);
+                let dispatcher = dispatcher.handle.clone();
                 move |sample: CMSampleBuffer, output_type: SCStreamOutputType| {
                     if output_type != SCStreamOutputType::Screen {
                         return;
@@ -170,21 +213,26 @@ mod real {
                             "[screen-capture] ScreenCaptureKit received sample count={count}"
                         );
                     }
-                    let Some(frame) = video_frame_from_sample(sample) else {
-                        eprintln!(
-                        "[screen-capture] ScreenCaptureKit dropped sample before frame conversion"
-                    );
-                        return;
-                    };
-                    let consumer = Arc::clone(&consumer);
-                    runtime_handle.spawn(async move {
-                        if let Err(error) = consumer.push_frame(frame).await {
-                            tracing::warn!(?error, "failed to publish ScreenCaptureKit frame");
-                            eprintln!(
-                            "[screen-capture] failed to publish ScreenCaptureKit frame: {error:?}"
-                        );
+                    match video_frame_from_sample(sample) {
+                        FrameConversion::Frame(frame) => {
+                            if dispatcher.push(frame) {
+                                let replaced = dispatcher.replaced_count();
+                                if replaced == 1 || replaced % 30 == 0 {
+                                    eprintln!(
+                                        "[screen-capture] ScreenCaptureKit replaced queued frame count={replaced}"
+                                    );
+                                }
+                            }
                         }
-                    });
+                        FrameConversion::Skipped(reason) => {
+                            let skipped = conversion_skip_count.fetch_add(1, Ordering::Relaxed) + 1;
+                            if should_log_conversion_skip(reason, skipped) {
+                                eprintln!(
+                                    "[screen-capture] ScreenCaptureKit skipped sample before frame conversion reason={reason:?} count={skipped}"
+                                );
+                            }
+                        }
+                    }
                 }
             },
             SCStreamOutputType::Screen,
@@ -204,11 +252,17 @@ mod real {
 
         Ok(Box::new(ScreenCaptureKitRunningCapture {
             stream: Mutex::new(stream),
+            worker: dispatcher.worker,
+            worker_stopped: dispatcher.handle.stopped,
+            worker_notify: dispatcher.handle.notify,
         }))
     }
 
     struct ScreenCaptureKitRunningCapture {
         stream: Mutex<SCStream>,
+        worker: JoinHandle<()>,
+        worker_stopped: Arc<AtomicBool>,
+        worker_notify: Arc<Notify>,
     }
 
     #[async_trait]
@@ -230,12 +284,118 @@ mod real {
         }
 
         async fn stop(&self) -> Result<()> {
+            self.stop_worker();
             self.stream
                 .lock()
                 .map_err(|_| internal_error("ScreenCaptureKit stream lock was poisoned"))?
                 .stop_capture()
                 .map_err(|err| sck_error("failed to stop ScreenCaptureKit stream", err))
         }
+    }
+
+    impl ScreenCaptureKitRunningCapture {
+        fn stop_worker(&self) {
+            self.worker_stopped.store(true, Ordering::Release);
+            self.worker_notify.notify_waiters();
+            self.worker.abort();
+        }
+    }
+
+    impl Drop for ScreenCaptureKitRunningCapture {
+        fn drop(&mut self) {
+            self.worker_stopped.store(true, Ordering::Release);
+            self.worker_notify.notify_waiters();
+            self.worker.abort();
+        }
+    }
+
+    struct LatestFrameDispatcher {
+        handle: LatestFrameDispatcherHandle,
+        worker: JoinHandle<()>,
+    }
+
+    #[derive(Clone)]
+    struct LatestFrameDispatcherHandle {
+        pending: Arc<Mutex<Option<VideoFrame>>>,
+        notify: Arc<Notify>,
+        stopped: Arc<AtomicBool>,
+        replaced: Arc<AtomicU64>,
+    }
+
+    impl LatestFrameDispatcher {
+        fn new(consumer: Arc<dyn FrameConsumer>, runtime_handle: Handle) -> Self {
+            let pending = Arc::new(Mutex::new(None));
+            let notify = Arc::new(Notify::new());
+            let stopped = Arc::new(AtomicBool::new(false));
+            let replaced = Arc::new(AtomicU64::new(0));
+            let worker = runtime_handle_spawn_latest_worker(
+                runtime_handle,
+                Arc::clone(&pending),
+                Arc::clone(&notify),
+                Arc::clone(&stopped),
+                consumer,
+            );
+
+            Self {
+                handle: LatestFrameDispatcherHandle {
+                    pending,
+                    notify,
+                    stopped,
+                    replaced,
+                },
+                worker,
+            }
+        }
+    }
+
+    impl LatestFrameDispatcherHandle {
+        fn push(&self, frame: VideoFrame) -> bool {
+            if self.stopped.load(Ordering::Acquire) {
+                return false;
+            }
+
+            let replaced = self
+                .pending
+                .lock()
+                .map(|mut pending| pending.replace(frame).is_some())
+                .unwrap_or(false);
+            if replaced {
+                self.replaced.fetch_add(1, Ordering::Relaxed);
+            }
+            self.notify.notify_one();
+            replaced
+        }
+
+        fn replaced_count(&self) -> u64 {
+            self.replaced.load(Ordering::Relaxed)
+        }
+    }
+
+    fn runtime_handle_spawn_latest_worker(
+        runtime_handle: Handle,
+        pending: Arc<Mutex<Option<VideoFrame>>>,
+        notify: Arc<Notify>,
+        stopped: Arc<AtomicBool>,
+        consumer: Arc<dyn FrameConsumer>,
+    ) -> JoinHandle<()> {
+        runtime_handle.spawn(async move {
+            loop {
+                notify.notified().await;
+
+                while let Some(frame) = pending.lock().ok().and_then(|mut pending| pending.take()) {
+                    if let Err(error) = consumer.push_frame(frame).await {
+                        tracing::warn!(?error, "failed to publish ScreenCaptureKit frame");
+                        eprintln!(
+                            "[screen-capture] failed to publish ScreenCaptureKit frame: {error:?}"
+                        );
+                    }
+                }
+
+                if stopped.load(Ordering::Acquire) {
+                    break;
+                }
+            }
+        })
     }
 
     fn shareable_content() -> Result<SCShareableContent> {
@@ -275,43 +435,88 @@ mod real {
         }
     }
 
-    fn video_frame_from_sample(
-        sample: CMSampleBuffer,
-    ) -> Option<crate::pipeline::frame::VideoFrame> {
+    fn content_filter_for_source(
+        content: &SCShareableContent,
+        source: &CaptureSource,
+    ) -> Result<SCContentFilter> {
+        match source.kind {
+            CaptureSourceKind::Display => {
+                let display_id = parse_source_id(&source.id, "display")?;
+                let display = content
+                    .displays()
+                    .into_iter()
+                    .find(|display| display.display_id() == display_id)
+                    .ok_or_else(|| source_not_found(&source.id))?;
+                Ok(SCContentFilter::create()
+                    .with_display(&display)
+                    .with_excluding_windows(&[])
+                    .build())
+            }
+            CaptureSourceKind::Window => {
+                let window_id = parse_source_id(&source.id, "window")?;
+                let window = content
+                    .windows()
+                    .into_iter()
+                    .find(|window| window.window_id() == window_id)
+                    .ok_or_else(|| source_not_found(&source.id))?;
+                Ok(SCContentFilter::create().with_window(&window).build())
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum FrameSkipReason {
+        NoImageContent(Option<SCFrameStatus>),
+        MissingImageBuffer(Option<SCFrameStatus>),
+        PixelBufferLockFailed(Option<SCFrameStatus>),
+        InvalidPixelBufferLayout,
+    }
+
+    enum FrameConversion {
+        Frame(VideoFrame),
+        Skipped(FrameSkipReason),
+    }
+
+    fn video_frame_from_sample(sample: CMSampleBuffer) -> FrameConversion {
         let frame_status = sample.frame_status();
-        if matches!(
-            frame_status,
-            Some(SCFrameStatus::Blank | SCFrameStatus::Suspended | SCFrameStatus::Stopped)
-        ) {
-            eprintln!(
-                "[screen-capture] ScreenCaptureKit sample has no image content status={frame_status:?}"
-            );
-            return None;
+        if matches!(frame_status, Some(status) if !status.has_content()) {
+            return FrameConversion::Skipped(FrameSkipReason::NoImageContent(frame_status));
         }
 
         let Some(buffer) = sample.image_buffer() else {
-            eprintln!(
-                "[screen-capture] ScreenCaptureKit sample missing image buffer status={frame_status:?}"
-            );
-            return None;
+            return FrameConversion::Skipped(FrameSkipReason::MissingImageBuffer(frame_status));
         };
         let Ok(guard) = buffer.lock(CVPixelBufferLockFlags::READ_ONLY) else {
-            eprintln!(
-                "[screen-capture] failed to lock ScreenCaptureKit pixel buffer status={frame_status:?}"
-            );
-            return None;
+            return FrameConversion::Skipped(FrameSkipReason::PixelBufferLockFailed(frame_status));
         };
         let width = guard.width();
         let height = guard.height();
         let bytes_per_row = guard.bytes_per_row();
-        let data = tightly_packed_bgra(guard.as_slice(), width, height, bytes_per_row)?;
-        Some(crate::pipeline::frame::VideoFrame {
+        let Some(data) = tightly_packed_bgra(guard.as_slice(), width, height, bytes_per_row) else {
+            return FrameConversion::Skipped(FrameSkipReason::InvalidPixelBufferLayout);
+        };
+
+        FrameConversion::Frame(VideoFrame {
             width: positive_usize_u32(width),
             height: positive_usize_u32(height),
             pixel_format: PixelFormat::Bgra,
             timestamp_ns: sample.display_time().unwrap_or_default(),
             data,
         })
+    }
+
+    fn should_log_conversion_skip(reason: FrameSkipReason, count: u64) -> bool {
+        match reason {
+            FrameSkipReason::NoImageContent(Some(SCFrameStatus::Idle)) => {
+                count == 1 || count % 300 == 0
+            }
+            FrameSkipReason::MissingImageBuffer(None) => count == 1 || count % 300 == 0,
+            FrameSkipReason::PixelBufferLockFailed(status) => {
+                let _ = status;
+                count == 1 || count % 30 == 0
+            }
+            _ => count == 1 || count % 30 == 0,
+        }
     }
 
     fn tightly_packed_bgra(

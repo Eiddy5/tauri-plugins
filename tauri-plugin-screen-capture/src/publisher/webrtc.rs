@@ -2,20 +2,19 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 
 use crate::{
+    error::Error,
+    models::CaptureErrorCode,
     models::{CaptureStats, StartCaptureOptions},
     pipeline::frame::VideoFrame,
     publisher::CapturePublisher,
     webrtc::{
-        h264_encoder::H264Encoder,
-        signaling::WebRtcSignalingState,
-        track::{WebRtcFrameSender, WebRtcH264SampleSender},
+        h264_encoder::H264Encoder, signaling::WebRtcSignalingState, track::WebRtcH264SampleSender,
     },
     Result,
 };
 
-pub struct WebRtcLoopbackPublisher {
+pub struct WebRtcPublisher {
     signaling: std::sync::Arc<WebRtcSignalingState>,
-    frame_sender: WebRtcFrameSender,
     h264_sender: WebRtcH264SampleSender,
     encoder: Mutex<Option<H264Encoder>>,
     state: Mutex<WebRtcPublisherState>,
@@ -36,14 +35,12 @@ enum WebRtcPublisherLifecycle {
     Stopped,
 }
 
-impl WebRtcLoopbackPublisher {
+impl WebRtcPublisher {
     pub fn new(signaling: WebRtcSignalingState) -> Self {
         let signaling = std::sync::Arc::new(signaling);
-        let frame_sender = WebRtcFrameSender::new(signaling.frame_channel());
         let h264_sender = WebRtcH264SampleSender::new(signaling.video_track());
         Self {
             signaling,
-            frame_sender,
             h264_sender,
             encoder: Mutex::new(None),
             state: Mutex::new(WebRtcPublisherState::default()),
@@ -56,24 +53,12 @@ impl WebRtcLoopbackPublisher {
 }
 
 #[async_trait]
-impl CapturePublisher for WebRtcLoopbackPublisher {
+impl CapturePublisher for WebRtcPublisher {
     async fn start(&self, options: StartCaptureOptions) -> Result<()> {
-        #[cfg(target_os = "macos")]
-        {
-            let width = options.width.unwrap_or(1280);
-            let height = options.height.unwrap_or(720);
-            let fps = options.effective_fps();
-            match H264Encoder::new(width, height, fps) {
-                Ok(encoder) => {
-                    *self.encoder.lock().await = Some(encoder);
-                }
-                Err(error) => {
-                    eprintln!(
-                        "[screen-capture] failed to start H264 preview encoder, falling back to diagnostics only: {error:?}"
-                    );
-                }
-            }
-        }
+        let width = options.width.unwrap_or(1280);
+        let height = options.height.unwrap_or(720);
+        let fps = options.effective_fps();
+        *self.encoder.lock().await = Some(H264Encoder::new(width, height, fps)?);
 
         let mut state = self.state.lock().await;
         state.lifecycle = WebRtcPublisherLifecycle::Started;
@@ -93,25 +78,23 @@ impl CapturePublisher for WebRtcLoopbackPublisher {
             }
         }
 
-        let sent = {
+        {
             let mut encoder = self.encoder.lock().await;
-            if let Some(encoder) = encoder.as_mut() {
-                if let Some(sample) = encoder.encode_frame(&frame)? {
-                    self.h264_sender.send_sample(sample).await?;
-                    true
-                } else {
-                    false
-                }
+            let encoder = encoder.as_mut().ok_or_else(|| {
+                Error::new(
+                    CaptureErrorCode::WebRtcTrackFailed,
+                    "H264 encoder is not initialized",
+                    true,
+                )
+            })?;
+            if let Some(sample) = encoder.encode_frame(&frame)? {
+                self.h264_sender.send_sample(sample).await?;
+                let mut state = self.state.lock().await;
+                state.stats.frames_published += 1;
             } else {
-                self.frame_sender.send_frame(frame).await?
+                let mut state = self.state.lock().await;
+                state.stats.frames_dropped += 1;
             }
-        };
-        let mut state = self.state.lock().await;
-        let stats = &mut state.stats;
-        if sent {
-            stats.frames_published += 1;
-        } else {
-            stats.frames_dropped += 1;
         }
         Ok(())
     }

@@ -11,12 +11,12 @@ use crate::{
     capture::{CaptureBackend, RunningCapture},
     error::Error,
     models::{
-        Capabilities, CaptureErrorCode, CapturePublisherKind, CaptureSession, CaptureSource,
-        CaptureStats, CaptureStatus, ListSourcesOptions, PermissionStatus, StartCaptureOptions,
-        WebRtcAnswer, WebRtcIceCandidate, WebRtcOffer,
+        Capabilities, CaptureErrorCode, CaptureSession, CaptureSource, CaptureStats, CaptureStatus,
+        ListSourcesOptions, PermissionStatus, StartCaptureOptions, WebRtcAnswer,
+        WebRtcIceCandidate, WebRtcOffer,
     },
     pipeline::CapturePipeline,
-    publisher::{AgoraPublisher, CapturePublisher, NullPublisher, WebRtcLoopbackPublisher},
+    publisher::{CapturePublisher, WebRtcPublisher},
     webrtc::signaling::WebRtcSignalingState,
     Result,
 };
@@ -26,7 +26,7 @@ struct SessionRecord {
     publisher: Arc<dyn CapturePublisher>,
     pipeline: Arc<CapturePipeline>,
     running_capture: Arc<dyn RunningCapture>,
-    webrtc_signaling: Option<Arc<WebRtcSignalingState>>,
+    webrtc_signaling: Arc<WebRtcSignalingState>,
 }
 
 pub struct ScreenCaptureState {
@@ -60,8 +60,7 @@ impl ScreenCaptureState {
             supports_window_capture: cfg!(target_os = "macos"),
             supports_thumbnails: cfg!(target_os = "macos"),
             supports_cursor_capture: cfg!(target_os = "macos"),
-            supports_webrtc_loopback: true,
-            supports_agora: false,
+            supports_webrtc: true,
         }
     }
 
@@ -78,17 +77,10 @@ impl ScreenCaptureState {
     }
 
     pub async fn start_capture(&self, options: StartCaptureOptions) -> Result<CaptureSession> {
-        let publisher_kind = options.effective_publisher();
-        let (publisher, webrtc_signaling): (Arc<dyn CapturePublisher>, _) = match publisher_kind {
-            CapturePublisherKind::Null => (Arc::new(NullPublisher::default()), None),
-            CapturePublisherKind::WebRtcLoopback => {
-                let signaling = WebRtcSignalingState::new().await?;
-                let publisher = WebRtcLoopbackPublisher::new(signaling);
-                let signaling = publisher.signaling();
-                (Arc::new(publisher), Some(signaling))
-            }
-            CapturePublisherKind::Agora => (Arc::new(AgoraPublisher), None),
-        };
+        let signaling = WebRtcSignalingState::new().await?;
+        let publisher = WebRtcPublisher::new(signaling);
+        let webrtc_signaling = publisher.signaling();
+        let publisher: Arc<dyn CapturePublisher> = Arc::new(publisher);
 
         publisher.start(options.clone()).await?;
         let pipeline = Arc::new(CapturePipeline::new(Arc::clone(&publisher)));
@@ -110,7 +102,6 @@ impl ScreenCaptureState {
             source_id: options.source_id,
             source_kind: options.source_kind,
             status: CaptureStatus::Publishing,
-            publisher: publisher_kind,
             started_at_ms: now_ms(),
             last_error: None,
         };
@@ -251,20 +242,7 @@ impl ScreenCaptureState {
     async fn webrtc_signaling(&self, session_id: &str) -> Result<Arc<WebRtcSignalingState>> {
         let sessions = self.sessions.lock().await;
         let record = sessions.get(session_id).ok_or_else(invalid_session_error)?;
-        if record.session.publisher != CapturePublisherKind::WebRtcLoopback {
-            return Err(Error::new(
-                CaptureErrorCode::PublisherUnsupported,
-                "capture session is not using WebRTC loopback publisher",
-                false,
-            ));
-        }
-        record.webrtc_signaling.as_ref().cloned().ok_or_else(|| {
-            Error::new(
-                CaptureErrorCode::PublisherUnsupported,
-                "capture session does not expose WebRTC signaling",
-                false,
-            )
-        })
+        Ok(Arc::clone(&record.webrtc_signaling))
     }
 }
 
