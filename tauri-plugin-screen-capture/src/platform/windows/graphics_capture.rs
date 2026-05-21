@@ -8,7 +8,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::task::JoinHandle;
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, GetMonitorInfoW,
     ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
@@ -42,6 +42,9 @@ use crate::{
 
 const THUMBNAIL_TIMEOUT: Duration = Duration::from_millis(600);
 const THUMBNAIL_MAX_WIDTH: u32 = 420;
+const WINDOW_THUMBNAIL_LIMIT: usize = 12;
+
+type SharedFrameSlot = Arc<Mutex<Option<Result<VideoFrame>>>>;
 
 pub fn list_sources(options: ListSourcesOptions) -> Result<Vec<CaptureSource>> {
     let mut sources = Vec::new();
@@ -71,42 +74,29 @@ pub fn start_capture(
 ) -> Result<Box<dyn RunningCapture>> {
     let fps = options.effective_fps();
     let paused = Arc::new(AtomicBool::new(false));
-    let (frame_tx, mut frame_rx) = mpsc::unbounded_channel();
-    let control = start_windows_capture(&options, Arc::clone(&paused), frame_tx)?;
+    let frame_slot = Arc::new(Mutex::new(None));
+    let control = start_windows_capture(&options, Arc::clone(&paused), Arc::clone(&frame_slot))?;
     let frame_interval = Duration::from_secs_f64(1.0 / f64::from(fps));
 
     let task = tokio::spawn(async move {
         let mut tick = tokio::time::interval(frame_interval);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut latest_frame = None;
 
         loop {
-            tokio::select! {
-                received = frame_rx.recv() => {
-                    let Some(mut frame) = received else {
-                        break;
-                    };
-                    while let Ok(newer_frame) = frame_rx.try_recv() {
-                        frame = newer_frame;
-                    }
-
-                    match frame {
-                        Ok(frame) => latest_frame = Some(frame),
-                        Err(error) => {
-                            eprintln!("[screen-capture] Windows frame capture failed: {error:?}");
-                        }
-                    }
-                }
-                _ = tick.tick() => {
-                    let Some(frame) = latest_frame.as_ref() else {
-                        continue;
-                    };
-                    let mut frame = frame.clone();
+            tick.tick().await;
+            let next_frame = frame_slot.lock().ok().and_then(|mut slot| slot.take());
+            match next_frame {
+                Some(Ok(mut frame)) => {
                     frame.timestamp_ns = now_ns();
                     if let Err(error) = consumer.push_frame(frame).await {
                         eprintln!("[screen-capture] Windows frame publish failed: {error:?}");
                     }
                 }
+                Some(Err(error)) => {
+                    eprintln!("[screen-capture] Windows frame capture failed: {error:?}");
+                    break;
+                }
+                None => {}
             }
         }
     });
@@ -175,13 +165,13 @@ impl Drop for WindowsRunningCapture {
 }
 
 struct WindowsCaptureHandler {
-    sender: mpsc::UnboundedSender<Result<VideoFrame>>,
+    frame_slot: SharedFrameSlot,
     paused: Arc<AtomicBool>,
     output_size: Option<(u32, u32)>,
 }
 
 struct WindowsCaptureFlags {
-    sender: mpsc::UnboundedSender<Result<VideoFrame>>,
+    frame_slot: SharedFrameSlot,
     paused: Arc<AtomicBool>,
     output_size: Option<(u32, u32)>,
 }
@@ -192,7 +182,7 @@ impl GraphicsCaptureApiHandler for WindowsCaptureHandler {
 
     fn new(ctx: Context<Self::Flags>) -> std::result::Result<Self, Self::Error> {
         Ok(Self {
-            sender: ctx.flags.sender,
+            frame_slot: ctx.flags.frame_slot,
             paused: ctx.flags.paused,
             output_size: ctx.flags.output_size,
         })
@@ -207,17 +197,31 @@ impl GraphicsCaptureApiHandler for WindowsCaptureHandler {
             return Ok(());
         }
 
+        if self
+            .frame_slot
+            .lock()
+            .is_ok_and(|slot| slot.as_ref().map(|frame| frame.is_ok()).unwrap_or(false))
+        {
+            return Ok(());
+        }
+
         let video_frame = frame_to_video_frame(frame, self.output_size);
-        let _ = self.sender.send(video_frame);
+        if let Ok(mut slot) = self.frame_slot.lock() {
+            if slot.is_none() {
+                *slot = Some(video_frame);
+            }
+        }
         Ok(())
     }
 
     fn on_closed(&mut self) -> std::result::Result<(), Self::Error> {
-        let _ = self.sender.send(Err(Error::new(
-            CaptureErrorCode::SourceUnavailable,
-            "Windows capture source was closed",
-            true,
-        )));
+        if let Ok(mut slot) = self.frame_slot.lock() {
+            *slot = Some(Err(Error::new(
+                CaptureErrorCode::SourceUnavailable,
+                "Windows capture source was closed",
+                true,
+            )));
+        }
         Ok(())
     }
 }
@@ -255,10 +259,10 @@ impl GraphicsCaptureApiHandler for ThumbnailCaptureHandler {
 fn start_windows_capture(
     options: &StartCaptureOptions,
     paused: Arc<AtomicBool>,
-    sender: mpsc::UnboundedSender<Result<VideoFrame>>,
+    frame_slot: SharedFrameSlot,
 ) -> Result<WindowsCaptureControl> {
     let flags = WindowsCaptureFlags {
-        sender,
+        frame_slot,
         paused,
         output_size: requested_output_size(options),
     };
@@ -605,7 +609,10 @@ fn enumerate_windows(include_thumbnails: bool) -> Result<Vec<CaptureSource>> {
     let windows = Window::enumerate().map_err(source_error)?;
     Ok(windows
         .into_iter()
-        .filter_map(|window| window_source(window, include_thumbnails))
+        .enumerate()
+        .filter_map(|(index, window)| {
+            window_source(window, include_thumbnails && index < WINDOW_THUMBNAIL_LIMIT)
+        })
         .collect())
 }
 
