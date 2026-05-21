@@ -1,6 +1,9 @@
 import { defineConfig } from "vite";
+import { fileURLToPath } from "node:url";
 
 const host = process.env.TAURI_DEV_HOST;
+const appRoot = fileURLToPath(new URL(".", import.meta.url));
+const pluginRoot = fileURLToPath(new URL("../..", import.meta.url));
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -17,5 +20,18 @@ export default defineConfig({
       host,
       port: 1421
     } : undefined,
+    fs: {
+      allow: [appRoot, pluginRoot],
+    },
+  },
+  resolve: {
+    alias: {
+      "@tauri-apps/api": fileURLToPath(
+        new URL("./node_modules/@tauri-apps/api", import.meta.url)
+      ),
+      "tauri-plugin-screen-capture-api": fileURLToPath(
+        new URL("../../guest-js/index.ts", import.meta.url)
+      ),
+    },
   },
 })

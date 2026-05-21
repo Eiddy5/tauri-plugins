@@ -149,6 +149,10 @@ mod macos {
             let _ = unsafe { VTCompressionSessionCompleteFrames(self.session, CMTime::INVALID) };
             Ok(self.receiver.try_iter().last())
         }
+
+        pub fn force_keyframe(&mut self) -> Result<()> {
+            Ok(())
+        }
     }
 
     impl Drop for H264Encoder {
@@ -458,17 +462,22 @@ mod macos {
 #[cfg(target_os = "macos")]
 pub use macos::H264Encoder;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+#[allow(dead_code)]
+mod windows {
+    include!("h264_encoder_windows.rs");
+}
+
+#[cfg(target_os = "windows")]
+pub use windows::H264Encoder;
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub struct H264Encoder;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 impl H264Encoder {
     pub fn new(_width: u32, _height: u32, _fps: u32) -> crate::Result<Self> {
-        Err(crate::error::Error::new(
-            crate::models::CaptureErrorCode::WebRtcTrackFailed,
-            "H264 screen capture preview is only implemented on macOS",
-            true,
-        ))
+        Ok(Self)
     }
 
     pub fn encode_frame(
@@ -476,5 +485,9 @@ impl H264Encoder {
         _frame: &crate::pipeline::frame::VideoFrame,
     ) -> crate::Result<Option<crate::webrtc::track::EncodedVideoSample>> {
         Ok(None)
+    }
+
+    pub fn force_keyframe(&mut self) -> crate::Result<()> {
+        Ok(())
     }
 }

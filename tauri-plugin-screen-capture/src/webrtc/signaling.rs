@@ -1,14 +1,17 @@
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
+use interceptor::registry::Registry;
+use tokio::sync::watch;
 use webrtc::{
     api::{
+        interceptor_registry::register_default_interceptors,
         media_engine::{MediaEngine, MIME_TYPE_H264},
         APIBuilder,
     },
     ice_transport::ice_candidate::RTCIceCandidateInit,
     peer_connection::{
-        configuration::RTCConfiguration, sdp::session_description::RTCSessionDescription,
-        RTCPeerConnection,
+        configuration::RTCConfiguration, peer_connection_state::RTCPeerConnectionState,
+        sdp::session_description::RTCSessionDescription, RTCPeerConnection,
     },
     rtp_transceiver::rtp_codec::RTCRtpCodecCapability,
     track::track_local::{track_local_static_sample::TrackLocalStaticSample, TrackLocal},
@@ -23,6 +26,7 @@ use crate::{
 pub struct WebRtcSignalingState {
     peer_connection: Arc<RTCPeerConnection>,
     video_track: Arc<TrackLocalStaticSample>,
+    connected_rx: watch::Receiver<bool>,
 }
 
 impl WebRtcSignalingState {
@@ -31,7 +35,12 @@ impl WebRtcSignalingState {
         media_engine
             .register_default_codecs()
             .map_err(|err| webrtc_error("failed to register WebRTC codecs", err))?;
-        let api = APIBuilder::new().with_media_engine(media_engine).build();
+        let registry = register_default_interceptors(Registry::new(), &mut media_engine)
+            .map_err(|err| webrtc_error("failed to register WebRTC interceptors", err))?;
+        let api = APIBuilder::new()
+            .with_media_engine(media_engine)
+            .with_interceptor_registry(registry)
+            .build();
         let peer_connection = Arc::new(
             api.new_peer_connection(RTCConfiguration::default())
                 .await
@@ -50,13 +59,33 @@ impl WebRtcSignalingState {
             "video".to_string(),
             "capture".to_string(),
         ));
-        peer_connection
+        let rtp_sender = peer_connection
             .add_track(Arc::clone(&video_track) as Arc<dyn TrackLocal + Send + Sync>)
             .await
             .map_err(|err| webrtc_error("failed to add WebRTC video track", err))?;
+        tokio::spawn(async move {
+            while let Ok((packets, _)) = rtp_sender.read_rtcp().await {
+                for packet in packets {
+                    eprintln!("[screen-capture] WebRTC RTCP packet received: {packet:?}");
+                }
+            }
+        });
+
+        let (connected_tx, connected_rx) = watch::channel(false);
+        peer_connection.on_peer_connection_state_change(Box::new(move |state| {
+            let connected_tx = connected_tx.clone();
+            Box::pin(async move {
+                eprintln!("[screen-capture] WebRTC peer connection state: {state}");
+                if state == RTCPeerConnectionState::Connected {
+                    let _ = connected_tx.send(true);
+                }
+            }) as Pin<Box<dyn Future<Output = ()> + Send>>
+        }));
+
         Ok(Self {
             peer_connection,
             video_track,
+            connected_rx,
         })
     }
 
@@ -101,6 +130,26 @@ impl WebRtcSignalingState {
             .set_remote_description(description)
             .await
             .map_err(|err| webrtc_error("failed to set remote answer", err))
+    }
+
+    pub async fn wait_connected(&self, timeout: Duration) -> bool {
+        if *self.connected_rx.borrow() {
+            return true;
+        }
+
+        let mut connected_rx = self.connected_rx.clone();
+        tokio::time::timeout(timeout, async move {
+            loop {
+                if connected_rx.changed().await.is_err() {
+                    return false;
+                }
+                if *connected_rx.borrow() {
+                    return true;
+                }
+            }
+        })
+        .await
+        .unwrap_or(false)
     }
 
     pub async fn add_ice_candidate(&self, candidate: WebRtcIceCandidate) -> Result<()> {

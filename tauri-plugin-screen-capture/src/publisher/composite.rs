@@ -35,6 +35,13 @@ impl CapturePublisher for CompositePublisher {
         Ok(())
     }
 
+    async fn request_keyframe(&self) -> Result<()> {
+        for publisher in &self.publishers {
+            publisher.request_keyframe().await?;
+        }
+        Ok(())
+    }
+
     async fn pause(&self) -> Result<()> {
         for publisher in &self.publishers {
             publisher.pause().await?;

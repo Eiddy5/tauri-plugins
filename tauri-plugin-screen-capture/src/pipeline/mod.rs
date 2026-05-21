@@ -14,6 +14,7 @@ use crate::{
 pub struct CapturePipeline {
     publisher: Arc<dyn CapturePublisher>,
     stats: Mutex<CaptureStats>,
+    latest_frame: Mutex<Option<VideoFrame>>,
 }
 
 impl CapturePipeline {
@@ -21,11 +22,20 @@ impl CapturePipeline {
         Self {
             publisher,
             stats: Mutex::new(CaptureStats::default()),
+            latest_frame: Mutex::new(None),
         }
     }
 
     pub async fn stats(&self) -> CaptureStats {
         self.stats.lock().await.clone()
+    }
+
+    pub async fn replay_latest_frame(&self) -> Result<()> {
+        let Some(frame) = self.latest_frame.lock().await.clone() else {
+            return Ok(());
+        };
+
+        self.publisher.push_frame(frame).await
     }
 }
 
@@ -43,7 +53,7 @@ impl FrameConsumer for CapturePipeline {
                 );
             }
         }
-
+        *self.latest_frame.lock().await = Some(frame.clone());
         self.publisher.push_frame(frame).await?;
 
         Ok(())

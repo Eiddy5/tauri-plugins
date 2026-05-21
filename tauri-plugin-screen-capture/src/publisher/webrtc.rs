@@ -91,10 +91,23 @@ impl CapturePublisher for WebRtcPublisher {
                 self.h264_sender.send_sample(sample).await?;
                 let mut state = self.state.lock().await;
                 state.stats.frames_published += 1;
+                if state.stats.frames_published == 1 || state.stats.frames_published % 30 == 0 {
+                    eprintln!(
+                        "[screen-capture] WebRTC published frame count={}",
+                        state.stats.frames_published
+                    );
+                }
             } else {
                 let mut state = self.state.lock().await;
                 state.stats.frames_dropped += 1;
             }
+        }
+        Ok(())
+    }
+
+    async fn request_keyframe(&self) -> Result<()> {
+        if let Some(encoder) = self.encoder.lock().await.as_mut() {
+            encoder.force_keyframe()?;
         }
         Ok(())
     }

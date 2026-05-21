@@ -27,7 +27,7 @@ const state = {
 }
 
 const captureMaxWidth = 2560
-const captureFps = 30
+const captureFps = 60
 
 const app = document.querySelector("#app")
 

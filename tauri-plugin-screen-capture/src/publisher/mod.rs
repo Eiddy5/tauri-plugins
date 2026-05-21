@@ -16,6 +16,9 @@ pub use webrtc::WebRtcPublisher;
 pub trait CapturePublisher: Send + Sync {
     async fn start(&self, options: StartCaptureOptions) -> Result<()>;
     async fn push_frame(&self, frame: VideoFrame) -> Result<()>;
+    async fn request_keyframe(&self) -> Result<()> {
+        Ok(())
+    }
     async fn pause(&self) -> Result<()>;
     async fn resume(&self) -> Result<()>;
     async fn stop(&self) -> Result<()>;

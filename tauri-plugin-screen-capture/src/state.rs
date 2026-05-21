@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use tokio::sync::Mutex;
@@ -38,7 +38,9 @@ impl Default for ScreenCaptureState {
     fn default() -> Self {
         #[cfg(target_os = "macos")]
         let backend: Arc<dyn CaptureBackend> = Arc::new(crate::capture::MacOsCaptureBackend);
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        let backend: Arc<dyn CaptureBackend> = Arc::new(crate::capture::WindowsCaptureBackend);
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let backend: Arc<dyn CaptureBackend> = Arc::new(crate::capture::DummyCaptureBackend);
 
         Self::with_backend(backend)
@@ -56,11 +58,11 @@ impl ScreenCaptureState {
     pub fn capabilities(&self) -> Capabilities {
         Capabilities {
             platform: std::env::consts::OS.to_string(),
-            supports_display_capture: cfg!(target_os = "macos"),
-            supports_window_capture: cfg!(target_os = "macos"),
-            supports_thumbnails: cfg!(target_os = "macos"),
-            supports_cursor_capture: cfg!(target_os = "macos"),
-            supports_webrtc: true,
+            supports_display_capture: cfg!(any(target_os = "macos", target_os = "windows")),
+            supports_window_capture: cfg!(any(target_os = "macos", target_os = "windows")),
+            supports_thumbnails: cfg!(any(target_os = "macos", target_os = "windows")),
+            supports_cursor_capture: cfg!(any(target_os = "macos", target_os = "windows")),
+            supports_webrtc: cfg!(any(target_os = "macos", target_os = "windows")),
         }
     }
 
@@ -227,7 +229,23 @@ impl ScreenCaptureState {
 
     pub async fn accept_webrtc_answer(&self, session_id: &str, answer: WebRtcAnswer) -> Result<()> {
         let signaling = self.webrtc_signaling(session_id).await?;
-        signaling.accept_answer(answer).await
+        signaling.accept_answer(answer).await?;
+        let connected = signaling.wait_connected(Duration::from_secs(5)).await;
+        if !connected {
+            eprintln!(
+                "[screen-capture] WebRTC did not reach connected state before keyframe replay"
+            );
+        }
+
+        let (publisher, pipeline) = {
+            let sessions = self.sessions.lock().await;
+            sessions
+                .get(session_id)
+                .map(|record| (Arc::clone(&record.publisher), Arc::clone(&record.pipeline)))
+                .ok_or_else(invalid_session_error)?
+        };
+        publisher.request_keyframe().await?;
+        pipeline.replay_latest_frame().await
     }
 
     pub async fn add_webrtc_ice_candidate(
