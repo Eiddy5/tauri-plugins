@@ -83,9 +83,8 @@ impl ScreenCaptureState {
         let publisher = WebRtcPublisher::new(signaling);
         let webrtc_signaling = publisher.signaling();
         let publisher: Arc<dyn CapturePublisher> = Arc::new(publisher);
-
-        publisher.start(options.clone()).await?;
         let pipeline = Arc::new(CapturePipeline::new(Arc::clone(&publisher)));
+
         let running_capture = match self
             .backend
             .start_capture(options.clone(), Box::new(Arc::clone(&pipeline)))
@@ -98,6 +97,12 @@ impl ScreenCaptureState {
             }
         };
         let running_capture: Arc<dyn RunningCapture> = running_capture.into();
+
+        if let Err(error) = publisher.start(options.clone()).await {
+            let _ = running_capture.stop().await;
+            let _ = publisher.stop().await;
+            return Err(error);
+        }
 
         let session = CaptureSession {
             session_id: Uuid::new_v4().to_string(),
@@ -230,7 +235,7 @@ impl ScreenCaptureState {
     pub async fn accept_webrtc_answer(&self, session_id: &str, answer: WebRtcAnswer) -> Result<()> {
         let signaling = self.webrtc_signaling(session_id).await?;
         signaling.accept_answer(answer).await?;
-        let connected = signaling.wait_connected(Duration::from_secs(5)).await;
+        let connected = signaling.wait_connected(Duration::from_secs(1)).await;
         if !connected {
             eprintln!(
                 "[screen-capture] WebRTC did not reach connected state before keyframe replay"

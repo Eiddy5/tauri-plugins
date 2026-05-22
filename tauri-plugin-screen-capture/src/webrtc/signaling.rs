@@ -1,7 +1,18 @@
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use interceptor::registry::Registry;
 use tokio::sync::watch;
+use webrtc::rtcp::payload_feedbacks::{
+    full_intra_request::FullIntraRequest, picture_loss_indication::PictureLossIndication,
+};
 use webrtc::{
     api::{
         interceptor_registry::register_default_interceptors,
@@ -23,10 +34,19 @@ use crate::{
     Result,
 };
 
+#[cfg(target_os = "windows")]
+const H264_SDP_FMTP_LINE: &str =
+    "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=424034";
+
+#[cfg(not(target_os = "windows"))]
+const H264_SDP_FMTP_LINE: &str =
+    "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f";
+
 pub struct WebRtcSignalingState {
     peer_connection: Arc<RTCPeerConnection>,
     video_track: Arc<TrackLocalStaticSample>,
     connected_rx: watch::Receiver<bool>,
+    keyframe_requests: Arc<AtomicU64>,
 }
 
 impl WebRtcSignalingState {
@@ -51,14 +71,14 @@ impl WebRtcSignalingState {
                 mime_type: MIME_TYPE_H264.to_string(),
                 clock_rate: 90_000,
                 channels: 0,
-                sdp_fmtp_line:
-                    "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
-                        .to_string(),
+                sdp_fmtp_line: H264_SDP_FMTP_LINE.to_string(),
                 rtcp_feedback: vec![],
             },
             "video".to_string(),
             "capture".to_string(),
         ));
+        let keyframe_requests = Arc::new(AtomicU64::new(0));
+        let rtcp_keyframe_requests = Arc::clone(&keyframe_requests);
         let rtp_sender = peer_connection
             .add_track(Arc::clone(&video_track) as Arc<dyn TrackLocal + Send + Sync>)
             .await
@@ -67,6 +87,14 @@ impl WebRtcSignalingState {
             while let Ok((packets, _)) = rtp_sender.read_rtcp().await {
                 for packet in packets {
                     eprintln!("[screen-capture] WebRTC RTCP packet received: {packet:?}");
+                    if packet
+                        .as_any()
+                        .downcast_ref::<PictureLossIndication>()
+                        .is_some()
+                        || packet.as_any().downcast_ref::<FullIntraRequest>().is_some()
+                    {
+                        rtcp_keyframe_requests.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
         });
@@ -86,6 +114,7 @@ impl WebRtcSignalingState {
             peer_connection,
             video_track,
             connected_rx,
+            keyframe_requests,
         })
     }
 
@@ -162,6 +191,14 @@ impl WebRtcSignalingState {
             })
             .await
             .map_err(|err| webrtc_error("failed to add remote ICE candidate", err))
+    }
+
+    pub fn pending_keyframe_requests(&self) -> u64 {
+        self.keyframe_requests.load(Ordering::Relaxed)
+    }
+
+    pub fn request_keyframe(&self) {
+        self.keyframe_requests.fetch_add(1, Ordering::Relaxed);
     }
 
     pub async fn close(&self) -> Result<()> {

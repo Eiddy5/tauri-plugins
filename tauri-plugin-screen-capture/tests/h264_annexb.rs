@@ -25,6 +25,25 @@ fn waits_until_the_next_aud_arrives() {
 }
 
 #[test]
+fn keeps_consecutive_aud_nals_with_their_vcl_frame() {
+    let mut stream = vec![
+        0, 0, 0, 1, 9, 0xf0, 0, 0, 0, 1, 9, 0x10, 0, 0, 0, 1, 7, 1, 2, 3, 0, 0, 0, 1, 8, 4, 5, 6,
+        0, 0, 0, 1, 5, 7, 8, 9, 0, 0, 0, 1, 9, 0xf0, 0, 0, 0, 1, 1, 10, 11, 12,
+    ];
+
+    let access_unit = take_next_aud_access_unit(&mut stream).expect("first access unit");
+
+    assert_eq!(
+        access_unit,
+        vec![
+            0, 0, 0, 1, 9, 0xf0, 0, 0, 0, 1, 9, 0x10, 0, 0, 0, 1, 7, 1, 2, 3, 0, 0, 0, 1, 8, 4, 5,
+            6, 0, 0, 0, 1, 5, 7, 8, 9,
+        ]
+    );
+    assert_eq!(stream, vec![0, 0, 0, 1, 9, 0xf0, 0, 0, 0, 1, 1, 10, 11, 12]);
+}
+
+#[test]
 fn drops_junk_before_the_first_start_code() {
     let mut stream = vec![
         99, 100, 0, 0, 0, 1, 9, 0xf0, 0, 0, 0, 1, 1, 1, 2, 3, 0, 0, 0, 1, 9, 0xf0,

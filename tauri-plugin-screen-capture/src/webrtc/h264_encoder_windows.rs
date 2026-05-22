@@ -98,6 +98,7 @@ impl H264Encoder {
 }
 
 struct FfmpegHardwareH264Encoder {
+    ffmpeg: String,
     encoder_kind: HardwareH264EncoderKind,
     child: Child,
     stdin: ChildStdin,
@@ -105,7 +106,9 @@ struct FfmpegHardwareH264Encoder {
     pending_h264: Vec<u8>,
     width: u32,
     height: u32,
+    fps: u32,
     frame_duration: Duration,
+    pending_force_keyframe: bool,
 }
 
 impl FfmpegHardwareH264Encoder {
@@ -148,33 +151,10 @@ impl FfmpegHardwareH264Encoder {
         height: u32,
         fps: u32,
     ) -> Result<Self> {
-        let mut command = Command::new(ffmpeg);
-        command.args(ffmpeg_realtime_args(encoder_kind, width, height, fps));
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(ffmpeg_error)?;
-        let stdin = child.stdin.take().ok_or_else(|| {
-            Error::new(
-                CaptureErrorCode::WebRtcTrackFailed,
-                "FFmpeg hardware encoder stdin is unavailable",
-                true,
-            )
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            Error::new(
-                CaptureErrorCode::WebRtcTrackFailed,
-                "FFmpeg hardware encoder stdout is unavailable",
-                true,
-            )
-        })?;
-        if let Some(stderr) = child.stderr.take() {
-            spawn_ffmpeg_stderr_logger(stderr);
-        }
-        let stdout_rx = spawn_ffmpeg_stdout_reader(stdout);
+        let (child, stdin, stdout_rx) =
+            spawn_ffmpeg_process(&ffmpeg, encoder_kind, width, height, fps)?;
         Ok(Self {
+            ffmpeg,
             encoder_kind,
             child,
             stdin,
@@ -182,11 +162,33 @@ impl FfmpegHardwareH264Encoder {
             pending_h264: Vec::new(),
             width,
             height,
+            fps: fps.max(1),
             frame_duration: Duration::from_secs_f64(1.0 / f64::from(fps.max(1))),
+            pending_force_keyframe: false,
         })
     }
 
     fn force_keyframe(&mut self) -> Result<()> {
+        self.pending_force_keyframe = true;
+        Ok(())
+    }
+
+    fn restart_encoder(&mut self) -> Result<()> {
+        let _ = self.stdin.flush();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let (child, stdin, stdout_rx) = spawn_ffmpeg_process(
+            &self.ffmpeg,
+            self.encoder_kind,
+            self.width,
+            self.height,
+            self.fps,
+        )?;
+        self.child = child;
+        self.stdin = stdin;
+        self.stdout_rx = stdout_rx;
+        self.pending_h264.clear();
+        self.pending_force_keyframe = false;
         Ok(())
     }
 
@@ -204,9 +206,12 @@ impl FfmpegHardwareH264Encoder {
                 format!(
                     "Windows FFmpeg hardware encoder frame size changed from {}x{} to {}x{}",
                     self.width, self.height, frame.width, frame.height
-                ),
+            ),
                 true,
             ));
+        }
+        if self.pending_force_keyframe {
+            self.restart_encoder()?;
         }
         self.stdin.write_all(&frame.data).map_err(ffmpeg_error)?;
         self.stdin.flush().map_err(ffmpeg_error)?;
@@ -257,7 +262,23 @@ enum HardwareH264EncoderKind {
 
 impl HardwareH264EncoderKind {
     fn preferred_order() -> [Self; 3] {
-        [Self::Nvenc, Self::Qsv, Self::Amf]
+        if let Ok(choice) = std::env::var("TAURI_PLUGIN_SCREEN_CAPTURE_WINDOWS_H264_ENCODER") {
+            let choice = choice.trim().to_ascii_lowercase();
+            let first = match choice.as_str() {
+                "amf" => Some(Self::Amf),
+                "qsv" => Some(Self::Qsv),
+                "nvenc" => Some(Self::Nvenc),
+                _ => None,
+            };
+            if let Some(first) = first {
+                return match first {
+                    Self::Amf => [Self::Amf, Self::Qsv, Self::Nvenc],
+                    Self::Qsv => [Self::Qsv, Self::Amf, Self::Nvenc],
+                    Self::Nvenc => [Self::Nvenc, Self::Amf, Self::Qsv],
+                };
+            }
+        }
+        [Self::Amf, Self::Qsv, Self::Nvenc]
     }
 
     fn ffmpeg_name(self) -> &'static str {
@@ -443,6 +464,42 @@ fn ffmpeg_realtime_args(
     args
 }
 
+fn spawn_ffmpeg_process(
+    ffmpeg: &str,
+    encoder_kind: HardwareH264EncoderKind,
+    width: u32,
+    height: u32,
+    fps: u32,
+) -> Result<(Child, ChildStdin, Receiver<Vec<u8>>)> {
+    let mut command = Command::new(ffmpeg);
+    command.args(ffmpeg_realtime_args(encoder_kind, width, height, fps));
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(ffmpeg_error)?;
+    let stdin = child.stdin.take().ok_or_else(|| {
+        Error::new(
+            CaptureErrorCode::WebRtcTrackFailed,
+            "FFmpeg hardware encoder stdin is unavailable",
+            true,
+        )
+    })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        Error::new(
+            CaptureErrorCode::WebRtcTrackFailed,
+            "FFmpeg hardware encoder stdout is unavailable",
+            true,
+        )
+    })?;
+    if let Some(stderr) = child.stderr.take() {
+        spawn_ffmpeg_stderr_logger(stderr);
+    }
+    let stdout_rx = spawn_ffmpeg_stdout_reader(stdout);
+    Ok((child, stdin, stdout_rx))
+}
+
 fn ffmpeg_input_args(width: u32, height: u32, fps: u32) -> Vec<String> {
     vec![
         "-hide_banner".into(),
@@ -474,13 +531,36 @@ fn ffmpeg_encoder_args(
     match encoder_kind {
         HardwareH264EncoderKind::Amf => args.extend([
             "-usage".into(),
-            "lowlatency".into(),
+            "ultralowlatency".into(),
             "-quality".into(),
             "speed".into(),
             "-rc".into(),
             "cbr".into(),
+            "-latency".into(),
+            "1".into(),
+            "-profile:v".into(),
+            "constrained_baseline".into(),
+            "-level:v".into(),
+            "5.2".into(),
+            "-coder".into(),
+            "cavlc".into(),
+            "-forced_idr".into(),
+            "1".into(),
+            "-aud".into(),
+            "1".into(),
+            "-header_spacing".into(),
+            "1".into(),
+            "-async_depth".into(),
+            "1".into(),
         ]),
-        HardwareH264EncoderKind::Qsv => args.extend(["-preset".into(), "veryfast".into()]),
+        HardwareH264EncoderKind::Qsv => args.extend([
+            "-preset".into(),
+            "veryfast".into(),
+            "-profile:v".into(),
+            "baseline".into(),
+            "-forced_idr".into(),
+            "1".into(),
+        ]),
         HardwareH264EncoderKind::Nvenc => args.extend([
             "-preset".into(),
             "p1".into(),
@@ -488,6 +568,12 @@ fn ffmpeg_encoder_args(
             "ull".into(),
             "-rc".into(),
             "cbr".into(),
+            "-profile:v".into(),
+            "baseline".into(),
+            "-forced-idr".into(),
+            "1".into(),
+            "-zerolatency".into(),
+            "1".into(),
         ]),
     }
     args.extend([
@@ -498,7 +584,7 @@ fn ffmpeg_encoder_args(
         "-bufsize".into(),
         (recommended_bitrate(width, height, fps).saturating_mul(2)).to_string(),
         "-g".into(),
-        fps.max(1).saturating_mul(2).to_string(),
+        fps.max(1).to_string(),
         "-bf".into(),
         "0".into(),
         "-pix_fmt".into(),
