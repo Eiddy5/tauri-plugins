@@ -1,13 +1,15 @@
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 
 use async_trait::async_trait;
 use tauri_plugin_screen_capture::{
     capture::{CaptureBackend, DummyCaptureBackend, FrameConsumer, RunningCapture},
-    CaptureSourceKind, CaptureStatus, ListSourcesOptions, PermissionStatus, Result,
-    ScreenCaptureState, StartCaptureOptions,
+    pipeline::frame::VideoFrame,
+    publisher::{CapturePublisher, CapturePublisherFactory, PublisherBundle},
+    CaptureSourceKind, CaptureStats, CaptureStatus, ListSourcesOptions, PermissionStatus,
+    PixelFormat, Result, ScreenCaptureState, StartCaptureOptions,
 };
 
 #[derive(Debug, Default)]
@@ -75,6 +77,100 @@ impl RunningCapture for ObservableRunningCapture {
     }
 }
 
+#[derive(Debug)]
+struct OneFrameBackend;
+
+#[async_trait]
+impl CaptureBackend for OneFrameBackend {
+    async fn check_permission(&self) -> Result<PermissionStatus> {
+        Ok(PermissionStatus::Granted)
+    }
+
+    async fn request_permission(&self) -> Result<PermissionStatus> {
+        Ok(PermissionStatus::Granted)
+    }
+
+    async fn list_sources(
+        &self,
+        options: ListSourcesOptions,
+    ) -> Result<Vec<tauri_plugin_screen_capture::CaptureSource>> {
+        DummyCaptureBackend.list_sources(options).await
+    }
+
+    async fn start_capture(
+        &self,
+        _options: StartCaptureOptions,
+        consumer: Box<dyn FrameConsumer>,
+    ) -> Result<Box<dyn RunningCapture>> {
+        consumer
+            .push_frame(VideoFrame {
+                width: 1,
+                height: 1,
+                pixel_format: PixelFormat::Bgra,
+                timestamp_ns: 1,
+                data: Arc::from([0, 0, 0, 255]),
+            })
+            .await?;
+        Ok(Box::new(ObservableRunningCapture {
+            counters: Arc::new(BackendLifecycleCounters::default()),
+        }))
+    }
+}
+
+#[derive(Debug, Default)]
+struct RecordingPublisher {
+    frames: Mutex<Vec<(u32, u32, u64)>>,
+    stats: Mutex<CaptureStats>,
+}
+
+#[async_trait]
+impl CapturePublisher for RecordingPublisher {
+    async fn start(&self, _options: StartCaptureOptions) -> Result<()> {
+        self.stats.lock().unwrap().started = true;
+        Ok(())
+    }
+
+    async fn push_frame(&self, frame: VideoFrame) -> Result<()> {
+        self.frames
+            .lock()
+            .unwrap()
+            .push((frame.width, frame.height, frame.timestamp_ns));
+        self.stats.lock().unwrap().frames_published += 1;
+        Ok(())
+    }
+
+    async fn pause(&self) -> Result<()> {
+        self.stats.lock().unwrap().started = false;
+        Ok(())
+    }
+
+    async fn resume(&self) -> Result<()> {
+        self.stats.lock().unwrap().started = true;
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        self.stats.lock().unwrap().started = false;
+        Ok(())
+    }
+
+    async fn stats(&self) -> Result<CaptureStats> {
+        Ok(self.stats.lock().unwrap().clone())
+    }
+}
+
+#[derive(Debug)]
+struct RecordingPublisherFactory {
+    publisher: Arc<RecordingPublisher>,
+}
+
+#[async_trait]
+impl CapturePublisherFactory for RecordingPublisherFactory {
+    async fn create(&self, _options: &StartCaptureOptions) -> Result<PublisherBundle> {
+        Ok(PublisherBundle::without_webrtc(self.publisher.clone()))
+    }
+}
+
 fn start_options() -> StartCaptureOptions {
     StartCaptureOptions {
         source_id: "dummy-display-1".to_string(),
@@ -83,6 +179,7 @@ fn start_options() -> StartCaptureOptions {
         width: Some(1280),
         height: Some(720),
         capture_cursor: Some(true),
+        publisher: None,
     }
 }
 
@@ -190,4 +287,49 @@ async fn state_drives_backend_capture_lifecycle() {
 
     state.stop_capture(&session.session_id).await.expect("stop");
     assert_eq!(counters.stops.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn state_rejects_agora_publisher_until_sdk_adapter_exists() {
+    let state = ScreenCaptureState::with_backend(Arc::new(DummyCaptureBackend));
+    let mut options = start_options();
+    options.publisher = Some(tauri_plugin_screen_capture::PublisherOptions {
+        kind: tauri_plugin_screen_capture::PublisherKind::Agora,
+        agora: Some(tauri_plugin_screen_capture::AgoraPublisherOptions {
+            app_id: "app-id".to_string(),
+            channel: "demo-channel".to_string(),
+            uid: Some(42),
+            token: Some("token".to_string()),
+        }),
+    });
+
+    let error = state
+        .start_capture(options)
+        .await
+        .expect_err("expected agora rejection");
+    assert_eq!(
+        error.payload().code,
+        tauri_plugin_screen_capture::CaptureErrorCode::PublisherUnsupported
+    );
+}
+
+#[tokio::test]
+async fn state_routes_frames_to_custom_publisher_factory() {
+    let publisher = Arc::new(RecordingPublisher::default());
+    let state = ScreenCaptureState::with_backend_and_publisher_factory(
+        Arc::new(OneFrameBackend),
+        Arc::new(RecordingPublisherFactory {
+            publisher: Arc::clone(&publisher),
+        }),
+    );
+
+    let session = state.start_capture(start_options()).await.expect("start");
+
+    assert_eq!(publisher.frames.lock().unwrap().as_slice(), &[(1, 1, 1)]);
+    let stats = state
+        .get_capture_stats(&session.session_id)
+        .await
+        .expect("stats");
+    assert_eq!(stats.frames_published, 1);
+    assert!(stats.started);
 }

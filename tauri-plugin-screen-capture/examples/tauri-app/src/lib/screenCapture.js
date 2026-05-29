@@ -6,6 +6,10 @@ import {
 
 export async function connectVideo(session, video) {
   const pc = new RTCPeerConnection()
+  let resolveVideoTrack
+  const videoTrackReady = new Promise((resolve) => {
+    resolveVideoTrack = resolve
+  })
 
   pc.ontrack = (event) => {
     const [stream] = event.streams
@@ -14,6 +18,9 @@ export async function connectVideo(session, video) {
       readyState: event.track.readyState,
       streamId: stream?.id ?? null,
     })
+    if (event.track.kind === "video") {
+      resolveVideoTrack(event.track)
+    }
     video.srcObject = stream ?? new MediaStream([event.track])
     void video.play().catch((error) => {
       console.error("[screen-capture] video playback failed", error)
@@ -30,7 +37,10 @@ export async function connectVideo(session, video) {
   bindIceCandidates(pc, session)
   await answerOffer(pc, session)
 
-  return pc
+  return {
+    peerConnection: pc,
+    videoTrackReady,
+  }
 }
 
 function bindIceCandidates(pc, session) {

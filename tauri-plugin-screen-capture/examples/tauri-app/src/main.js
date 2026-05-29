@@ -9,6 +9,7 @@ import {
   startCapture,
   stopCapture,
 } from "tauri-plugin-screen-capture-api"
+import { publishAgoraScreenTrack } from "./lib/agoraPublisher.js"
 import { connectVideo } from "./lib/screenCapture.js"
 
 const state = {
@@ -23,6 +24,14 @@ const state = {
   includeSystemUi: false,
   activeKind: "display",
   peerConnection: null,
+  captureVideoTrack: null,
+  agoraPublication: null,
+  agoraEnabled: false,
+  agoraPublishing: false,
+  agoraAppId: localStorage.getItem("screenCapture.agora.appId") ?? "",
+  agoraChannel: localStorage.getItem("screenCapture.agora.channel") ?? "screen-share-demo",
+  agoraToken: localStorage.getItem("screenCapture.agora.token") ?? "",
+  agoraUid: localStorage.getItem("screenCapture.agora.uid") ?? "",
   pollTimer: null,
 }
 
@@ -52,6 +61,29 @@ app.innerHTML = `
         <label><input type="checkbox" data-option="includeCurrentApp" /> Current app</label>
         <label><input type="checkbox" data-option="includeSystemUi" /> System UI</label>
       </div>
+
+      <section class="agora-panel">
+        <label class="agora-toggle">
+          <input type="checkbox" data-agora-enabled />
+          <span>发布到 Agora</span>
+        </label>
+        <label>
+          <span>App ID</span>
+          <input type="text" data-agora-field="agoraAppId" autocomplete="off" spellcheck="false" />
+        </label>
+        <label>
+          <span>Channel</span>
+          <input type="text" data-agora-field="agoraChannel" autocomplete="off" spellcheck="false" />
+        </label>
+        <label>
+          <span>Token</span>
+          <input type="text" data-agora-field="agoraToken" autocomplete="off" spellcheck="false" />
+        </label>
+        <label>
+          <span>UID</span>
+          <input type="number" min="0" step="1" data-agora-field="agoraUid" />
+        </label>
+      </section>
 
       <section class="source-list" data-source-list></section>
     </aside>
@@ -83,6 +115,7 @@ app.innerHTML = `
         <span data-published>Published 0</span>
         <span data-dropped>Dropped 0</span>
         <span data-streaming>Stopped</span>
+        <span data-agora-status>Agora off</span>
       </div>
 
       <div class="error" data-error hidden></div>
@@ -97,6 +130,8 @@ const elements = {
   displayCount: app.querySelector("[data-display-count]"),
   windowCount: app.querySelector("[data-window-count]"),
   optionInputs: [...app.querySelectorAll("[data-option]")],
+  agoraEnabled: app.querySelector("[data-agora-enabled]"),
+  agoraFields: [...app.querySelectorAll("[data-agora-field]")],
   sourceList: app.querySelector("[data-source-list]"),
   selectedTitle: app.querySelector("[data-selected-title]"),
   sessionStatus: app.querySelector("[data-session-status]"),
@@ -112,6 +147,7 @@ const elements = {
   published: app.querySelector("[data-published]"),
   dropped: app.querySelector("[data-dropped]"),
   streaming: app.querySelector("[data-streaming]"),
+  agoraStatus: app.querySelector("[data-agora-status]"),
   error: app.querySelector("[data-error]"),
 }
 
@@ -129,6 +165,18 @@ for (const input of elements.optionInputs) {
   input.addEventListener("change", () => {
     state[input.dataset.option] = input.checked
     render()
+  })
+}
+
+elements.agoraEnabled.addEventListener("change", () => {
+  state.agoraEnabled = elements.agoraEnabled.checked
+  render()
+})
+
+for (const input of elements.agoraFields) {
+  input.addEventListener("input", () => {
+    state[input.dataset.agoraField] = input.value
+    persistAgoraConfig(input.dataset.agoraField, input.value)
   })
 }
 
@@ -195,8 +243,13 @@ async function start() {
       captureCursor: true,
     })
     console.info("[screen-capture] capture session started", state.session)
-    state.peerConnection = await connectVideo(state.session, elements.video)
+    const videoConnection = await connectVideo(state.session, elements.video)
+    state.peerConnection = videoConnection.peerConnection
     console.info("[screen-capture] WebRTC connected")
+    state.captureVideoTrack = await videoConnection.videoTrackReady
+    if (state.agoraEnabled) {
+      await publishToAgora()
+    }
     state.pollTimer = setInterval(updateStats, 1000)
     await updateStats()
   } catch (err) {
@@ -212,6 +265,28 @@ async function updateStats() {
   if (!state.session) return
   state.stats = await getCaptureStats(state.session.sessionId)
   console.info("[screen-capture] stats", state.stats)
+  renderStats()
+}
+
+async function publishToAgora() {
+  if (!state.captureVideoTrack) {
+    throw new Error("Capture video track is not ready for Agora")
+  }
+  state.agoraPublishing = true
+  renderStats()
+  state.agoraPublication = await publishAgoraScreenTrack(
+    {
+      appId: state.agoraAppId,
+      channel: state.agoraChannel,
+      token: state.agoraToken,
+      uid: state.agoraUid,
+    },
+    state.captureVideoTrack,
+  )
+  console.info("[screen-capture] Agora published", {
+    uid: state.agoraPublication.uid,
+    channel: state.agoraPublication.channel,
+  })
   renderStats()
 }
 
@@ -233,6 +308,16 @@ async function stop() {
   state.stats = null
   if (state.pollTimer) clearInterval(state.pollTimer)
   state.pollTimer = null
+  if (state.agoraPublication) {
+    try {
+      await state.agoraPublication.stop()
+    } catch (err) {
+      state.error = errorMessage(err)
+    }
+  }
+  state.agoraPublication = null
+  state.agoraPublishing = false
+  state.captureVideoTrack = null
   if (state.peerConnection) state.peerConnection.close()
   state.peerConnection = null
   elements.video.srcObject = null
@@ -286,6 +371,13 @@ function render() {
   for (const input of elements.optionInputs) {
     input.checked = Boolean(state[input.dataset.option])
     input.disabled = hasSession
+  }
+
+  elements.agoraEnabled.checked = state.agoraEnabled
+  elements.agoraEnabled.disabled = hasSession
+  for (const input of elements.agoraFields) {
+    input.value = state[input.dataset.agoraField]
+    input.disabled = hasSession || !state.agoraEnabled
   }
 
   renderSourceList(activeSources)
@@ -369,6 +461,13 @@ function renderStats() {
   elements.published.textContent = `Published ${state.stats?.framesPublished ?? 0}`
   elements.dropped.textContent = `Dropped ${state.stats?.framesDropped ?? 0}`
   elements.streaming.textContent = state.stats?.started ? "Streaming" : "Stopped"
+  elements.agoraStatus.textContent = state.agoraPublication
+    ? `Agora ${state.agoraPublication.channel} / ${state.agoraPublication.uid}`
+    : state.agoraPublishing
+      ? "Agora publishing"
+      : state.agoraEnabled
+        ? "Agora ready"
+        : "Agora off"
 }
 
 function displays() {
@@ -395,6 +494,18 @@ function scaledCaptureSize(source, maxWidth) {
     width: Math.max(1, Math.round(source.width * scale)),
     height: Math.max(1, Math.round(source.height * scale)),
   }
+}
+
+function persistAgoraConfig(field, value) {
+  const keyByField = {
+    agoraAppId: "screenCapture.agora.appId",
+    agoraChannel: "screenCapture.agora.channel",
+    agoraToken: "screenCapture.agora.token",
+    agoraUid: "screenCapture.agora.uid",
+  }
+  const key = keyByField[field]
+  if (!key) return
+  localStorage.setItem(key, value)
 }
 
 function errorMessage(err) {

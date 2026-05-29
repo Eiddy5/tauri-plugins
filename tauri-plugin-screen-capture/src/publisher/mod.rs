@@ -1,14 +1,20 @@
+mod agora;
 mod composite;
 mod webrtc;
 
 use async_trait::async_trait;
+use std::sync::Arc;
 
 use crate::{
     models::{CaptureStats, StartCaptureOptions},
     pipeline::frame::VideoFrame,
+    webrtc::signaling::WebRtcSignalingState,
     Result,
 };
 
+pub use agora::{
+    AgoraExternalVideoFrame, AgoraExternalVideoPixelFormat, AgoraPublisher, AgoraVideoSink,
+};
 pub use composite::CompositePublisher;
 pub use webrtc::WebRtcPublisher;
 
@@ -23,4 +29,36 @@ pub trait CapturePublisher: Send + Sync {
     async fn resume(&self) -> Result<()>;
     async fn stop(&self) -> Result<()>;
     async fn stats(&self) -> Result<CaptureStats>;
+}
+
+pub struct PublisherBundle {
+    pub publisher: Arc<dyn CapturePublisher>,
+    pub webrtc_signaling: Option<Arc<WebRtcSignalingState>>,
+}
+
+impl PublisherBundle {
+    pub fn new(
+        publisher: Arc<dyn CapturePublisher>,
+        webrtc_signaling: Option<Arc<WebRtcSignalingState>>,
+    ) -> Self {
+        Self {
+            publisher,
+            webrtc_signaling,
+        }
+    }
+
+    pub fn without_webrtc<P>(publisher: Arc<P>) -> Self
+    where
+        P: CapturePublisher + 'static,
+    {
+        Self {
+            publisher,
+            webrtc_signaling: None,
+        }
+    }
+}
+
+#[async_trait]
+pub trait CapturePublisherFactory: Send + Sync {
+    async fn create(&self, options: &StartCaptureOptions) -> Result<PublisherBundle>;
 }

@@ -19,6 +19,7 @@ fn start_options() -> StartCaptureOptions {
         width: Some(2),
         height: Some(1),
         capture_cursor: Some(true),
+        publisher: None,
     }
 }
 

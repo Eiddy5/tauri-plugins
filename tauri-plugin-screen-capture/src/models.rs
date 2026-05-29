@@ -89,6 +89,29 @@ impl Default for ListSourcesOptions {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PublisherKind {
+    WebRtcLoopback,
+    Agora,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgoraPublisherOptions {
+    pub app_id: String,
+    pub channel: String,
+    pub uid: Option<u32>,
+    pub token: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublisherOptions {
+    pub kind: PublisherKind,
+    pub agora: Option<AgoraPublisherOptions>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartCaptureOptions {
@@ -98,6 +121,7 @@ pub struct StartCaptureOptions {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub capture_cursor: Option<bool>,
+    pub publisher: Option<PublisherOptions>,
 }
 
 impl StartCaptureOptions {
@@ -107,6 +131,13 @@ impl StartCaptureOptions {
 
     pub fn effective_capture_cursor(&self) -> bool {
         self.capture_cursor.unwrap_or(true)
+    }
+
+    pub fn effective_publisher_kind(&self) -> PublisherKind {
+        self.publisher
+            .as_ref()
+            .map(|publisher| publisher.kind)
+            .unwrap_or(PublisherKind::WebRtcLoopback)
     }
 }
 
@@ -177,6 +208,7 @@ pub enum CaptureErrorCode {
     SourceUnavailable,
     CaptureStartFailed,
     CaptureRuntimeFailed,
+    PublisherUnsupported,
     #[serde(rename = "webrtcNegotiationFailed")]
     WebRtcNegotiationFailed,
     #[serde(rename = "webrtcTrackFailed")]

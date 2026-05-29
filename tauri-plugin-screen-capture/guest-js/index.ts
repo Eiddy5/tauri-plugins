@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core'
 
 export type CaptureSourceKind = 'display' | 'window'
+export type PublisherKind = 'webRtcLoopback' | 'agora'
 export type CaptureStatus =
   | 'idle'
   | 'starting'
@@ -43,6 +44,18 @@ export interface ListSourcesOptions {
   debugRawSources?: boolean
 }
 
+export interface AgoraPublisherOptions {
+  appId: string
+  channel: string
+  uid?: number | null
+  token?: string | null
+}
+
+export interface PublisherOptions {
+  kind: PublisherKind
+  agora?: AgoraPublisherOptions | null
+}
+
 export interface StartCaptureOptions {
   sourceId: string
   sourceKind: CaptureSourceKind
@@ -50,6 +63,7 @@ export interface StartCaptureOptions {
   width?: number
   height?: number
   captureCursor?: boolean
+  publisher?: PublisherOptions | null
 }
 
 export interface CaptureErrorPayload {

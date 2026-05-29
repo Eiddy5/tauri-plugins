@@ -1,3 +1,14 @@
+use std::sync::{Arc, Mutex};
+
+use tauri_plugin_screen_capture::{
+    pipeline::frame::VideoFrame,
+    publisher::{
+        CapturePublisher, CapturePublisherFactory, PublisherBundle, WebRtcPublisher,
+    },
+    webrtc::signaling::WebRtcSignalingState,
+    CaptureErrorCode, CaptureStats, Error, PublisherKind, Result, StartCaptureOptions,
+};
+
 // Learn more about Tauri commands at https://v2.tauri.app/develop/calling-rust/#commands
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -8,7 +19,98 @@ fn greet(name: &str) -> String {
 pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![greet])
-        .plugin(tauri_plugin_screen_capture::init())
+        .plugin(
+            tauri_plugin_screen_capture::Builder::new()
+                .publisher_factory(Arc::new(ExamplePublisherFactory))
+                .build(),
+        )
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+struct ExamplePublisherFactory;
+
+#[async_trait::async_trait]
+impl CapturePublisherFactory for ExamplePublisherFactory {
+    async fn create(&self, options: &StartCaptureOptions) -> Result<PublisherBundle> {
+        match options.effective_publisher_kind() {
+            PublisherKind::WebRtcLoopback => {
+                let signaling = WebRtcSignalingState::new().await?;
+                let publisher = WebRtcPublisher::new(signaling);
+                let webrtc_signaling = publisher.signaling();
+                Ok(PublisherBundle::new(Arc::new(publisher), Some(webrtc_signaling)))
+            }
+            PublisherKind::Agora => {
+                let publisher = NativeAgoraPublisher::new(options)?;
+                Ok(PublisherBundle::without_webrtc(Arc::new(publisher)))
+            }
+        }
+    }
+}
+
+struct NativeAgoraPublisher {
+    channel: String,
+    stats: Mutex<CaptureStats>,
+}
+
+impl NativeAgoraPublisher {
+    fn new(options: &StartCaptureOptions) -> Result<Self> {
+        let agora = options
+            .publisher
+            .as_ref()
+            .and_then(|publisher| publisher.agora.as_ref())
+            .ok_or_else(|| {
+                Error::new(
+                    CaptureErrorCode::PublisherUnsupported,
+                    "Agora publisher requires appId and channel options",
+                    true,
+                )
+            })?;
+
+        Ok(Self {
+            channel: agora.channel.clone(),
+            stats: Mutex::new(CaptureStats::default()),
+        })
+    }
+
+    fn sdk_unavailable(&self) -> Error {
+        Error::new(
+            CaptureErrorCode::PublisherUnsupported,
+            format!(
+                "example NativeAgoraPublisher received frames for channel '{}' but Agora Native SDK is not linked yet",
+                self.channel
+            ),
+            true,
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl CapturePublisher for NativeAgoraPublisher {
+    async fn start(&self, _options: StartCaptureOptions) -> Result<()> {
+        Err(self.sdk_unavailable())
+    }
+
+    async fn push_frame(&self, _frame: VideoFrame) -> Result<()> {
+        self.stats.lock().unwrap().frames_dropped += 1;
+        Err(self.sdk_unavailable())
+    }
+
+    async fn pause(&self) -> Result<()> {
+        self.stats.lock().unwrap().started = false;
+        Ok(())
+    }
+
+    async fn resume(&self) -> Result<()> {
+        Err(self.sdk_unavailable())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        self.stats.lock().unwrap().started = false;
+        Ok(())
+    }
+
+    async fn stats(&self) -> Result<CaptureStats> {
+        Ok(self.stats.lock().unwrap().clone())
+    }
 }

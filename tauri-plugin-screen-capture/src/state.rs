@@ -12,11 +12,13 @@ use crate::{
     error::Error,
     models::{
         Capabilities, CaptureErrorCode, CaptureSession, CaptureSource, CaptureStats, CaptureStatus,
-        ListSourcesOptions, PermissionStatus, StartCaptureOptions, WebRtcAnswer,
+        ListSourcesOptions, PermissionStatus, PublisherKind, StartCaptureOptions, WebRtcAnswer,
         WebRtcIceCandidate, WebRtcOffer,
     },
     pipeline::CapturePipeline,
-    publisher::{CapturePublisher, WebRtcPublisher},
+    publisher::{
+        AgoraPublisher, CapturePublisher, CapturePublisherFactory, PublisherBundle, WebRtcPublisher,
+    },
     webrtc::signaling::WebRtcSignalingState,
     Result,
 };
@@ -26,11 +28,12 @@ struct SessionRecord {
     publisher: Arc<dyn CapturePublisher>,
     pipeline: Arc<CapturePipeline>,
     running_capture: Arc<dyn RunningCapture>,
-    webrtc_signaling: Arc<WebRtcSignalingState>,
+    webrtc_signaling: Option<Arc<WebRtcSignalingState>>,
 }
 
 pub struct ScreenCaptureState {
     backend: Arc<dyn CaptureBackend>,
+    publisher_factory: Arc<dyn CapturePublisherFactory>,
     sessions: Mutex<HashMap<String, SessionRecord>>,
 }
 
@@ -49,8 +52,27 @@ impl Default for ScreenCaptureState {
 
 impl ScreenCaptureState {
     pub fn with_backend(backend: Arc<dyn CaptureBackend>) -> Self {
+        Self::with_backend_and_publisher_factory(backend, Arc::new(DefaultPublisherFactory))
+    }
+
+    pub fn with_publisher_factory(publisher_factory: Arc<dyn CapturePublisherFactory>) -> Self {
+        #[cfg(target_os = "macos")]
+        let backend: Arc<dyn CaptureBackend> = Arc::new(crate::capture::MacOsCaptureBackend);
+        #[cfg(target_os = "windows")]
+        let backend: Arc<dyn CaptureBackend> = Arc::new(crate::capture::WindowsCaptureBackend);
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let backend: Arc<dyn CaptureBackend> = Arc::new(crate::capture::DummyCaptureBackend);
+
+        Self::with_backend_and_publisher_factory(backend, publisher_factory)
+    }
+
+    pub fn with_backend_and_publisher_factory(
+        backend: Arc<dyn CaptureBackend>,
+        publisher_factory: Arc<dyn CapturePublisherFactory>,
+    ) -> Self {
         Self {
             backend,
+            publisher_factory,
             sessions: Mutex::new(HashMap::new()),
         }
     }
@@ -79,10 +101,9 @@ impl ScreenCaptureState {
     }
 
     pub async fn start_capture(&self, options: StartCaptureOptions) -> Result<CaptureSession> {
-        let signaling = WebRtcSignalingState::new().await?;
-        let publisher = WebRtcPublisher::new(signaling);
-        let webrtc_signaling = publisher.signaling();
-        let publisher: Arc<dyn CapturePublisher> = Arc::new(publisher);
+        let bundle = self.publisher_factory.create(&options).await?;
+        let publisher = bundle.publisher;
+        let webrtc_signaling = bundle.webrtc_signaling;
         let pipeline = Arc::new(CapturePipeline::new(Arc::clone(&publisher)));
 
         let running_capture = match self
@@ -265,7 +286,46 @@ impl ScreenCaptureState {
     async fn webrtc_signaling(&self, session_id: &str) -> Result<Arc<WebRtcSignalingState>> {
         let sessions = self.sessions.lock().await;
         let record = sessions.get(session_id).ok_or_else(invalid_session_error)?;
-        Ok(Arc::clone(&record.webrtc_signaling))
+        record.webrtc_signaling.as_ref().cloned().ok_or_else(|| {
+            Error::new(
+                CaptureErrorCode::WebRtcNegotiationFailed,
+                "capture session was not created with a WebRTC publisher",
+                true,
+            )
+        })
+    }
+}
+
+struct DefaultPublisherFactory;
+
+#[async_trait::async_trait]
+impl CapturePublisherFactory for DefaultPublisherFactory {
+    async fn create(&self, options: &StartCaptureOptions) -> Result<PublisherBundle> {
+        match options.effective_publisher_kind() {
+            PublisherKind::WebRtcLoopback => {
+                let signaling = WebRtcSignalingState::new().await?;
+                let publisher = WebRtcPublisher::new(signaling);
+                let webrtc_signaling = publisher.signaling();
+                Ok(PublisherBundle::new(
+                    Arc::new(publisher),
+                    Some(webrtc_signaling),
+                ))
+            }
+            PublisherKind::Agora => {
+                let agora = options
+                    .publisher
+                    .as_ref()
+                    .and_then(|publisher| publisher.agora.as_ref())
+                    .ok_or_else(|| {
+                        Error::new(
+                            CaptureErrorCode::PublisherUnsupported,
+                            "Agora publisher requires appId and channel options",
+                            true,
+                        )
+                    })?;
+                Err(AgoraPublisher::sdk_unavailable_error(agora))
+            }
+        }
     }
 }
 
