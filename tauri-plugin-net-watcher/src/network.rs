@@ -1,26 +1,21 @@
 use get_if_addrs::IfAddr;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
 use crate::{
     InterfaceAddresses, InterfaceStatus, InterfaceType, NetworkInterface, NetworkSnapshot,
 };
 
-pub fn read_network_snapshot(include_mac_address: bool) -> crate::Result<NetworkSnapshot> {
-    let _ = include_mac_address;
+pub fn read_network_snapshot(_include_mac_address: bool) -> crate::Result<NetworkSnapshot> {
+    let mut interfaces =
+        build_interfaces_from_entries(get_if_addrs::get_if_addrs()?.into_iter().map(|interface| {
+            let ip = match interface.addr {
+                IfAddr::V4(addr) => IpAddr::V4(addr.ip),
+                IfAddr::V6(addr) => IpAddr::V6(addr.ip),
+            };
 
-    let mut interfaces = build_interfaces_from_entries(
-        get_if_addrs::get_if_addrs()?
-            .into_iter()
-            .map(|interface| {
-                let ip = match interface.addr {
-                    IfAddr::V4(addr) => IpAddr::V4(addr.ip),
-                    IfAddr::V6(addr) => IpAddr::V6(addr.ip),
-                };
-
-                (interface.name, ip)
-            }),
-    );
+            (interface.name, ip)
+        }));
 
     mark_primary(&mut interfaces);
     let primary_interface_id = interfaces
@@ -55,7 +50,11 @@ fn build_interfaces_from_entries(
                     interface_type,
                     status,
                     is_primary: false,
-                    addresses: InterfaceAddresses::default(),
+                    addresses: InterfaceAddresses {
+                        // get_if_addrs does not expose MAC addresses, so this backend always leaves it unset.
+                        mac: None,
+                        ..InterfaceAddresses::default()
+                    },
                     gateway: None,
                     dns_servers: Vec::new(),
                 }
@@ -84,18 +83,26 @@ fn build_interfaces_from_entries(
 }
 
 fn assign_unique_ids(interfaces: &mut [NetworkInterface]) {
-    let mut seen = BTreeMap::<String, usize>::new();
+    let mut assigned = BTreeSet::<String>::new();
+    let reserved_base_ids = interfaces
+        .iter()
+        .map(|interface| sanitize_id(&interface.name))
+        .collect::<BTreeSet<_>>();
 
     for interface in interfaces {
         let base_id = sanitize_id(&interface.name);
-        let count = seen.entry(base_id.clone()).or_insert(0);
-        *count += 1;
+        let mut candidate = base_id.clone();
+        let mut suffix = 2;
 
-        interface.id = if *count == 1 {
-            base_id
-        } else {
-            format!("{base_id}_{count}")
-        };
+        while assigned.contains(&candidate)
+            || (candidate != base_id && reserved_base_ids.contains(&candidate))
+        {
+            candidate = format!("{base_id}_{suffix}");
+            suffix += 1;
+        }
+
+        assigned.insert(candidate.clone());
+        interface.id = candidate;
     }
 }
 
@@ -110,7 +117,7 @@ pub fn has_available_interface(snapshot: &NetworkSnapshot) -> bool {
 pub fn classify_interface(name: &str) -> InterfaceType {
     let normalized = name.to_ascii_lowercase();
 
-    if normalized.starts_with("lo") || normalized.contains("loopback") {
+    if is_loopback_name(&normalized) {
         InterfaceType::Loopback
     } else if normalized.contains("wi-fi")
         || normalized.contains("wifi")
@@ -132,6 +139,14 @@ pub fn classify_interface(name: &str) -> InterfaceType {
     } else {
         InterfaceType::Unknown
     }
+}
+
+fn is_loopback_name(normalized: &str) -> bool {
+    normalized == "lo"
+        || normalized.strip_prefix("lo").is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit())
+        })
+        || normalized.contains("loopback")
 }
 
 fn sanitize_id(name: &str) -> String {
@@ -182,12 +197,19 @@ mod tests {
         assert_eq!(classify_interface("eth0"), InterfaceType::Ethernet);
         assert_eq!(classify_interface("utun0"), InterfaceType::Vpn);
         assert_eq!(classify_interface("lo0"), InterfaceType::Loopback);
+        assert_ne!(
+            classify_interface("Local Area Connection"),
+            InterfaceType::Loopback
+        );
     }
 
     #[test]
     fn aggregates_addresses_for_same_interface() {
         let interfaces = build_interfaces_from_entries(vec![
-            ("en0".to_string(), IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))),
+            (
+                "en0".to_string(),
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
+            ),
             ("en0".to_string(), IpAddr::V6(Ipv6Addr::LOCALHOST)),
         ]);
 
@@ -215,5 +237,33 @@ mod tests {
         assert_eq!(interfaces[0].id, "if_ethernet_1");
         assert_eq!(interfaces[1].name, "Ethernet-1");
         assert_eq!(interfaces[1].id, "if_ethernet_1_2");
+    }
+
+    #[test]
+    fn avoids_final_id_collisions_after_suffixing() {
+        let interfaces = build_interfaces_from_entries(vec![
+            (
+                "Ethernet 1".to_string(),
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
+            ),
+            (
+                "Ethernet-1".to_string(),
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 11)),
+            ),
+            (
+                "Ethernet_1_2".to_string(),
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 12)),
+            ),
+        ]);
+
+        let ids = interfaces
+            .iter()
+            .map(|interface| interface.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ids,
+            vec!["if_ethernet_1", "if_ethernet_1_3", "if_ethernet_1_2"]
+        );
     }
 }
