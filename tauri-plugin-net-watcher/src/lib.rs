@@ -42,16 +42,36 @@ impl<R: Runtime, T: Manager<R>> crate::NetWatcherExt<R> for T {
 }
 
 /// Initializes the plugin.
-pub fn init<R: Runtime>() -> TauriPlugin<R> {
-    Builder::new("net-watcher")
-        .invoke_handler(tauri::generate_handler![commands::ping])
+pub fn init<R: Runtime>() -> TauriPlugin<R, serde_json::Value> {
+    Builder::<R, serde_json::Value>::new("net-watcher")
+        .invoke_handler(tauri::generate_handler![
+            commands::get_snapshot,
+            commands::start_watching,
+            commands::stop_watching,
+            commands::get_config
+        ])
         .setup(|app, api| {
+            let config = parse_plugin_config(api.config())?;
             #[cfg(mobile)]
-            let net_watcher = mobile::init(app, api)?;
+            let net_watcher = mobile::init(app, api, config)?;
             #[cfg(desktop)]
-            let net_watcher = desktop::init(app, api)?;
+            let net_watcher = desktop::init(app, api, config)?;
             app.manage(net_watcher);
             Ok(())
         })
         .build()
+}
+
+fn parse_plugin_config(value: &serde_json::Value) -> Result<NetWatcherConfig> {
+    let config = if value.is_null() {
+        NetWatcherConfig::default()
+    } else {
+        serde_json::from_value(value.clone()).map_err(|error| {
+            Error::invalid_config(format!("invalid net watcher plugin config: {error}"))
+        })?
+    };
+
+    config.validate()?;
+
+    Ok(config)
 }

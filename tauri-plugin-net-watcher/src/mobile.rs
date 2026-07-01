@@ -1,34 +1,52 @@
-use serde::de::DeserializeOwned;
-use tauri::{
-  plugin::{PluginApi, PluginHandle},
-  AppHandle, Runtime,
-};
+use std::marker::PhantomData;
 
-use crate::commands::{PingRequest, PingResponse};
+use serde::de::DeserializeOwned;
+use tauri::{plugin::PluginApi, AppHandle, Runtime};
+
+use crate::{NetWatcherConfig, NetWatcherSnapshot, Result, StartWatchingOptions};
 
 #[cfg(target_os = "ios")]
 tauri::ios_plugin_binding!(init_plugin_net_watcher);
 
-// initializes the Kotlin or Swift plugin classes
-pub fn init<R: Runtime, C: DeserializeOwned>(
-  _app: &AppHandle<R>,
-  api: PluginApi<R, C>,
-) -> crate::Result<NetWatcher<R>> {
-  #[cfg(target_os = "android")]
-  let handle = api.register_android_plugin("", "ExamplePlugin")?;
-  #[cfg(target_os = "ios")]
-  let handle = api.register_ios_plugin(init_plugin_net_watcher)?;
-  Ok(NetWatcher(handle))
+// Mobile watcher support is intentionally not implemented yet.
+pub fn init<R, C>(
+    _app: &AppHandle<R>,
+    _api: PluginApi<R, C>,
+    config: NetWatcherConfig,
+) -> Result<NetWatcher<R>>
+where
+    R: Runtime,
+    C: DeserializeOwned,
+{
+    Ok(NetWatcher {
+        config,
+        _runtime: PhantomData,
+    })
 }
 
 /// Access to the net-watcher APIs.
-pub struct NetWatcher<R: Runtime>(PluginHandle<R>);
+pub struct NetWatcher<R: Runtime> {
+    config: NetWatcherConfig,
+    _runtime: PhantomData<R>,
+}
 
 impl<R: Runtime> NetWatcher<R> {
-  pub(crate) fn ping(&self, payload: PingRequest) -> crate::Result<PingResponse> {
-    self
-      .0
-      .run_mobile_plugin("ping", payload)
-      .map_err(Into::into)
-  }
+    pub(crate) async fn get_snapshot(&self) -> Result<NetWatcherSnapshot> {
+        Err(crate::Error::unsupported_platform())
+    }
+
+    pub(crate) async fn start_watching(
+        &self,
+        _options: Option<StartWatchingOptions>,
+    ) -> Result<()> {
+        Err(crate::Error::unsupported_platform())
+    }
+
+    pub(crate) async fn stop_watching(&self) -> Result<()> {
+        Err(crate::Error::unsupported_platform())
+    }
+
+    pub(crate) async fn get_config(&self) -> Result<NetWatcherConfig> {
+        Ok(self.config.clone())
+    }
 }
