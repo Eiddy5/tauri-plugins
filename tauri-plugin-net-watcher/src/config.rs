@@ -95,24 +95,6 @@ impl NetWatcherConfig {
     }
 }
 
-impl crate::Error {
-    pub fn invalid_config(message: impl Into<String>) -> Self {
-        Self::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            message.into(),
-        ))
-    }
-
-    pub fn code(&self) -> &'static str {
-        match self {
-            Self::Io(error) if error.kind() == std::io::ErrorKind::InvalidInput => "invalid_config",
-            Self::Io(_) => "io",
-            #[cfg(mobile)]
-            Self::PluginInvoke(_) => "plugin_invoke",
-        }
-    }
-}
-
 fn default_target() -> String {
     DEFAULT_TARGET.to_string()
 }
