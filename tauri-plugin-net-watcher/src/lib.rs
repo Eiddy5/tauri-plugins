@@ -1,6 +1,6 @@
 use tauri::{
-  plugin::{Builder, TauriPlugin},
-  Manager, Runtime,
+    plugin::{Builder, TauriPlugin},
+    Manager, Runtime,
 };
 
 pub use models::*;
@@ -14,10 +14,12 @@ mod mobile;
 mod commands;
 mod error;
 mod models;
+mod state;
 mod stats;
 
 pub use config::{NetWatcherConfig, StartWatchingOptions};
 pub use error::{Error, Result};
+pub use state::{evaluate_state, StateConfig};
 
 #[cfg(desktop)]
 use desktop::NetWatcher;
@@ -26,26 +28,26 @@ use mobile::NetWatcher;
 
 /// Extensions to [`tauri::App`], [`tauri::AppHandle`] and [`tauri::Window`] to access the net-watcher APIs.
 pub trait NetWatcherExt<R: Runtime> {
-  fn net_watcher(&self) -> &NetWatcher<R>;
+    fn net_watcher(&self) -> &NetWatcher<R>;
 }
 
 impl<R: Runtime, T: Manager<R>> crate::NetWatcherExt<R> for T {
-  fn net_watcher(&self) -> &NetWatcher<R> {
-    self.state::<NetWatcher<R>>().inner()
-  }
+    fn net_watcher(&self) -> &NetWatcher<R> {
+        self.state::<NetWatcher<R>>().inner()
+    }
 }
 
 /// Initializes the plugin.
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
-  Builder::new("net-watcher")
-    .invoke_handler(tauri::generate_handler![commands::ping])
-    .setup(|app, api| {
-      #[cfg(mobile)]
-      let net_watcher = mobile::init(app, api)?;
-      #[cfg(desktop)]
-      let net_watcher = desktop::init(app, api)?;
-      app.manage(net_watcher);
-      Ok(())
-    })
-    .build()
+    Builder::new("net-watcher")
+        .invoke_handler(tauri::generate_handler![commands::ping])
+        .setup(|app, api| {
+            #[cfg(mobile)]
+            let net_watcher = mobile::init(app, api)?;
+            #[cfg(desktop)]
+            let net_watcher = desktop::init(app, api)?;
+            app.manage(net_watcher);
+            Ok(())
+        })
+        .build()
 }
