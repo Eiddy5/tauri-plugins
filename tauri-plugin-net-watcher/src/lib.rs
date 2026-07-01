@@ -5,6 +5,7 @@ use tauri::{
 
 pub use models::*;
 
+mod config;
 #[cfg(desktop)]
 mod desktop;
 #[cfg(mobile)]
@@ -14,6 +15,7 @@ mod commands;
 mod error;
 mod models;
 
+pub use config::{NetWatcherConfig, StartWatchingOptions};
 pub use error::{Error, Result};
 
 #[cfg(desktop)]
