@@ -91,9 +91,12 @@ impl NetWatcherConfig {
             ));
         }
 
-        if self.degraded_failure_rate <= 0.0 || self.degraded_failure_rate > 1.0 {
+        if !self.degraded_failure_rate.is_finite()
+            || self.degraded_failure_rate <= 0.0
+            || self.degraded_failure_rate > 1.0
+        {
             return Err(crate::Error::invalid_config(
-                "net watcher degraded_failure_rate must be greater than zero and at most one",
+                "net watcher degraded_failure_rate must be finite, greater than zero, and at most one",
             ));
         }
 
@@ -209,6 +212,14 @@ mod tests {
             },
             NetWatcherConfig {
                 degraded_failure_rate: 1.1,
+                ..Default::default()
+            },
+            NetWatcherConfig {
+                degraded_failure_rate: f64::NAN,
+                ..Default::default()
+            },
+            NetWatcherConfig {
+                degraded_failure_rate: f64::INFINITY,
                 ..Default::default()
             },
             NetWatcherConfig {
