@@ -15,6 +15,8 @@ mod commands;
 mod error;
 mod models;
 #[allow(dead_code)]
+mod network;
+#[allow(dead_code)]
 mod probe;
 #[allow(dead_code)]
 mod state;
