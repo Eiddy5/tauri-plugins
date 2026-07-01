@@ -15,8 +15,8 @@ use crate::{
     probe::HttpProber,
     state::{evaluate_state, StateConfig},
     stats::RollingWindow,
-    Error, NetWatcherConfig, NetWatcherSnapshot, ProbeTarget, ProbeTargetType,
-    QualityConfigSnapshot, QualitySnapshot, Result, SnapshotChanges, SnapshotMeta,
+    Error, NetWatcherConfig, NetWatcherSnapshot, NetworkSnapshot, ProbeTarget, ProbeTargetType,
+    QualityConfigSnapshot, QualitySnapshot, Result, SnapshotChanges, SnapshotMeta, SnapshotState,
     StartWatchingOptions,
 };
 
@@ -82,6 +82,11 @@ where
             .lock()
             .map_err(|_| Error::internal("net watcher task lock is poisoned"))?;
 
+        clear_finished_task(&mut task);
+        if task.is_none() {
+            return Err(Error::not_watching());
+        }
+
         if let Some(handle) = task.take() {
             handle.abort();
             Ok(())
@@ -91,13 +96,16 @@ where
     }
 
     fn start_background(&self, options: Option<StartWatchingOptions>) -> Result<()> {
-        let mut task = self
-            .task
-            .lock()
-            .map_err(|_| Error::internal("net watcher task lock is poisoned"))?;
+        {
+            let mut task = self
+                .task
+                .lock()
+                .map_err(|_| Error::internal("net watcher task lock is poisoned"))?;
+            clear_finished_task(&mut task);
 
-        if task.is_some() {
-            return Err(Error::already_watching());
+            if task.is_some() {
+                return Err(Error::already_watching());
+            }
         }
 
         let config = merge_runtime_config(&self.config, options);
@@ -107,9 +115,30 @@ where
         let app = self.app.clone();
         let snapshot = self.snapshot.clone();
         let handle = async_runtime::spawn(run_loop(app, snapshot, config, initial_network));
+
+        let mut task = self
+            .task
+            .lock()
+            .map_err(|_| Error::internal("net watcher task lock is poisoned"))?;
+        clear_finished_task(&mut task);
+
+        if task.is_some() {
+            handle.abort();
+            return Err(Error::already_watching());
+        }
+
         *task = Some(handle);
 
         Ok(())
+    }
+}
+
+fn clear_finished_task(task: &mut Option<JoinHandle<()>>) {
+    if task
+        .as_ref()
+        .is_some_and(|handle| handle.inner().is_finished())
+    {
+        *task = None;
     }
 }
 
@@ -127,7 +156,7 @@ async fn run_loop<R>(
     app: AppHandle<R>,
     snapshot: Arc<RwLock<NetWatcherSnapshot>>,
     config: NetWatcherConfig,
-    mut network: crate::NetworkSnapshot,
+    initial_network: NetworkSnapshot,
 ) where
     R: Runtime,
 {
@@ -147,23 +176,27 @@ async fn run_loop<R>(
         window_size: config.window_size,
         timeout_ms: config.timeout_ms,
     };
+    let mut next_network = Some(initial_network);
 
     loop {
-        if let Ok(next_network) = read_network_snapshot(config.include_mac_address) {
-            network = next_network;
-        }
+        let (network, network_error) = match next_network.take() {
+            Some(network) => (network, None),
+            None => match read_network_snapshot(config.include_mac_address) {
+                Ok(network) => (network, None),
+                Err(error) => (NetworkSnapshot::default(), Some(error)),
+            },
+        };
 
         let probe = prober.probe(&target).await;
         window.push(probe);
         let summary = window.summary();
-        let previous_overall = snapshot.read().await.state.overall.clone();
-        let state = evaluate_state(has_available_interface(&network), &summary, &state_config);
+        let previous = snapshot.read().await.clone();
+        let mut state = evaluate_state(has_available_interface(&network), &summary, &state_config);
+        if let Some(error) = network_error {
+            state.reason = format!("network_snapshot_failed:{}", error.code());
+        }
         let current_overall = state.overall.clone();
-        let changed_fields = if previous_overall == current_overall {
-            Vec::new()
-        } else {
-            vec!["state.overall".to_string()]
-        };
+        let changed_fields = changed_fields(&previous, &network, &state);
 
         let next = NetWatcherSnapshot {
             meta: SnapshotMeta {
@@ -182,7 +215,7 @@ async fn run_loop<R>(
             },
             changes: SnapshotChanges {
                 has_changes: !changed_fields.is_empty(),
-                previous_overall: Some(previous_overall),
+                previous_overall: Some(previous.state.overall),
                 current_overall,
                 changed_fields,
             },
@@ -193,4 +226,33 @@ async fn run_loop<R>(
 
         tokio::time::sleep(Duration::from_millis(config.interval_ms)).await;
     }
+}
+
+fn changed_fields(
+    previous: &NetWatcherSnapshot,
+    network: &NetworkSnapshot,
+    state: &SnapshotState,
+) -> Vec<String> {
+    let mut fields = vec![
+        "quality.currentProbe".to_string(),
+        "quality.summary".to_string(),
+    ];
+
+    if previous.network != *network {
+        fields.push("network".to_string());
+    }
+
+    if previous.state.overall != state.overall {
+        fields.push("state.overall".to_string());
+    }
+
+    if previous.state.network != state.network {
+        fields.push("state.network".to_string());
+    }
+
+    if previous.state.quality != state.quality {
+        fields.push("state.quality".to_string());
+    }
+
+    fields
 }

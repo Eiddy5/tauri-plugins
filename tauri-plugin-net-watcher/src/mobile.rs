@@ -18,6 +18,10 @@ where
     R: Runtime,
     C: DeserializeOwned,
 {
+    if config.auto_start {
+        return Err(crate::Error::unsupported_platform());
+    }
+
     Ok(NetWatcher {
         config,
         _runtime: PhantomData,
