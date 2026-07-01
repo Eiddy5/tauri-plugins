@@ -1,4 +1,7 @@
-use serde::{ser::Serializer, Serialize};
+use serde::{
+    ser::{SerializeStruct, Serializer},
+    Serialize,
+};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -57,6 +60,15 @@ impl Error {
             Self::PluginInvoke(_) => "internal_error",
         }
     }
+
+    pub fn message(&self) -> String {
+        match self {
+            Self::Structured { message, .. } => message.clone(),
+            Self::Io(error) => error.to_string(),
+            #[cfg(mobile)]
+            Self::PluginInvoke(error) => error.to_string(),
+        }
+    }
 }
 
 impl Serialize for Error {
@@ -64,6 +76,22 @@ impl Serialize for Error {
     where
         S: Serializer,
     {
-        serializer.serialize_str(self.to_string().as_ref())
+        let mut state = serializer.serialize_struct("Error", 2)?;
+        state.serialize_field("code", self.code())?;
+        state.serialize_field("message", &self.message())?;
+        state.end()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structured_errors_serialize_with_code_and_message() {
+        let value = serde_json::to_value(Error::invalid_config("bad")).unwrap();
+
+        assert_eq!(value["code"], "invalid_config");
+        assert!(value["message"].as_str().is_some());
     }
 }

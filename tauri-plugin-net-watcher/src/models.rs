@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::NetWatcherConfig;
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum OverallState {
@@ -213,6 +215,10 @@ pub struct SnapshotChanges {
 
 impl NetWatcherSnapshot {
     pub fn initial(plugin_version: &str) -> Self {
+        Self::initial_with_config(plugin_version, &NetWatcherConfig::default())
+    }
+
+    pub fn initial_with_config(plugin_version: &str, config: &NetWatcherConfig) -> Self {
         let overall = OverallState::Unknown;
 
         Self {
@@ -232,13 +238,13 @@ impl NetWatcherSnapshot {
             network: NetworkSnapshot::default(),
             quality: QualitySnapshot {
                 config: QualityConfigSnapshot {
-                    interval_ms: 10_000,
-                    window_size: 20,
-                    timeout_ms: 3_000,
+                    interval_ms: config.interval_ms,
+                    window_size: config.window_size,
+                    timeout_ms: config.timeout_ms,
                 },
                 target: ProbeTarget {
                     target_type: ProbeTargetType::Http,
-                    url: "https://www.apple.com/library/test/success.html".to_string(),
+                    url: config.target.clone(),
                 },
                 current_probe: None,
                 summary: QualitySummary::default(),
@@ -266,5 +272,21 @@ mod tests {
         assert_eq!(value["state"]["network"], "unknown");
         assert_eq!(value["state"]["quality"], "unknown");
         assert_eq!(value["quality"]["summary"]["sampleCount"], 0);
+    }
+
+    #[test]
+    fn initial_snapshot_reflects_config() {
+        let mut config = crate::NetWatcherConfig::default();
+        config.target = "https://example.com/health".to_string();
+        config.interval_ms = 5_000;
+        config.timeout_ms = 1_500;
+        config.window_size = 7;
+
+        let snapshot = NetWatcherSnapshot::initial_with_config("0.1.0", &config);
+
+        assert_eq!(snapshot.quality.target.url, "https://example.com/health");
+        assert_eq!(snapshot.quality.config.interval_ms, 5_000);
+        assert_eq!(snapshot.quality.config.timeout_ms, 1_500);
+        assert_eq!(snapshot.quality.config.window_size, 7);
     }
 }
