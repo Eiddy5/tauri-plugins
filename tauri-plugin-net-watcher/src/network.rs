@@ -1,4 +1,6 @@
 use get_if_addrs::IfAddr;
+use std::collections::BTreeMap;
+use std::net::IpAddr;
 
 use crate::{
     InterfaceAddresses, InterfaceStatus, InterfaceType, NetworkInterface, NetworkSnapshot,
@@ -7,35 +9,18 @@ use crate::{
 pub fn read_network_snapshot(include_mac_address: bool) -> crate::Result<NetworkSnapshot> {
     let _ = include_mac_address;
 
-    let mut interfaces = get_if_addrs::get_if_addrs()?
-        .into_iter()
-        .map(|interface| {
-            let interface_type = classify_interface(&interface.name);
-            let status = if interface_type == InterfaceType::Loopback {
-                InterfaceStatus::Down
-            } else {
-                InterfaceStatus::Up
-            };
+    let mut interfaces = build_interfaces_from_entries(
+        get_if_addrs::get_if_addrs()?
+            .into_iter()
+            .map(|interface| {
+                let ip = match interface.addr {
+                    IfAddr::V4(addr) => IpAddr::V4(addr.ip),
+                    IfAddr::V6(addr) => IpAddr::V6(addr.ip),
+                };
 
-            let mut addresses = InterfaceAddresses::default();
-            match interface.addr {
-                IfAddr::V4(addr) => addresses.ipv4.push(addr.ip.to_string()),
-                IfAddr::V6(addr) => addresses.ipv6.push(addr.ip.to_string()),
-            }
-
-            NetworkInterface {
-                id: sanitize_id(&interface.name),
-                name: interface.name.clone(),
-                display_name: interface.name,
-                interface_type,
-                status,
-                is_primary: false,
-                addresses,
-                gateway: None,
-                dns_servers: Vec::new(),
-            }
-        })
-        .collect::<Vec<_>>();
+                (interface.name, ip)
+            }),
+    );
 
     mark_primary(&mut interfaces);
     let primary_interface_id = interfaces
@@ -47,6 +32,54 @@ pub fn read_network_snapshot(include_mac_address: bool) -> crate::Result<Network
         primary_interface_id,
         interfaces,
     })
+}
+
+fn build_interfaces_from_entries(
+    entries: impl IntoIterator<Item = (String, IpAddr)>,
+) -> Vec<NetworkInterface> {
+    let mut interfaces = entries
+        .into_iter()
+        .fold(BTreeMap::new(), |mut interfaces, (name, ip)| {
+            let id = sanitize_id(&name);
+            let interface = interfaces.entry(id.clone()).or_insert_with(|| {
+                let interface_type = classify_interface(&name);
+                let status = if interface_type == InterfaceType::Loopback {
+                    InterfaceStatus::Down
+                } else {
+                    InterfaceStatus::Up
+                };
+
+                NetworkInterface {
+                    id,
+                    name: name.clone(),
+                    display_name: name,
+                    interface_type,
+                    status,
+                    is_primary: false,
+                    addresses: InterfaceAddresses::default(),
+                    gateway: None,
+                    dns_servers: Vec::new(),
+                }
+            });
+
+            match ip {
+                IpAddr::V4(ip) => interface.addresses.ipv4.push(ip.to_string()),
+                IpAddr::V6(ip) => interface.addresses.ipv6.push(ip.to_string()),
+            }
+
+            interfaces
+        })
+        .into_values()
+        .collect::<Vec<_>>();
+
+    for interface in &mut interfaces {
+        interface.addresses.ipv4.sort();
+        interface.addresses.ipv4.dedup();
+        interface.addresses.ipv6.sort();
+        interface.addresses.ipv6.dedup();
+    }
+
+    interfaces
 }
 
 pub fn has_available_interface(snapshot: &NetworkSnapshot) -> bool {
@@ -122,6 +155,7 @@ fn mark_primary(interfaces: &mut [NetworkInterface]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     #[test]
     fn classifies_common_interface_names() {
@@ -131,5 +165,18 @@ mod tests {
         assert_eq!(classify_interface("eth0"), InterfaceType::Ethernet);
         assert_eq!(classify_interface("utun0"), InterfaceType::Vpn);
         assert_eq!(classify_interface("lo0"), InterfaceType::Loopback);
+    }
+
+    #[test]
+    fn aggregates_addresses_for_same_interface() {
+        let interfaces = build_interfaces_from_entries(vec![
+            ("en0".to_string(), IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))),
+            ("en0".to_string(), IpAddr::V6(Ipv6Addr::LOCALHOST)),
+        ]);
+
+        assert_eq!(interfaces.len(), 1);
+        assert_eq!(interfaces[0].id, "if_en0");
+        assert_eq!(interfaces[0].addresses.ipv4, vec!["192.168.1.10"]);
+        assert_eq!(interfaces[0].addresses.ipv6, vec!["::1"]);
     }
 }
