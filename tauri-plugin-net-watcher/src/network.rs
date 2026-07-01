@@ -6,7 +6,13 @@ use crate::{
     InterfaceAddresses, InterfaceStatus, InterfaceType, NetworkInterface, NetworkSnapshot,
 };
 
-pub fn read_network_snapshot(_include_mac_address: bool) -> crate::Result<NetworkSnapshot> {
+pub fn read_network_snapshot(include_mac_address: bool) -> crate::Result<NetworkSnapshot> {
+    if include_mac_address {
+        return Err(crate::Error::invalid_config(
+            "MAC address collection is not supported by the get_if_addrs backend",
+        ));
+    }
+
     let mut interfaces =
         build_interfaces_from_entries(get_if_addrs::get_if_addrs()?.into_iter().map(|interface| {
             let ip = match interface.addr {
@@ -265,5 +271,12 @@ mod tests {
             ids,
             vec!["if_ethernet_1", "if_ethernet_1_3", "if_ethernet_1_2"]
         );
+    }
+
+    #[test]
+    fn rejects_mac_address_collection_request() {
+        let error = read_network_snapshot(true).unwrap_err();
+
+        assert_eq!(error.code(), "invalid_config");
     }
 }
