@@ -7,7 +7,7 @@ use tokio::{
     time::{timeout, Instant},
 };
 use tokio_native_tls::TlsConnector;
-use url::Url;
+use url::{Host, Url};
 use uuid::Uuid;
 
 use crate::models::{
@@ -41,7 +41,9 @@ impl HttpProber {
         let duration_ms = elapsed_ms(started);
 
         match outcome {
-            Ok(Ok(status_code)) => success_probe(started_at, ended_at, duration_ms, phases, status_code),
+            Ok(Ok(status_code)) => {
+                success_probe(started_at, ended_at, duration_ms, phases, status_code)
+            }
             Ok(Err((code, message))) => {
                 failed_probe(started_at, ended_at, duration_ms, phases, code, message)
             }
@@ -210,7 +212,11 @@ where
 }
 
 fn request_target(url: &Url) -> String {
-    let path = if url.path().is_empty() { "/" } else { url.path() };
+    let path = if url.path().is_empty() {
+        "/"
+    } else {
+        url.path()
+    };
     match url.query() {
         Some(query) => format!("{path}?{query}"),
         None => path.to_string(),
@@ -219,14 +225,26 @@ fn request_target(url: &Url) -> String {
 
 fn host_header(url: &Url) -> Result<String, ProbeFailure> {
     let host = url
-        .host_str()
+        .host()
         .ok_or_else(|| ("invalid_config", "target host is missing".to_string()))?;
-    let default_port = url.port_or_known_default();
+    let host = match host {
+        Host::Domain(domain) => domain.to_string(),
+        Host::Ipv4(address) => address.to_string(),
+        Host::Ipv6(address) => format!("[{address}]"),
+    };
 
-    match (url.port(), default_port) {
-        (Some(port), Some(default)) if port != default => Ok(format!("{host}:{port}")),
+    match (url.port(), default_port_for_scheme(url.scheme())) {
+        (Some(port), Some(default_port)) if port != default_port => Ok(format!("{host}:{port}")),
         (Some(port), None) => Ok(format!("{host}:{port}")),
         _ => Ok(host.to_string()),
+    }
+}
+
+fn default_port_for_scheme(scheme: &str) -> Option<u16> {
+    match scheme {
+        "http" => Some(80),
+        "https" => Some(443),
+        _ => None,
     }
 }
 
@@ -280,5 +298,32 @@ mod tests {
         assert_eq!(result.status, ProbeStatus::Failed);
         assert!(result.duration_ms <= 1_000);
         assert!(result.error.is_some());
+    }
+
+    #[test]
+    fn host_header_brackets_default_port_ipv6_literal() {
+        let url = Url::parse("http://[::1]/health").unwrap();
+
+        let header = host_header(&url).unwrap();
+
+        assert_eq!(header, "[::1]");
+    }
+
+    #[test]
+    fn host_header_brackets_explicit_non_default_port_ipv6_literal() {
+        let url = Url::parse("http://[::1]:8080/health").unwrap();
+
+        let header = host_header(&url).unwrap();
+
+        assert_eq!(header, "[::1]:8080");
+    }
+
+    #[test]
+    fn host_header_includes_explicit_non_default_port_for_domain() {
+        let url = Url::parse("http://example.com:8080/health").unwrap();
+
+        let header = host_header(&url).unwrap();
+
+        assert_eq!(header, "example.com:8080");
     }
 }
