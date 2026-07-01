@@ -91,6 +91,24 @@ impl NetWatcherConfig {
             ));
         }
 
+        if self.degraded_failure_rate <= 0.0 || self.degraded_failure_rate > 1.0 {
+            return Err(crate::Error::invalid_config(
+                "net watcher degraded_failure_rate must be greater than zero and at most one",
+            ));
+        }
+
+        if self.degraded_p95_latency_ms == 0 {
+            return Err(crate::Error::invalid_config(
+                "net watcher degraded_p95_latency_ms must be greater than zero",
+            ));
+        }
+
+        if self.offline_consecutive_failures == 0 {
+            return Err(crate::Error::invalid_config(
+                "net watcher offline_consecutive_failures must be greater than zero",
+            ));
+        }
+
         Ok(())
     }
 }
@@ -176,5 +194,37 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.code(), "invalid_config");
+    }
+
+    #[test]
+    fn invalid_state_thresholds_are_rejected() {
+        let invalid_configs = [
+            NetWatcherConfig {
+                window_size: 0,
+                ..Default::default()
+            },
+            NetWatcherConfig {
+                degraded_failure_rate: 0.0,
+                ..Default::default()
+            },
+            NetWatcherConfig {
+                degraded_failure_rate: 1.1,
+                ..Default::default()
+            },
+            NetWatcherConfig {
+                degraded_p95_latency_ms: 0,
+                ..Default::default()
+            },
+            NetWatcherConfig {
+                offline_consecutive_failures: 0,
+                ..Default::default()
+            },
+        ];
+
+        for config in invalid_configs {
+            let error = config.validate().unwrap_err();
+
+            assert_eq!(error.code(), "invalid_config");
+        }
     }
 }

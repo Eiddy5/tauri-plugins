@@ -14,12 +14,12 @@ mod mobile;
 mod commands;
 mod error;
 mod models;
+#[allow(dead_code)]
 mod state;
 mod stats;
 
 pub use config::{NetWatcherConfig, StartWatchingOptions};
 pub use error::{Error, Result};
-pub use state::{evaluate_state, StateConfig};
 
 #[cfg(desktop)]
 use desktop::NetWatcher;

@@ -14,6 +14,8 @@ pub fn evaluate_state(
     summary: &QualitySummary,
     config: &StateConfig,
 ) -> SnapshotState {
+    let config = normalize_config(config);
+
     if !has_available_interface {
         return SnapshotState {
             overall: OverallState::Offline,
@@ -68,11 +70,27 @@ pub fn evaluate_state(
     }
 }
 
+fn normalize_config(config: &StateConfig) -> StateConfig {
+    StateConfig {
+        degraded_failure_rate: if config.degraded_failure_rate <= 0.0 {
+            0.15
+        } else {
+            config.degraded_failure_rate.min(1.0)
+        },
+        degraded_p95_latency_ms: if config.degraded_p95_latency_ms == 0 {
+            800
+        } else {
+            config.degraded_p95_latency_ms
+        },
+        offline_consecutive_failures: config.offline_consecutive_failures.max(1),
+    }
+}
+
 fn calculate_score(summary: &QualitySummary) -> u8 {
     let failure_penalty = (summary.failure_rate.clamp(0.0, 1.0) * 60.0).round() as i32;
     let latency_penalty = (summary.latency_ms.p95 / 100).min(30) as i32;
     let jitter_penalty = (summary.jitter_ms / 25).min(20) as i32;
-    let consecutive_penalty = (summary.consecutive_failures * 10).min(30) as i32;
+    let consecutive_penalty = summary.consecutive_failures.saturating_mul(10).min(30) as i32;
 
     (100 - failure_penalty - latency_penalty - jitter_penalty - consecutive_penalty).clamp(0, 100)
         as u8
@@ -156,5 +174,53 @@ mod tests {
         assert_eq!(state.overall, OverallState::Online);
         assert_eq!(state.quality, QualityLayerState::Stable);
         assert!(state.score > 80);
+    }
+
+    #[test]
+    fn extreme_consecutive_failures_do_not_overflow_score() {
+        let summary = QualitySummary {
+            sample_count: 20,
+            failure_count: 20,
+            failure_rate: 1.0,
+            latency_ms: LatencySummary {
+                avg: u64::MAX,
+                min: u64::MAX,
+                max: u64::MAX,
+                p95: u64::MAX,
+            },
+            jitter_ms: u64::MAX,
+            consecutive_failures: usize::MAX,
+            ..Default::default()
+        };
+
+        let score = calculate_score(&summary);
+
+        assert_eq!(score, 0);
+    }
+
+    #[test]
+    fn zero_thresholds_do_not_degrade_healthy_summary() {
+        let summary = QualitySummary {
+            sample_count: 20,
+            success_count: 20,
+            latency_ms: LatencySummary {
+                avg: 100,
+                min: 80,
+                max: 160,
+                p95: 150,
+            },
+            jitter_ms: 20,
+            ..Default::default()
+        };
+        let config = StateConfig {
+            degraded_failure_rate: 0.0,
+            degraded_p95_latency_ms: 0,
+            offline_consecutive_failures: 0,
+        };
+
+        let state = evaluate_state(true, &summary, &config);
+
+        assert_eq!(state.overall, OverallState::Online);
+        assert_eq!(state.quality, QualityLayerState::Stable);
     }
 }
