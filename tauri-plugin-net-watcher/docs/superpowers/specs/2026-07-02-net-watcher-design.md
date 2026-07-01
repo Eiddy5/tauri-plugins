@@ -1,29 +1,29 @@
-# Net Watcher Plugin Design
+# Net Watcher 插件设计
 
-Date: 2026-07-02
+日期：2026-07-02
 
-## Goal
+## 目标
 
-Build a Tauri v2 desktop plugin that monitors device network availability and network quality on Windows and macOS.
+开发一个 Tauri v2 桌面插件，用于在 Windows 和 macOS 上监控设备网络可用性和网络质量。
 
-The plugin should answer two questions:
+插件需要回答两个问题：
 
-1. What network is the device currently using?
-2. Is the configured target reachable with acceptable quality?
+1. 当前设备正在使用什么网络？
+2. 配置的探测目标是否可达，网络质量是否可接受？
 
-The first release targets Windows and macOS only. Mobile platforms are out of scope and should return an unsupported error if called.
+第一版只支持 Windows 和 macOS。移动端不在第一版范围内，如果被调用，应返回不支持的平台错误。
 
-## Non-Goals
+## 非目标
 
-- No LAN device discovery.
-- No packet capture.
-- No custom long-link or short-link protocol stack.
-- No ICMP-only dependency.
-- No Android or iOS implementation in the first release.
+- 不做局域网设备发现。
+- 不做抓包。
+- 不实现自定义长连接或短连接协议栈。
+- 不依赖 ICMP 作为唯一探测方式。
+- 第一版不实现 Android 或 iOS。
 
-## Configuration
+## 配置
 
-The plugin reads default configuration from `tauri.conf.json` under `plugins.net-watcher`.
+插件从 `tauri.conf.json` 的 `plugins.net-watcher` 读取默认配置。
 
 ```json
 {
@@ -38,37 +38,37 @@ The plugin reads default configuration from `tauri.conf.json` under `plugins.net
 }
 ```
 
-Only core behavior is configurable in the first release:
+第一版只暴露会直接影响核心行为的配置：
 
-- `autoStart`: starts monitoring during plugin setup when true.
-- `target`: HTTP or HTTPS URL used for active quality probing.
-- `intervalMs`: delay between quality probes.
-- `timeoutMs`: timeout for a single probe.
+- `autoStart`：为 `true` 时，插件初始化后自动开始监控。
+- `target`：主动质量探测使用的 HTTP 或 HTTPS URL。
+- `intervalMs`：两次质量探测之间的间隔。
+- `timeoutMs`：单次探测的超时时间。
 
-Internal defaults:
+内置默认值：
 
-- `autoStart`: `false`
-- `target`: `https://www.apple.com/library/test/success.html`
-- `intervalMs`: `10000`
-- `timeoutMs`: `3000`
-- `windowSize`: `20`
-- `degradedFailureRate`: `0.15`
-- `degradedP95LatencyMs`: `800`
-- `offlineConsecutiveFailures`: `3`
-- `includeMacAddress`: `false`
+- `autoStart`：`false`
+- `target`：`https://www.apple.com/library/test/success.html`
+- `intervalMs`：`10000`
+- `timeoutMs`：`3000`
+- `windowSize`：`20`
+- `degradedFailureRate`：`0.15`
+- `degradedP95LatencyMs`：`800`
+- `offlineConsecutiveFailures`：`3`
+- `includeMacAddress`：`false`
 
-Runtime options passed to `startWatching` may override `target`, `intervalMs`, and `timeoutMs` for that watcher session.
+`startWatching` 传入的运行时选项可以覆盖本次监控会话的 `target`、`intervalMs` 和 `timeoutMs`。
 
-## Public API
+## 公共 API
 
-Rust commands exposed through the Tauri plugin:
+通过 Tauri 插件暴露的 Rust 命令：
 
-- `getSnapshot()`: returns the latest `NetWatcherSnapshot`.
-- `startWatching(options?)`: starts network monitoring and quality probing.
-- `stopWatching()`: stops monitoring background tasks.
-- `getConfig()`: returns the effective configuration.
+- `getSnapshot()`：返回最新的 `NetWatcherSnapshot`。
+- `startWatching(options?)`：开始网络监控和质量探测。
+- `stopWatching()`：停止后台监控任务。
+- `getConfig()`：返回最终生效配置。
 
-Guest JavaScript API:
+前端 JavaScript API：
 
 ```ts
 export function getSnapshot(): Promise<NetWatcherSnapshot>
@@ -78,15 +78,15 @@ export function getConfig(): Promise<NetWatcherConfig>
 export function onSnapshotUpdated(handler: (snapshot: NetWatcherSnapshot) => void): Promise<UnlistenFn>
 ```
 
-The plugin emits one primary event:
+插件只暴露一个主要事件：
 
 ```text
 net-watcher://snapshot-updated
 ```
 
-The event payload is always a complete `NetWatcherSnapshot`. Consumers can read `snapshot.state.overall` for simple UI logic and inspect `network` or `quality` for diagnostics.
+事件 payload 始终是完整的 `NetWatcherSnapshot`。前端只需要简单状态时读取 `snapshot.state.overall`；需要诊断详情时再读取 `network` 和 `quality`。
 
-## Snapshot Structure
+## 快照结构
 
 ```json
 {
@@ -182,71 +182,71 @@ The event payload is always a complete `NetWatcherSnapshot`. Consumers can read 
 }
 ```
 
-## Monitoring Logic
+## 监控逻辑
 
-The plugin uses two cooperating background components.
+插件内部由两个后台组件协作完成监控。
 
-`Network Watcher` observes system network state:
+`Network Watcher` 负责观察系统网络状态：
 
-- Available network interfaces.
-- Primary interface.
-- Interface type, such as Wi-Fi, Ethernet, VPN, loopback, or unknown.
-- Interface up/down state.
-- IPv4 and IPv6 addresses.
-- Default gateway.
-- DNS servers.
+- 可用网络接口。
+- 主网络接口。
+- 接口类型，例如 Wi-Fi、Ethernet、VPN、loopback 或 unknown。
+- 接口 up/down 状态。
+- IPv4 和 IPv6 地址。
+- 默认网关。
+- DNS 服务器。
 
-`Quality Monitor` actively probes the configured target:
+`Quality Monitor` 负责主动探测配置的目标：
 
-- Resolve DNS.
-- Open TCP connection.
-- Perform TLS handshake for HTTPS.
-- Send HTTP request and measure response timing.
-- Record success, failure reason, status code, and duration.
+- DNS 解析。
+- TCP 建连。
+- HTTPS 场景下执行 TLS 握手。
+- 发送 HTTP 请求并测量响应耗时。
+- 记录成功状态、失败原因、状态码和总耗时。
 
-Each probe result is inserted into a rolling window. The rolling window computes failure rate, latency statistics, jitter, consecutive failures, and last success or failure time.
+每次探测结果都会写入滚动窗口。滚动窗口负责计算失败率、延迟统计、抖动、连续失败次数，以及最近成功或失败时间。
 
-## State Machine
+## 状态机
 
-The final state is derived from system network data and rolling quality statistics.
+最终状态由系统网络数据和滚动质量统计共同决定。
 
-- `unknown`: plugin just started or has insufficient data.
-- `offline`: no usable network interface is available.
-- `localOnly`: a network interface is available, but the configured target is repeatedly unreachable.
-- `degraded`: the target is reachable, but latency, jitter, or recent failure rate is poor.
-- `online`: the target is reachable and recent quality is stable.
+- `unknown`：插件刚启动，或样本不足。
+- `offline`：没有可用网络接口。
+- `localOnly`：有可用网络接口，但配置的目标连续不可达。
+- `degraded`：目标可达，但延迟、抖动或近期失败率较差。
+- `online`：目标可达，并且近期质量稳定。
 
-State details:
+状态字段说明：
 
-- `state.overall`: one of `unknown`, `offline`, `localOnly`, `degraded`, or `online`.
-- `state.network`: system-level state, such as `unknown`, `disconnected`, or `connected`.
-- `state.quality`: quality-level state, such as `unknown`, `unreachable`, `unstable`, or `stable`.
-- `state.score`: 0 to 100 quality score.
-- `state.reason`: machine-readable reason for the current state.
+- `state.overall`：最终状态，取值为 `unknown`、`offline`、`localOnly`、`degraded` 或 `online`。
+- `state.network`：系统网络层状态，例如 `unknown`、`disconnected` 或 `connected`。
+- `state.quality`：质量探测层状态，例如 `unknown`、`unreachable`、`unstable` 或 `stable`。
+- `state.score`：0 到 100 的网络质量分。
+- `state.reason`：当前状态的机器可读原因。
 
-Initial scoring rules:
+初始评分规则：
 
-- Start from 100.
-- Penalize recent failure rate.
-- Penalize high P95 latency.
-- Penalize high jitter.
-- Penalize consecutive failures.
-- Clamp the final score to 0 through 100.
+- 从 100 分开始。
+- 根据近期失败率扣分。
+- 根据 P95 延迟过高扣分。
+- 根据抖动过高扣分。
+- 根据连续失败次数扣分。
+- 最终分数限制在 0 到 100 之间。
 
-## Platform Strategy
+## 平台策略
 
-Windows and macOS share the same public API, data model, state machine, rolling window, and probe logic.
+Windows 和 macOS 共享同一套公共 API、数据模型、状态机、滚动窗口和探测逻辑。
 
-Platform-specific code is limited to system network observation:
+平台相关代码只负责系统网络状态观察：
 
-- Windows implementation reads and watches network adapter, IP, gateway, and DNS changes through native system APIs.
-- macOS implementation reads and watches interface, route, and DNS changes through native system APIs.
+- Windows 实现通过原生系统 API 读取并监听网卡、IP、网关和 DNS 变化。
+- macOS 实现通过原生系统 API 读取并监听接口、路由和 DNS 变化。
 
-If native event subscriptions are incomplete or unreliable, the plugin may use a conservative polling fallback for system network state. Quality probing remains cross-platform.
+如果原生事件订阅不完整或不可靠，插件可以对系统网络状态使用保守的轮询兜底。质量探测逻辑仍保持跨平台一致。
 
-## Error Handling
+## 错误处理
 
-Errors should be structured and serializable:
+错误需要结构化并可序列化：
 
 - `unsupported_platform`
 - `invalid_config`
@@ -256,36 +256,36 @@ Errors should be structured and serializable:
 - `system_network_unavailable`
 - `internal_error`
 
-Probe failures are not always command failures. A failed probe should normally appear in `quality.currentProbe.error` and update the snapshot, not reject the whole watcher task.
+探测失败不一定等于命令失败。正常情况下，单次探测失败应该体现在 `quality.currentProbe.error` 中，并更新快照，而不是让整个后台监控任务失败。
 
-## Privacy
+## 隐私
 
-MAC address is not returned by default.
+默认不返回 MAC 地址。
 
-The first release should not expose packet contents, nearby devices, SSIDs, or LAN discovery data. The plugin should only expose network interface metadata and active probe results required for application health diagnostics.
+第一版不暴露包内容、附近设备、SSID 或局域网发现数据。插件只暴露应用健康诊断所需的网络接口元数据和主动探测结果。
 
-## Testing Strategy
+## 测试策略
 
-Unit tests:
+单元测试：
 
-- Configuration defaulting and runtime override merge.
-- Rolling window statistics.
-- State machine transitions.
-- Score calculation.
-- Error serialization.
+- 配置默认值和运行时覆盖合并。
+- 滚动窗口统计。
+- 状态机转换。
+- 质量评分计算。
+- 错误序列化。
 
-Integration tests where practical:
+可行时补充集成测试：
 
-- `getSnapshot` returns a valid default snapshot before watching.
-- `startWatching` creates probe results.
-- `stopWatching` stops background work.
-- Event payload is a complete snapshot.
+- `getSnapshot` 在未启动监控前返回有效默认快照。
+- `startWatching` 能产生探测结果。
+- `stopWatching` 能停止后台任务。
+- 事件 payload 是完整快照。
 
-Manual platform verification:
+手动平台验证：
 
-- Windows Wi-Fi disconnect and reconnect.
-- Windows switching between Wi-Fi and Ethernet.
-- macOS Wi-Fi disconnect and reconnect.
-- macOS switching DNS or VPN.
-- Target timeout and recovery.
+- Windows Wi-Fi 断开和重连。
+- Windows 在 Wi-Fi 和 Ethernet 之间切换。
+- macOS Wi-Fi 断开和重连。
+- macOS 切换 DNS 或 VPN。
+- 探测目标超时和恢复。
 
