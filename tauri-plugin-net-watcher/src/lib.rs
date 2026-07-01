@@ -14,6 +14,7 @@ mod mobile;
 mod commands;
 mod error;
 mod models;
+mod stats;
 
 pub use config::{NetWatcherConfig, StartWatchingOptions};
 pub use error::{Error, Result};
