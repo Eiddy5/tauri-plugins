@@ -40,8 +40,7 @@ fn build_interfaces_from_entries(
     let mut interfaces = entries
         .into_iter()
         .fold(BTreeMap::new(), |mut interfaces, (name, ip)| {
-            let id = sanitize_id(&name);
-            let interface = interfaces.entry(id.clone()).or_insert_with(|| {
+            let interface = interfaces.entry(name.clone()).or_insert_with(|| {
                 let interface_type = classify_interface(&name);
                 let status = if interface_type == InterfaceType::Loopback {
                     InterfaceStatus::Down
@@ -50,7 +49,7 @@ fn build_interfaces_from_entries(
                 };
 
                 NetworkInterface {
-                    id,
+                    id: sanitize_id(&name),
                     name: name.clone(),
                     display_name: name,
                     interface_type,
@@ -72,6 +71,8 @@ fn build_interfaces_from_entries(
         .into_values()
         .collect::<Vec<_>>();
 
+    assign_unique_ids(&mut interfaces);
+
     for interface in &mut interfaces {
         interface.addresses.ipv4.sort();
         interface.addresses.ipv4.dedup();
@@ -80,6 +81,22 @@ fn build_interfaces_from_entries(
     }
 
     interfaces
+}
+
+fn assign_unique_ids(interfaces: &mut [NetworkInterface]) {
+    let mut seen = BTreeMap::<String, usize>::new();
+
+    for interface in interfaces {
+        let base_id = sanitize_id(&interface.name);
+        let count = seen.entry(base_id.clone()).or_insert(0);
+        *count += 1;
+
+        interface.id = if *count == 1 {
+            base_id
+        } else {
+            format!("{base_id}_{count}")
+        };
+    }
 }
 
 pub fn has_available_interface(snapshot: &NetworkSnapshot) -> bool {
@@ -178,5 +195,25 @@ mod tests {
         assert_eq!(interfaces[0].id, "if_en0");
         assert_eq!(interfaces[0].addresses.ipv4, vec!["192.168.1.10"]);
         assert_eq!(interfaces[0].addresses.ipv6, vec!["::1"]);
+    }
+
+    #[test]
+    fn keeps_interfaces_with_colliding_sanitized_ids_separate() {
+        let interfaces = build_interfaces_from_entries(vec![
+            (
+                "Ethernet 1".to_string(),
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
+            ),
+            (
+                "Ethernet-1".to_string(),
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 11)),
+            ),
+        ]);
+
+        assert_eq!(interfaces.len(), 2);
+        assert_eq!(interfaces[0].name, "Ethernet 1");
+        assert_eq!(interfaces[0].id, "if_ethernet_1");
+        assert_eq!(interfaces[1].name, "Ethernet-1");
+        assert_eq!(interfaces[1].id, "if_ethernet_1_2");
     }
 }
