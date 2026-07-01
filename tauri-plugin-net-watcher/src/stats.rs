@@ -1,15 +1,15 @@
-#![allow(dead_code)]
-
 use std::collections::VecDeque;
 
 use crate::models::{LatencySummary, ProbeResult, ProbeStatus, QualitySummary};
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RollingWindow {
     capacity: usize,
     samples: VecDeque<ProbeResult>,
 }
 
+#[allow(dead_code)]
 impl RollingWindow {
     pub fn new(capacity: usize) -> Self {
         let capacity = capacity.max(1);
@@ -59,7 +59,7 @@ impl RollingWindow {
             .samples
             .iter()
             .rev()
-            .take_while(|sample| sample.status != ProbeStatus::Success)
+            .take_while(|sample| sample.status == ProbeStatus::Failed)
             .count();
         let last_success_at = self
             .samples
@@ -71,7 +71,7 @@ impl RollingWindow {
             .samples
             .iter()
             .rev()
-            .find(|sample| sample.status != ProbeStatus::Success);
+            .find(|sample| sample.status == ProbeStatus::Failed);
         let last_failure_at = last_failure.map(|sample| sample.ended_at);
         let last_failure_reason = last_failure
             .and_then(|sample| sample.error.as_ref())
@@ -92,12 +92,19 @@ impl RollingWindow {
     }
 }
 
+#[allow(dead_code)]
 fn latency_summary(latencies: &[u64]) -> LatencySummary {
     if latencies.is_empty() {
         return LatencySummary::default();
     }
 
-    let avg = latencies.iter().sum::<u64>() / latencies.len() as u64;
+    let avg = clamp_u128_to_u64(
+        latencies
+            .iter()
+            .map(|latency| *latency as u128)
+            .sum::<u128>()
+            / latencies.len() as u128,
+    );
     let min = latencies.iter().copied().min().unwrap_or_default();
     let max = latencies.iter().copied().max().unwrap_or_default();
     let mut sorted = latencies.to_vec();
@@ -108,6 +115,7 @@ fn latency_summary(latencies: &[u64]) -> LatencySummary {
     LatencySummary { avg, min, max, p95 }
 }
 
+#[allow(dead_code)]
 fn jitter(latencies: &[u64]) -> u64 {
     if latencies.len() < 2 {
         return 0;
@@ -115,10 +123,15 @@ fn jitter(latencies: &[u64]) -> u64 {
 
     let total_delta = latencies
         .windows(2)
-        .map(|pair| pair[0].abs_diff(pair[1]))
-        .sum::<u64>();
+        .map(|pair| pair[0].abs_diff(pair[1]) as u128)
+        .sum::<u128>();
 
-    total_delta / (latencies.len() - 1) as u64
+    clamp_u128_to_u64(total_delta / (latencies.len() - 1) as u128)
+}
+
+#[allow(dead_code)]
+fn clamp_u128_to_u64(value: u128) -> u64 {
+    value.min(u64::MAX as u128) as u64
 }
 
 #[cfg(test)]
@@ -178,5 +191,34 @@ mod tests {
         assert_eq!(summary.sample_count, 2);
         assert_eq!(summary.latency_ms.min, 200);
         assert_eq!(summary.latency_ms.max, 300);
+    }
+
+    #[test]
+    fn rolling_window_handles_large_latency_sum_without_overflow() {
+        let mut window = RollingWindow::new(3);
+
+        window.push(probe(ProbeStatus::Success, u64::MAX, None));
+        window.push(probe(ProbeStatus::Success, u64::MAX, None));
+        window.push(probe(ProbeStatus::Success, u64::MAX, None));
+
+        let summary = window.summary();
+
+        assert_eq!(summary.latency_ms.avg, u64::MAX);
+        assert_eq!(summary.latency_ms.min, u64::MAX);
+        assert_eq!(summary.latency_ms.max, u64::MAX);
+        assert_eq!(summary.latency_ms.p95, u64::MAX);
+    }
+
+    #[test]
+    fn rolling_window_handles_large_jitter_sum_without_overflow() {
+        let mut window = RollingWindow::new(3);
+
+        window.push(probe(ProbeStatus::Success, 0, None));
+        window.push(probe(ProbeStatus::Success, u64::MAX, None));
+        window.push(probe(ProbeStatus::Success, 0, None));
+
+        let summary = window.summary();
+
+        assert_eq!(summary.jitter_ms, u64::MAX);
     }
 }
