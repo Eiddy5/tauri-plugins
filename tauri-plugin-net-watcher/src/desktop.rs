@@ -1,7 +1,7 @@
 use serde::de::DeserializeOwned;
 use tauri::{plugin::PluginApi, AppHandle, Runtime};
 
-use crate::models::*;
+use crate::commands::{PingRequest, PingResponse};
 
 pub fn init<R: Runtime, C: DeserializeOwned>(
   app: &AppHandle<R>,
@@ -14,7 +14,7 @@ pub fn init<R: Runtime, C: DeserializeOwned>(
 pub struct NetWatcher<R: Runtime>(AppHandle<R>);
 
 impl<R: Runtime> NetWatcher<R> {
-  pub fn ping(&self, payload: PingRequest) -> crate::Result<PingResponse> {
+  pub(crate) fn ping(&self, payload: PingRequest) -> crate::Result<PingResponse> {
     Ok(PingResponse {
       value: payload.value,
     })

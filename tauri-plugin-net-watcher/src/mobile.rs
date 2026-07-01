@@ -4,7 +4,7 @@ use tauri::{
   AppHandle, Runtime,
 };
 
-use crate::models::*;
+use crate::commands::{PingRequest, PingResponse};
 
 #[cfg(target_os = "ios")]
 tauri::ios_plugin_binding!(init_plugin_net_watcher);
@@ -25,7 +25,7 @@ pub fn init<R: Runtime, C: DeserializeOwned>(
 pub struct NetWatcher<R: Runtime>(PluginHandle<R>);
 
 impl<R: Runtime> NetWatcher<R> {
-  pub fn ping(&self, payload: PingRequest) -> crate::Result<PingResponse> {
+  pub(crate) fn ping(&self, payload: PingRequest) -> crate::Result<PingResponse> {
     self
       .0
       .run_mobile_plugin("ping", payload)
