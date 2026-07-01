@@ -96,26 +96,6 @@ where
     }
 
     fn start_background(&self, options: Option<StartWatchingOptions>) -> Result<()> {
-        {
-            let mut task = self
-                .task
-                .lock()
-                .map_err(|_| Error::internal("net watcher task lock is poisoned"))?;
-            clear_finished_task(&mut task);
-
-            if task.is_some() {
-                return Err(Error::already_watching());
-            }
-        }
-
-        let config = merge_runtime_config(&self.config, options);
-        config.validate()?;
-        let initial_network = read_network_snapshot(config.include_mac_address)?;
-
-        let app = self.app.clone();
-        let snapshot = self.snapshot.clone();
-        let handle = async_runtime::spawn(run_loop(app, snapshot, config, initial_network));
-
         let mut task = self
             .task
             .lock()
@@ -123,10 +103,15 @@ where
         clear_finished_task(&mut task);
 
         if task.is_some() {
-            handle.abort();
             return Err(Error::already_watching());
         }
 
+        let config = merge_runtime_config(&self.config, options);
+        config.validate()?;
+
+        let app = self.app.clone();
+        let snapshot = self.snapshot.clone();
+        let handle = async_runtime::spawn(run_loop(app, snapshot, config));
         *task = Some(handle);
 
         Ok(())
@@ -156,7 +141,6 @@ async fn run_loop<R>(
     app: AppHandle<R>,
     snapshot: Arc<RwLock<NetWatcherSnapshot>>,
     config: NetWatcherConfig,
-    initial_network: NetworkSnapshot,
 ) where
     R: Runtime,
 {
@@ -176,15 +160,11 @@ async fn run_loop<R>(
         window_size: config.window_size,
         timeout_ms: config.timeout_ms,
     };
-    let mut next_network = Some(initial_network);
 
     loop {
-        let (network, network_error) = match next_network.take() {
-            Some(network) => (network, None),
-            None => match read_network_snapshot(config.include_mac_address) {
-                Ok(network) => (network, None),
-                Err(error) => (NetworkSnapshot::default(), Some(error)),
-            },
+        let (network, network_error) = match read_network_snapshot(config.include_mac_address) {
+            Ok(network) => (network, None),
+            Err(error) => (NetworkSnapshot::default(), Some(error)),
         };
 
         let probe = prober.probe(&target).await;
@@ -196,7 +176,13 @@ async fn run_loop<R>(
             state.reason = format!("network_snapshot_failed:{}", error.code());
         }
         let current_overall = state.overall.clone();
-        let changed_fields = changed_fields(&previous, &network, &state);
+        let quality = QualitySnapshot {
+            config: quality_config.clone(),
+            target: target.clone(),
+            current_probe: window.latest(),
+            summary,
+        };
+        let changed_fields = changed_fields(&previous, &network, &state, &quality);
 
         let next = NetWatcherSnapshot {
             meta: SnapshotMeta {
@@ -207,12 +193,7 @@ async fn run_loop<R>(
             },
             state,
             network: network.clone(),
-            quality: QualitySnapshot {
-                config: quality_config.clone(),
-                target: target.clone(),
-                current_probe: window.latest(),
-                summary,
-            },
+            quality,
             changes: SnapshotChanges {
                 has_changes: !changed_fields.is_empty(),
                 previous_overall: Some(previous.state.overall),
@@ -232,14 +213,20 @@ fn changed_fields(
     previous: &NetWatcherSnapshot,
     network: &NetworkSnapshot,
     state: &SnapshotState,
+    quality: &QualitySnapshot,
 ) -> Vec<String> {
-    let mut fields = vec![
-        "quality.currentProbe".to_string(),
-        "quality.summary".to_string(),
-    ];
+    let mut fields = Vec::new();
 
     if previous.network != *network {
         fields.push("network".to_string());
+    }
+
+    if previous.quality.current_probe != quality.current_probe {
+        fields.push("quality.currentProbe".to_string());
+    }
+
+    if previous.quality.summary != quality.summary {
+        fields.push("quality.summary".to_string());
     }
 
     if previous.state.overall != state.overall {
@@ -252,6 +239,14 @@ fn changed_fields(
 
     if previous.state.quality != state.quality {
         fields.push("state.quality".to_string());
+    }
+
+    if previous.state.score != state.score {
+        fields.push("state.score".to_string());
+    }
+
+    if previous.state.reason != state.reason {
+        fields.push("state.reason".to_string());
     }
 
     fields

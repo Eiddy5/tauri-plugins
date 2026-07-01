@@ -112,6 +112,12 @@ impl NetWatcherConfig {
             ));
         }
 
+        if self.include_mac_address {
+            return Err(crate::Error::invalid_config(
+                "MAC address collection is not supported by the get_if_addrs backend",
+            ));
+        }
+
         Ok(())
     }
 }
@@ -237,5 +243,17 @@ mod tests {
 
             assert_eq!(error.code(), "invalid_config");
         }
+    }
+
+    #[test]
+    fn include_mac_address_is_rejected() {
+        let error = NetWatcherConfig {
+            include_mac_address: true,
+            ..Default::default()
+        }
+        .validate()
+        .unwrap_err();
+
+        assert_eq!(error.code(), "invalid_config");
     }
 }
