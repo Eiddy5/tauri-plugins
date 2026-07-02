@@ -129,7 +129,7 @@ pub fn classify_interface(name: &str) -> InterfaceType {
         || normalized.contains("wifi")
         || normalized.contains("wlan")
         || normalized.contains("wireless")
-        || normalized.contains("无线")
+        || normalized.contains("\u{65e0}\u{7ebf}")
         || normalized == "en0"
     {
         InterfaceType::Wifi
@@ -146,7 +146,9 @@ pub fn classify_interface(name: &str) -> InterfaceType {
     {
         InterfaceType::Vpn
     } else if normalized.contains("ethernet")
-        || normalized.contains("以太")
+        || normalized.contains("\u{4ee5}\u{592a}")
+        || normalized.contains("local area connection")
+        || normalized.contains("\u{672c}\u{5730}\u{8fde}\u{63a5}")
         || normalized.starts_with("eth")
         || normalized.starts_with("en")
     {
@@ -193,12 +195,8 @@ fn mark_primary(interfaces: &mut [NetworkInterface]) {
     if let Some(index) = interfaces
         .iter()
         .enumerate()
-        .filter(|(_, interface)| {
-            interface.status == InterfaceStatus::Up
-                && interface.interface_type != InterfaceType::Loopback
-                && !interface.addresses.ipv4.is_empty()
-        })
-        .min_by_key(|(_, interface)| primary_priority(&interface.interface_type))
+        .filter(|(_, interface)| can_be_primary(interface))
+        .min_by_key(|(_, interface)| primary_priority(interface))
         .map(|(index, _)| index)
     {
         let interface = &mut interfaces[index];
@@ -206,13 +204,34 @@ fn mark_primary(interfaces: &mut [NetworkInterface]) {
     }
 }
 
-fn primary_priority(interface_type: &InterfaceType) -> u8 {
-    match interface_type {
-        InterfaceType::Wifi | InterfaceType::Ethernet => 0,
-        InterfaceType::Vpn => 1,
-        InterfaceType::Unknown => 2,
-        InterfaceType::Loopback => 3,
-    }
+fn can_be_primary(interface: &NetworkInterface) -> bool {
+    interface.status == InterfaceStatus::Up
+        && interface.interface_type != InterfaceType::Loopback
+        && !interface.addresses.ipv4.is_empty()
+}
+
+fn primary_priority(interface: &NetworkInterface) -> (u8, u8) {
+    (
+        if has_non_link_local_ipv4(interface) {
+            0
+        } else {
+            1
+        },
+        match interface.interface_type {
+            InterfaceType::Wifi | InterfaceType::Ethernet => 0,
+            InterfaceType::Vpn => 1,
+            InterfaceType::Unknown => 2,
+            InterfaceType::Loopback => 3,
+        },
+    )
+}
+
+fn has_non_link_local_ipv4(interface: &NetworkInterface) -> bool {
+    interface.addresses.ipv4.iter().any(|address| {
+        address
+            .parse::<std::net::Ipv4Addr>()
+            .is_ok_and(|ip| !ip.is_link_local())
+    })
 }
 
 #[cfg(test)]
@@ -220,23 +239,48 @@ mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
 
+    fn chinese(text: &[char]) -> String {
+        text.iter().collect()
+    }
+
+    fn wireless_name() -> String {
+        chinese(&[
+            '\u{65e0}', '\u{7ebf}', '\u{7f51}', '\u{7edc}', '\u{8fde}', '\u{63a5}',
+        ])
+    }
+
+    fn ethernet_name() -> String {
+        chinese(&['\u{4ee5}', '\u{592a}', '\u{7f51}'])
+    }
+
+    fn local_connection_name() -> String {
+        chinese(&['\u{672c}', '\u{5730}', '\u{8fde}', '\u{63a5}'])
+    }
+
     #[test]
     fn classifies_common_interface_names() {
         assert_eq!(classify_interface("Wi-Fi"), InterfaceType::Wifi);
         assert_eq!(classify_interface("WLAN"), InterfaceType::Wifi);
-        assert_eq!(classify_interface("无线网络连接"), InterfaceType::Wifi);
+        assert_eq!(classify_interface(&wireless_name()), InterfaceType::Wifi);
         assert_eq!(classify_interface("en0"), InterfaceType::Wifi);
         assert_eq!(classify_interface("Ethernet"), InterfaceType::Ethernet);
-        assert_eq!(classify_interface("以太网"), InterfaceType::Ethernet);
+        assert_eq!(
+            classify_interface(&ethernet_name()),
+            InterfaceType::Ethernet
+        );
+        assert_eq!(
+            classify_interface("Local Area Connection"),
+            InterfaceType::Ethernet
+        );
+        assert_eq!(
+            classify_interface(&local_connection_name()),
+            InterfaceType::Ethernet
+        );
         assert_eq!(classify_interface("eth0"), InterfaceType::Ethernet);
         assert_eq!(classify_interface("utun0"), InterfaceType::Vpn);
         assert_eq!(classify_interface("Meta"), InterfaceType::Vpn);
         assert_eq!(classify_interface("Meta Tunnel"), InterfaceType::Vpn);
         assert_eq!(classify_interface("lo0"), InterfaceType::Loopback);
-        assert_ne!(
-            classify_interface("Local Area Connection"),
-            InterfaceType::Loopback
-        );
     }
 
     #[test]
@@ -259,6 +303,29 @@ mod tests {
     fn primary_interface_prefers_physical_network_over_tunnel() {
         let mut interfaces = build_interfaces_from_entries(vec![
             ("Meta".to_string(), IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1))),
+            (
+                "WLAN".to_string(),
+                IpAddr::V4(Ipv4Addr::new(192, 168, 5, 35)),
+            ),
+        ]);
+        mark_primary(&mut interfaces);
+
+        assert_eq!(
+            interfaces
+                .iter()
+                .find(|interface| interface.is_primary)
+                .map(|interface| interface.name.as_str()),
+            Some("WLAN")
+        );
+    }
+
+    #[test]
+    fn primary_interface_prefers_non_link_local_physical_network() {
+        let mut interfaces = build_interfaces_from_entries(vec![
+            (
+                local_connection_name(),
+                IpAddr::V4(Ipv4Addr::new(169, 254, 235, 83)),
+            ),
             (
                 "WLAN".to_string(),
                 IpAddr::V4(Ipv4Addr::new(192, 168, 5, 35)),

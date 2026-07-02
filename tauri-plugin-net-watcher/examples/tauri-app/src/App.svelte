@@ -6,12 +6,24 @@
     startWatching,
     stopWatching,
     type NetWatcherSnapshot,
+    type OverallState,
   } from 'tauri-plugin-net-watcher-api'
+
+  interface SnapshotNotification {
+    receivedAt: string
+    snapshotId: string
+    overall: OverallState
+    network: string
+    quality: string
+    changedFields: string[]
+    primaryInterfaceId: string | null
+  }
 
   let snapshot: NetWatcherSnapshot | null = $state(null)
   let error = $state('')
   let isBusy = $state(false)
   let isListening = $state(false)
+  let notifications: SnapshotNotification[] = $state([])
   let unlisten: (() => void) | null = null
 
   const primaryInterface = $derived(
@@ -88,6 +100,21 @@
     }
   }
 
+  function recordNotification(nextSnapshot: NetWatcherSnapshot) {
+    notifications = [
+      {
+        receivedAt: new Date().toISOString(),
+        snapshotId: nextSnapshot.meta.snapshotId,
+        overall: nextSnapshot.state.overall,
+        network: nextSnapshot.state.network,
+        quality: nextSnapshot.state.quality,
+        changedFields: nextSnapshot.changes.changedFields,
+        primaryInterfaceId: nextSnapshot.network.primaryInterfaceId,
+      },
+      ...notifications,
+    ].slice(0, 20)
+  }
+
   async function refreshSnapshot() {
     isBusy = true
     error = ''
@@ -139,6 +166,7 @@
   onMount(() => {
     onSnapshotUpdated((nextSnapshot) => {
       snapshot = nextSnapshot
+      recordNotification(nextSnapshot)
       error = ''
     })
       .then((cleanup) => {
@@ -434,6 +462,42 @@
         {/if}
       </section>
 
+      <section class="data-section" aria-labelledby="notifications-title">
+        <h2 id="notifications-title">Plugin notifications ({notifications.length})</h2>
+        {#if notifications.length}
+          <div class="notification-list">
+            {#each notifications as item}
+              <article class="notification-item">
+                <div>
+                  <strong>{item.overall}</strong>
+                  <span>{formatDate(item.receivedAt)}</span>
+                </div>
+                <dl>
+                  <div>
+                    <dt>Snapshot</dt>
+                    <dd>{item.snapshotId}</dd>
+                  </div>
+                  <div>
+                    <dt>Network / quality</dt>
+                    <dd>{item.network} / {item.quality}</dd>
+                  </div>
+                  <div>
+                    <dt>Primary interface</dt>
+                    <dd>{item.primaryInterfaceId ?? 'n/a'}</dd>
+                  </div>
+                  <div>
+                    <dt>Changed fields</dt>
+                    <dd>{item.changedFields.length ? item.changedFields.join(', ') : 'n/a'}</dd>
+                  </div>
+                </dl>
+              </article>
+            {/each}
+          </div>
+        {:else}
+          <p class="muted">No snapshot-updated events received yet.</p>
+        {/if}
+      </section>
+
       <section class="data-section" aria-labelledby="raw-title">
         <h2 id="raw-title">Raw snapshot JSON</h2>
         <pre>{rawSnapshot}</pre>
@@ -692,6 +756,34 @@
     font-weight: 700;
   }
 
+  .notification-list {
+    display: grid;
+    gap: 12px;
+  }
+
+  .notification-item {
+    background: #f8fafc;
+  }
+
+  .notification-item > div:first-child {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+
+  .notification-item strong {
+    font-size: 18px;
+    line-height: 1.25;
+  }
+
+  .notification-item span {
+    color: #5f6f7d;
+    font-size: 13px;
+    white-space: nowrap;
+  }
+
   pre {
     max-height: 360px;
     margin: 0;
@@ -714,7 +806,8 @@
     }
 
     .header,
-    dl div {
+    dl div,
+    .notification-item > div:first-child {
       flex-direction: column;
       align-items: flex-start;
     }
