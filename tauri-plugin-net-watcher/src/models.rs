@@ -276,11 +276,13 @@ mod tests {
 
     #[test]
     fn initial_snapshot_reflects_config() {
-        let mut config = crate::NetWatcherConfig::default();
-        config.target = "https://example.com/health".to_string();
-        config.interval_ms = 5_000;
-        config.timeout_ms = 1_500;
-        config.window_size = 7;
+        let config = crate::NetWatcherConfig {
+            target: "https://example.com/health".to_string(),
+            interval_ms: 5_000,
+            timeout_ms: 1_500,
+            window_size: 7,
+            ..Default::default()
+        };
 
         let snapshot = NetWatcherSnapshot::initial_with_config("0.1.0", &config);
 
