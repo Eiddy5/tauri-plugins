@@ -33,5 +33,13 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "net-watcher": {
+      "autoStart": false,
+      "target": "https://www.apple.com/library/test/success.html",
+      "intervalMs": 10000,
+      "timeoutMs": 3000
+    }
   }
 }
