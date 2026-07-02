@@ -18,6 +18,8 @@ mod network;
 mod probe;
 mod state;
 mod stats;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod system_events;
 
 pub use config::{NetWatcherConfig, StartWatchingOptions};
 pub use error::{Error, Result};

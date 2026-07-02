@@ -21,6 +21,14 @@ native-tls = "0.2"
 tokio-native-tls = "0.3"
 get_if_addrs = "0.5"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_NetworkManagement_Ndis",
+  "Win32_Networking_WinSock",
+] }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
 

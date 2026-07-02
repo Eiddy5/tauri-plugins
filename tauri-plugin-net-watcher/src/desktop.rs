@@ -9,13 +9,14 @@ use tauri::{
     plugin::PluginApi,
     AppHandle, Emitter, Runtime,
 };
-use tokio::sync::oneshot;
+use tokio::sync::mpsc;
 
 use crate::{
     network::{has_available_interface, read_network_snapshot},
     probe::HttpProber,
     state::{evaluate_state, StateConfig},
     stats::RollingWindow,
+    system_events::{start_system_network_watcher, SystemNetworkWatcher, WatcherSignal},
     Error, NetWatcherConfig, NetWatcherSnapshot, NetworkSnapshot, ProbeResult, ProbeTarget,
     ProbeTargetType, QualityConfigSnapshot, QualitySnapshot, Result, SnapshotChanges, SnapshotMeta,
     StartWatchingOptions,
@@ -50,8 +51,16 @@ pub struct NetWatcher<R: Runtime> {
 }
 
 struct WatcherTask {
-    stop_tx: oneshot::Sender<()>,
+    signal_tx: mpsc::UnboundedSender<WatcherSignal>,
     handle: JoinHandle<()>,
+    _system_watcher: Option<SystemNetworkWatcher>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatcherWake {
+    Interval,
+    SystemNetworkChanged,
+    Stop,
 }
 
 impl<R> NetWatcher<R>
@@ -97,7 +106,7 @@ where
             task.take().ok_or_else(Error::not_watching)?
         };
 
-        let _ = task.stop_tx.send(());
+        let _ = task.signal_tx.send(WatcherSignal::Stop);
         let mut handle = task.handle;
         match tokio::time::timeout(Duration::from_secs(5), &mut handle).await {
             Ok(join_result) => join_result
@@ -127,9 +136,14 @@ where
 
         let app = self.app.clone();
         let snapshot = self.snapshot.clone();
-        let (stop_tx, stop_rx) = oneshot::channel();
-        let handle = async_runtime::spawn(run_loop(app, snapshot, config, stop_rx));
-        *task = Some(WatcherTask { stop_tx, handle });
+        let (signal_tx, signal_rx) = mpsc::unbounded_channel();
+        let system_watcher = start_system_network_watcher(signal_tx.clone())?;
+        let handle = async_runtime::spawn(run_loop(app, snapshot, config, signal_rx));
+        *task = Some(WatcherTask {
+            signal_tx,
+            handle,
+            _system_watcher: system_watcher,
+        });
 
         Ok(())
     }
@@ -158,7 +172,7 @@ async fn run_loop<R>(
     app: AppHandle<R>,
     snapshot: Arc<RwLock<NetWatcherSnapshot>>,
     config: NetWatcherConfig,
-    mut stop_rx: oneshot::Receiver<()>,
+    mut signal_rx: mpsc::UnboundedReceiver<WatcherSignal>,
 ) where
     R: Runtime,
 {
@@ -234,12 +248,21 @@ async fn run_loop<R>(
             let _ = app.emit(SNAPSHOT_EVENT, next);
         }
 
-        if tokio::time::timeout(Duration::from_millis(config.interval_ms), &mut stop_rx)
-            .await
-            .is_ok()
-        {
-            break;
+        match wait_for_next_wake(Duration::from_millis(config.interval_ms), &mut signal_rx).await {
+            WatcherWake::Interval | WatcherWake::SystemNetworkChanged => {}
+            WatcherWake::Stop => break,
         }
+    }
+}
+
+async fn wait_for_next_wake(
+    interval: Duration,
+    signal_rx: &mut mpsc::UnboundedReceiver<WatcherSignal>,
+) -> WatcherWake {
+    match tokio::time::timeout(interval, signal_rx.recv()).await {
+        Ok(Some(WatcherSignal::SystemNetworkChanged)) => WatcherWake::SystemNetworkChanged,
+        Ok(Some(WatcherSignal::Stop)) | Ok(None) => WatcherWake::Stop,
+        Err(_) => WatcherWake::Interval,
     }
 }
 
@@ -392,6 +415,26 @@ mod tests {
         let previous = snapshot();
 
         changed_fields(&previous, next)
+    }
+
+    #[tokio::test]
+    async fn wait_for_next_wake_returns_system_network_change_before_interval() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(WatcherSignal::SystemNetworkChanged).unwrap();
+
+        let wake = wait_for_next_wake(Duration::from_secs(60), &mut rx).await;
+
+        assert_eq!(wake, WatcherWake::SystemNetworkChanged);
+    }
+
+    #[tokio::test]
+    async fn wait_for_next_wake_returns_stop_signal() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(WatcherSignal::Stop).unwrap();
+
+        let wake = wait_for_next_wake(Duration::from_secs(60), &mut rx).await;
+
+        assert_eq!(wake, WatcherWake::Stop);
     }
 
     #[test]
