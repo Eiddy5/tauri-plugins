@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_TARGET: &str = "https://www.apple.com/library/test/success.html";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NetWatcherConfig {
     #[serde(default)]
     pub auto_start: bool,
@@ -13,16 +13,6 @@ pub struct NetWatcherConfig {
     pub interval_ms: u64,
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
-    #[serde(default = "default_window_size")]
-    pub window_size: usize,
-    #[serde(default = "default_degraded_failure_rate")]
-    pub degraded_failure_rate: f64,
-    #[serde(default = "default_degraded_p95_latency_ms")]
-    pub degraded_p95_latency_ms: u64,
-    #[serde(default = "default_offline_consecutive_failures")]
-    pub offline_consecutive_failures: usize,
-    #[serde(default)]
-    pub include_mac_address: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -40,11 +30,6 @@ impl Default for NetWatcherConfig {
             target: default_target(),
             interval_ms: default_interval_ms(),
             timeout_ms: default_timeout_ms(),
-            window_size: default_window_size(),
-            degraded_failure_rate: default_degraded_failure_rate(),
-            degraded_p95_latency_ms: default_degraded_p95_latency_ms(),
-            offline_consecutive_failures: default_offline_consecutive_failures(),
-            include_mac_address: false,
         }
     }
 }
@@ -85,40 +70,27 @@ impl NetWatcherConfig {
             ));
         }
 
-        if self.window_size == 0 {
-            return Err(crate::Error::invalid_config(
-                "net watcher window_size must be greater than zero",
-            ));
-        }
-
-        if !self.degraded_failure_rate.is_finite()
-            || self.degraded_failure_rate <= 0.0
-            || self.degraded_failure_rate > 1.0
-        {
-            return Err(crate::Error::invalid_config(
-                "net watcher degraded_failure_rate must be finite, greater than zero, and at most one",
-            ));
-        }
-
-        if self.degraded_p95_latency_ms == 0 {
-            return Err(crate::Error::invalid_config(
-                "net watcher degraded_p95_latency_ms must be greater than zero",
-            ));
-        }
-
-        if self.offline_consecutive_failures == 0 {
-            return Err(crate::Error::invalid_config(
-                "net watcher offline_consecutive_failures must be greater than zero",
-            ));
-        }
-
-        if self.include_mac_address {
-            return Err(crate::Error::invalid_config(
-                "MAC address collection is not supported by the get_if_addrs backend",
-            ));
-        }
-
         Ok(())
+    }
+
+    pub(crate) fn window_size(&self) -> usize {
+        default_window_size()
+    }
+
+    pub(crate) fn degraded_failure_rate(&self) -> f64 {
+        default_degraded_failure_rate()
+    }
+
+    pub(crate) fn degraded_p95_latency_ms(&self) -> u64 {
+        default_degraded_p95_latency_ms()
+    }
+
+    pub(crate) fn offline_consecutive_failures(&self) -> usize {
+        default_offline_consecutive_failures()
+    }
+
+    pub(crate) fn include_mac_address(&self) -> bool {
+        false
     }
 }
 
@@ -153,6 +125,7 @@ fn default_offline_consecutive_failures() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn default_config_uses_core_defaults() {
@@ -165,11 +138,33 @@ mod tests {
         );
         assert_eq!(config.interval_ms, 10_000);
         assert_eq!(config.timeout_ms, 3_000);
-        assert_eq!(config.window_size, 20);
-        assert_eq!(config.degraded_failure_rate, 0.15);
-        assert_eq!(config.degraded_p95_latency_ms, 800);
-        assert_eq!(config.offline_consecutive_failures, 3);
-        assert!(!config.include_mac_address);
+    }
+
+    #[test]
+    fn config_serializes_only_core_public_fields() {
+        let value = serde_json::to_value(NetWatcherConfig::default()).unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "autoStart": false,
+                "target": "https://www.apple.com/library/test/success.html",
+                "intervalMs": 10000,
+                "timeoutMs": 3000
+            })
+        );
+    }
+
+    #[test]
+    fn internal_fields_are_rejected_from_public_config() {
+        let value = json!({
+            "target": "https://example.com/health",
+            "windowSize": 3
+        });
+
+        let error = serde_json::from_value::<NetWatcherConfig>(value).unwrap_err();
+
+        assert!(error.to_string().contains("unknown field"));
     }
 
     #[test]
@@ -186,7 +181,6 @@ mod tests {
         assert_eq!(merged.target, "https://api.example.com/health");
         assert_eq!(merged.interval_ms, 5_000);
         assert_eq!(merged.timeout_ms, 1_500);
-        assert_eq!(merged.window_size, 20);
     }
 
     #[test]
@@ -206,54 +200,13 @@ mod tests {
     }
 
     #[test]
-    fn invalid_state_thresholds_are_rejected() {
-        let invalid_configs = [
-            NetWatcherConfig {
-                window_size: 0,
-                ..Default::default()
-            },
-            NetWatcherConfig {
-                degraded_failure_rate: 0.0,
-                ..Default::default()
-            },
-            NetWatcherConfig {
-                degraded_failure_rate: 1.1,
-                ..Default::default()
-            },
-            NetWatcherConfig {
-                degraded_failure_rate: f64::NAN,
-                ..Default::default()
-            },
-            NetWatcherConfig {
-                degraded_failure_rate: f64::INFINITY,
-                ..Default::default()
-            },
-            NetWatcherConfig {
-                degraded_p95_latency_ms: 0,
-                ..Default::default()
-            },
-            NetWatcherConfig {
-                offline_consecutive_failures: 0,
-                ..Default::default()
-            },
-        ];
+    fn internal_defaults_are_available_to_runtime_only() {
+        let config = NetWatcherConfig::default();
 
-        for config in invalid_configs {
-            let error = config.validate().unwrap_err();
-
-            assert_eq!(error.code(), "invalid_config");
-        }
-    }
-
-    #[test]
-    fn include_mac_address_is_rejected() {
-        let error = NetWatcherConfig {
-            include_mac_address: true,
-            ..Default::default()
-        }
-        .validate()
-        .unwrap_err();
-
-        assert_eq!(error.code(), "invalid_config");
+        assert_eq!(config.window_size(), 20);
+        assert_eq!(config.degraded_failure_rate(), 0.15);
+        assert_eq!(config.degraded_p95_latency_ms(), 800);
+        assert_eq!(config.offline_consecutive_failures(), 3);
+        assert!(!config.include_mac_address());
     }
 }

@@ -15,11 +15,6 @@ export interface NetWatcherConfig {
   target: string
   intervalMs: number
   timeoutMs: number
-  windowSize: number
-  degradedFailureRate: number
-  degradedP95LatencyMs: number
-  offlineConsecutiveFailures: number
-  includeMacAddress: boolean
 }
 
 export interface NetWatcherSnapshot {

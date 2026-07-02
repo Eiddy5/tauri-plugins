@@ -9,14 +9,15 @@ use tauri::{
     plugin::PluginApi,
     AppHandle, Emitter, Runtime,
 };
+use tokio::sync::oneshot;
 
 use crate::{
     network::{has_available_interface, read_network_snapshot},
     probe::HttpProber,
     state::{evaluate_state, StateConfig},
     stats::RollingWindow,
-    Error, NetWatcherConfig, NetWatcherSnapshot, NetworkSnapshot, ProbeTarget, ProbeTargetType,
-    QualityConfigSnapshot, QualitySnapshot, Result, SnapshotChanges, SnapshotMeta,
+    Error, NetWatcherConfig, NetWatcherSnapshot, NetworkSnapshot, ProbeResult, ProbeTarget,
+    ProbeTargetType, QualityConfigSnapshot, QualitySnapshot, Result, SnapshotChanges, SnapshotMeta,
     StartWatchingOptions,
 };
 
@@ -45,7 +46,12 @@ pub struct NetWatcher<R: Runtime> {
     app: AppHandle<R>,
     config: Arc<NetWatcherConfig>,
     snapshot: Arc<RwLock<NetWatcherSnapshot>>,
-    task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    task: Arc<Mutex<Option<WatcherTask>>>,
+}
+
+struct WatcherTask {
+    stop_tx: oneshot::Sender<()>,
+    handle: JoinHandle<()>,
 }
 
 impl<R> NetWatcher<R>
@@ -77,22 +83,32 @@ where
     }
 
     pub(crate) async fn stop_watching(&self) -> Result<()> {
-        let mut task = self
-            .task
-            .lock()
-            .map_err(|_| Error::internal("net watcher task lock is poisoned"))?;
+        let task = {
+            let mut task = self
+                .task
+                .lock()
+                .map_err(|_| Error::internal("net watcher task lock is poisoned"))?;
 
-        clear_finished_task(&mut task);
-        if task.is_none() {
-            return Err(Error::not_watching());
+            clear_finished_task(&mut task);
+            if task.is_none() {
+                return Err(Error::not_watching());
+            }
+
+            task.take().ok_or_else(Error::not_watching)?
+        };
+
+        let _ = task.stop_tx.send(());
+        let mut handle = task.handle;
+        match tokio::time::timeout(Duration::from_secs(5), &mut handle).await {
+            Ok(join_result) => join_result
+                .map_err(|error| Error::internal(format!("net watcher task failed: {error}")))?,
+            Err(_) => {
+                handle.abort();
+                let _ = handle.await;
+            }
         }
 
-        if let Some(handle) = task.take() {
-            handle.abort();
-            Ok(())
-        } else {
-            Err(Error::not_watching())
-        }
+        Ok(())
     }
 
     fn start_background(&self, options: Option<StartWatchingOptions>) -> Result<()> {
@@ -111,17 +127,18 @@ where
 
         let app = self.app.clone();
         let snapshot = self.snapshot.clone();
-        let handle = async_runtime::spawn(run_loop(app, snapshot, config));
-        *task = Some(handle);
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let handle = async_runtime::spawn(run_loop(app, snapshot, config, stop_rx));
+        *task = Some(WatcherTask { stop_tx, handle });
 
         Ok(())
     }
 }
 
-fn clear_finished_task(task: &mut Option<JoinHandle<()>>) {
+fn clear_finished_task(task: &mut Option<WatcherTask>) {
     if task
         .as_ref()
-        .is_some_and(|handle| handle.inner().is_finished())
+        .is_some_and(|task| task.handle.inner().is_finished())
     {
         *task = None;
     }
@@ -141,28 +158,29 @@ async fn run_loop<R>(
     app: AppHandle<R>,
     snapshot: Arc<RwLock<NetWatcherSnapshot>>,
     config: NetWatcherConfig,
+    mut stop_rx: oneshot::Receiver<()>,
 ) where
     R: Runtime,
 {
-    let mut window = RollingWindow::new(config.window_size);
+    let mut window = RollingWindow::new(config.window_size());
     let prober = HttpProber::new(config.timeout_ms);
     let target = ProbeTarget {
         target_type: ProbeTargetType::Http,
         url: config.target.clone(),
     };
     let state_config = StateConfig {
-        degraded_failure_rate: config.degraded_failure_rate,
-        degraded_p95_latency_ms: config.degraded_p95_latency_ms,
-        offline_consecutive_failures: config.offline_consecutive_failures,
+        degraded_failure_rate: config.degraded_failure_rate(),
+        degraded_p95_latency_ms: config.degraded_p95_latency_ms(),
+        offline_consecutive_failures: config.offline_consecutive_failures(),
     };
     let quality_config = QualityConfigSnapshot {
         interval_ms: config.interval_ms,
-        window_size: config.window_size,
+        window_size: config.window_size(),
         timeout_ms: config.timeout_ms,
     };
 
     loop {
-        let (network, network_error) = match read_network_snapshot(config.include_mac_address) {
+        let (network, network_error) = match read_network_snapshot(config.include_mac_address()) {
             Ok(network) => (network, None),
             Err(error) => (NetworkSnapshot::default(), Some(error)),
         };
@@ -210,10 +228,18 @@ async fn run_loop<R>(
             ..next
         };
 
+        let should_emit = next.changes.has_changes;
         *snapshot.write().await = next.clone();
-        let _ = app.emit(SNAPSHOT_EVENT, next);
+        if should_emit {
+            let _ = app.emit(SNAPSHOT_EVENT, next);
+        }
 
-        tokio::time::sleep(Duration::from_millis(config.interval_ms)).await;
+        if tokio::time::timeout(Duration::from_millis(config.interval_ms), &mut stop_rx)
+            .await
+            .is_ok()
+        {
+            break;
+        }
     }
 }
 
@@ -240,7 +266,7 @@ fn changed_fields(previous: &NetWatcherSnapshot, next: &NetWatcherSnapshot) -> V
         fields.push("quality.target".to_string());
     }
 
-    if previous.quality.current_probe != next.quality.current_probe {
+    if probe_changed(&previous.quality.current_probe, &next.quality.current_probe) {
         fields.push("quality.currentProbe".to_string());
     }
 
@@ -271,6 +297,18 @@ fn changed_fields(previous: &NetWatcherSnapshot, next: &NetWatcherSnapshot) -> V
     }
 
     fields
+}
+
+fn probe_changed(previous: &Option<ProbeResult>, next: &Option<ProbeResult>) -> bool {
+    match (previous, next) {
+        (None, None) => false,
+        (None, Some(_)) | (Some(_), None) => true,
+        (Some(previous), Some(next)) => {
+            previous.status != next.status
+                || previous.http != next.http
+                || previous.error != next.error
+        }
+    }
 }
 
 fn changed_summary_fields(
@@ -375,6 +413,36 @@ mod tests {
 
         assert!(fields.contains(&"quality.config.intervalMs".to_string()));
         assert!(fields.contains(&"quality.target".to_string()));
+        assert!(fields.contains(&"quality.currentProbe".to_string()));
+    }
+
+    #[test]
+    fn changed_fields_ignores_probe_identity_and_timestamps() {
+        let mut previous = snapshot();
+        previous.quality.current_probe = Some(probe("probe_1"));
+        let mut next = previous.clone();
+        next.quality.current_probe = Some(probe("probe_2"));
+
+        let fields = changed_fields(&previous, &next);
+
+        assert!(!fields.contains(&"quality.currentProbe".to_string()));
+    }
+
+    #[test]
+    fn changed_fields_reports_probe_semantic_changes() {
+        let mut previous = snapshot();
+        previous.quality.current_probe = Some(probe("probe_1"));
+        let mut next = previous.clone();
+        let mut failed_probe = probe("probe_2");
+        failed_probe.status = ProbeStatus::Failed;
+        failed_probe.error = Some(crate::ProbeError {
+            code: "http_timeout".to_string(),
+            message: "timed out".to_string(),
+        });
+        next.quality.current_probe = Some(failed_probe);
+
+        let fields = changed_fields(&previous, &next);
+
         assert!(fields.contains(&"quality.currentProbe".to_string()));
     }
 

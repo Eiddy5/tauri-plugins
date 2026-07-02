@@ -239,7 +239,7 @@ impl NetWatcherSnapshot {
             quality: QualitySnapshot {
                 config: QualityConfigSnapshot {
                     interval_ms: config.interval_ms,
-                    window_size: config.window_size,
+                    window_size: config.window_size(),
                     timeout_ms: config.timeout_ms,
                 },
                 target: ProbeTarget {
@@ -280,7 +280,6 @@ mod tests {
             target: "https://example.com/health".to_string(),
             interval_ms: 5_000,
             timeout_ms: 1_500,
-            window_size: 7,
             ..Default::default()
         };
 
@@ -289,6 +288,6 @@ mod tests {
         assert_eq!(snapshot.quality.target.url, "https://example.com/health");
         assert_eq!(snapshot.quality.config.interval_ms, 5_000);
         assert_eq!(snapshot.quality.config.timeout_ms, 1_500);
-        assert_eq!(snapshot.quality.config.window_size, 7);
+        assert_eq!(snapshot.quality.config.window_size, 20);
     }
 }

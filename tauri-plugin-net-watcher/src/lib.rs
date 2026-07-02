@@ -6,9 +6,9 @@ use tauri::{
 pub use models::*;
 
 mod config;
-#[cfg(desktop)]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 mod desktop;
-#[cfg(mobile)]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 mod mobile;
 
 mod commands;
@@ -22,9 +22,9 @@ mod stats;
 pub use config::{NetWatcherConfig, StartWatchingOptions};
 pub use error::{Error, Result};
 
-#[cfg(desktop)]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 use desktop::NetWatcher;
-#[cfg(mobile)]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 use mobile::NetWatcher;
 
 /// Extensions to [`tauri::App`], [`tauri::AppHandle`] and [`tauri::Window`] to access the net-watcher APIs.
@@ -49,9 +49,9 @@ pub fn init<R: Runtime>() -> TauriPlugin<R, serde_json::Value> {
         ])
         .setup(|app, api| {
             let config = parse_plugin_config(api.config())?;
-            #[cfg(mobile)]
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
             let net_watcher = mobile::init(app, api, config)?;
-            #[cfg(desktop)]
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             let net_watcher = desktop::init(app, api, config)?;
             app.manage(net_watcher);
             Ok(())
