@@ -356,14 +356,6 @@ fn changed_summary_fields(
         fields.push("quality.summary.consecutiveFailures".to_string());
     }
 
-    if previous.last_success_at != next.last_success_at {
-        fields.push("quality.summary.lastSuccessAt".to_string());
-    }
-
-    if previous.last_failure_at != next.last_failure_at {
-        fields.push("quality.summary.lastFailureAt".to_string());
-    }
-
     if previous.last_failure_reason != next.last_failure_reason {
         fields.push("quality.summary.lastFailureReason".to_string());
     }
@@ -480,14 +472,30 @@ mod tests {
             "quality.summary.latencyMs.p95",
             "quality.summary.jitterMs",
             "quality.summary.consecutiveFailures",
-            "quality.summary.lastSuccessAt",
-            "quality.summary.lastFailureAt",
             "quality.summary.lastFailureReason",
         ] {
             assert!(fields.contains(&expected.to_string()), "missing {expected}");
         }
 
         assert!(!fields.contains(&"quality.summary".to_string()));
+    }
+
+    #[test]
+    fn changed_fields_ignores_summary_timestamp_churn() {
+        let mut previous = snapshot();
+        previous.quality.summary = QualitySummary {
+            sample_count: 2,
+            success_count: 2,
+            last_success_at: Some(Utc::now()),
+            ..Default::default()
+        };
+        let mut next = previous.clone();
+        next.quality.summary.last_success_at = Some(Utc::now());
+
+        let fields = changed_fields(&previous, &next);
+
+        assert!(!fields.contains(&"quality.summary.lastSuccessAt".to_string()));
+        assert!(fields.is_empty());
     }
 
     #[test]

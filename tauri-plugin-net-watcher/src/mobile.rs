@@ -18,10 +18,6 @@ where
     R: Runtime,
     C: DeserializeOwned,
 {
-    if config.auto_start {
-        return Err(crate::Error::unsupported_platform());
-    }
-
     Ok(NetWatcher {
         config,
         _runtime: PhantomData,
@@ -52,5 +48,25 @@ impl<R: Runtime> NetWatcher<R> {
 
     pub(crate) async fn get_config(&self) -> Result<NetWatcherConfig> {
         Ok(self.config.clone())
+    }
+}
+
+#[cfg(all(test, not(any(target_os = "windows", target_os = "macos"))))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn get_config_remains_available_when_auto_start_is_true() {
+        let watcher = NetWatcher::<tauri::Wry> {
+            config: NetWatcherConfig {
+                auto_start: true,
+                ..Default::default()
+            },
+            _runtime: PhantomData,
+        };
+
+        let config = watcher.get_config().await.unwrap();
+
+        assert!(config.auto_start);
     }
 }
