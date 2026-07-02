@@ -48,12 +48,52 @@
     return typeof value === 'string' ? value : JSON.stringify(value)
   }
 
+  function hasObservedData(value: NetWatcherSnapshot | null) {
+    return Boolean(
+      value?.network.interfaces.length
+        || value?.quality.currentProbe
+        || value?.quality.summary.sampleCount,
+    )
+  }
+
+  function isAlreadyWatchingError(value: unknown) {
+    return Boolean(
+      value
+        && typeof value === 'object'
+        && 'code' in value
+        && value.code === 'already_watching',
+    )
+  }
+
+  function sleep(ms: number) {
+    return new Promise((resolve) => setTimeout(resolve, ms))
+  }
+
+  async function loadSnapshot() {
+    snapshot = await getSnapshot()
+    return snapshot
+  }
+
+  async function waitForObservedData() {
+    const deadline = Date.now() + 5_000
+
+    while (Date.now() < deadline) {
+      const nextSnapshot = await loadSnapshot()
+
+      if (hasObservedData(nextSnapshot)) {
+        return
+      }
+
+      await sleep(250)
+    }
+  }
+
   async function refreshSnapshot() {
     isBusy = true
     error = ''
 
     try {
-      snapshot = await getSnapshot()
+      await loadSnapshot()
     } catch (err) {
       error = formatError(err)
     } finally {
@@ -66,8 +106,15 @@
     error = ''
 
     try {
-      await startWatching()
-      await refreshSnapshot()
+      try {
+        await startWatching()
+      } catch (err) {
+        if (!isAlreadyWatchingError(err)) {
+          throw err
+        }
+      }
+
+      await waitForObservedData()
     } catch (err) {
       error = formatError(err)
     } finally {
@@ -90,8 +137,6 @@
   }
 
   onMount(() => {
-    refreshSnapshot()
-
     onSnapshotUpdated((nextSnapshot) => {
       snapshot = nextSnapshot
       error = ''
@@ -103,6 +148,8 @@
       .catch((err) => {
         error = formatError(err)
       })
+
+    start()
   })
 
   onDestroy(() => {
@@ -322,7 +369,7 @@
               </div>
             </dl>
           {:else}
-            <p class="muted">No probe result yet. Click Start and wait for the first interval.</p>
+            <p class="muted">Waiting for the first probe result.</p>
           {/if}
         </article>
 
