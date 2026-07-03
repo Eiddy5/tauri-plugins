@@ -14,6 +14,7 @@ pub mod capture;
 mod commands;
 mod error;
 mod models;
+pub mod overlay;
 pub mod pipeline;
 pub mod platform;
 pub mod publisher;
