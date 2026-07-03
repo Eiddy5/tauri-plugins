@@ -2,6 +2,9 @@ use tauri_plugin_screen_capture::overlay::{
     corner_segments, OverlayRect, OverlaySegment, OverlayStyle,
 };
 
+#[cfg(windows)]
+use tauri_plugin_screen_capture::overlay::windows_target_handle_from_source_id;
+
 #[test]
 fn corner_segments_frame_the_target_rect_with_eight_segments() {
     let style = OverlayStyle {
@@ -98,4 +101,14 @@ fn corner_segments_keep_positive_dimensions_for_invalid_public_inputs() {
     assert!(segments
         .iter()
         .all(|segment| segment.width >= 1 && segment.height >= 1));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_target_handle_from_source_id_parses_only_window_hex_ids() {
+    assert_eq!(
+        windows_target_handle_from_source_id("window:2a"),
+        Some(0x2a)
+    );
+    assert_eq!(windows_target_handle_from_source_id("display:1"), None);
 }

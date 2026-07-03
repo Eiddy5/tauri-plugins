@@ -1,5 +1,5 @@
 use std::{
-    ffi::OsStr,
+    ffi::{c_void, OsStr},
     marker::PhantomData,
     os::windows::ffi::OsStrExt,
     rc::Rc,
@@ -13,14 +13,15 @@ use windows::{
     core::{Error as WindowsError, PCWSTR},
     Win32::{
         Foundation::{
-            GetLastError, COLORREF, ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT, WPARAM,
+            GetLastError, COLORREF, ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT, RECT, WPARAM,
         },
         Graphics::Gdi::{CreateSolidBrush, DeleteObject, HGDIOBJ},
         UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, PeekMessageW,
-            RegisterClassW, SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowPos,
-            ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HMENU, HWND_TOPMOST, LWA_ALPHA,
-            MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SW_HIDE, SW_SHOWNOACTIVATE,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetWindowRect,
+            IsIconic, IsWindow, IsWindowVisible, PeekMessageW, RegisterClassW,
+            SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowPos, ShowWindow,
+            TranslateMessage, CS_HREDRAW, CS_VREDRAW, HMENU, HWND_TOPMOST, LWA_ALPHA, MSG,
+            PM_REMOVE, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SW_HIDE, SW_SHOWNOACTIVATE,
             WDA_EXCLUDEFROMCAPTURE, WM_QUIT, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
             WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
         },
@@ -29,7 +30,7 @@ use windows::{
 
 use crate::{
     error::Error,
-    models::CaptureErrorCode,
+    models::{CaptureErrorCode, CaptureSourceKind},
     overlay::{corner_segments, OverlayRect, OverlayStyle, OverlayTarget, ShareOverlay},
     Result,
 };
@@ -54,14 +55,22 @@ impl Default for WindowsShareOverlay {
 
 #[async_trait]
 impl ShareOverlay for WindowsShareOverlay {
-    async fn start(&self, _target: OverlayTarget) -> Result<()> {
-        self.show_rect(OverlayRect {
-            left: 100,
-            top: 100,
-            right: 500,
-            bottom: 400,
-        })
-        .await
+    async fn start(&self, target: OverlayTarget) -> Result<()> {
+        match target.source_kind {
+            CaptureSourceKind::Window => match window_bounds_from_source_id(&target.source_id)? {
+                Some(rect) => self.show_rect(rect).await,
+                None => self.hide().await,
+            },
+            CaptureSourceKind::Display => {
+                self.show_rect(OverlayRect {
+                    left: 100,
+                    top: 100,
+                    right: 500,
+                    bottom: 400,
+                })
+                .await
+            }
+        }
     }
 
     async fn show(&self) -> Result<()> {
@@ -133,6 +142,52 @@ impl WindowsShareOverlay {
             )
         })
     }
+}
+
+pub fn windows_target_handle_from_source_id(source_id: &str) -> Option<isize> {
+    source_id
+        .strip_prefix("window:")
+        .and_then(|id| usize::from_str_radix(id, 16).ok())
+        .and_then(|handle| isize::try_from(handle).ok())
+}
+
+fn window_bounds_from_source_id(source_id: &str) -> Result<Option<OverlayRect>> {
+    let handle = windows_target_handle_from_source_id(source_id).ok_or_else(|| {
+        Error::new(
+            CaptureErrorCode::SourceNotFound,
+            format!("invalid Windows window source id: {source_id}"),
+            false,
+        )
+    })?;
+    let hwnd = HWND(handle as *mut c_void);
+
+    if !unsafe { IsWindow(Some(hwnd)).as_bool() } {
+        return Err(Error::new(
+            CaptureErrorCode::SourceUnavailable,
+            format!("Windows window source is no longer available: {source_id}"),
+            true,
+        ));
+    }
+
+    if unsafe { IsIconic(hwnd).as_bool() } || !unsafe { IsWindowVisible(hwnd).as_bool() } {
+        return Ok(None);
+    }
+
+    let mut rect = RECT::default();
+    unsafe { GetWindowRect(hwnd, &mut rect) }.map_err(|error| {
+        Error::new(
+            CaptureErrorCode::SourceUnavailable,
+            format!("failed to resolve Windows window bounds for {source_id}: {error}"),
+            true,
+        )
+    })?;
+
+    Ok(Some(OverlayRect {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+    }))
 }
 
 #[derive(Debug)]
