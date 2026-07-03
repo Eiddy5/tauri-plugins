@@ -37,7 +37,7 @@
   "plugins": {
     "net-watcher": {
       "autoStart": false,
-      "target": "https://www.apple.com/library/test/success.html",
+      "target": "https://www.baidu.com",
       "intervalMs": 10000,
       "timeoutMs": 3000
     }
