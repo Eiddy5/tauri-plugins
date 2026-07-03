@@ -357,7 +357,7 @@ impl OverlayThread {
 
             for segment in &segments {
                 let window = OverlayWindow::new(style.color)?;
-                window.position(segment.x, segment.y, segment.width, segment.height);
+                window.position(segment.x, segment.y, segment.width, segment.height)?;
                 window.show();
                 windows.push(window);
             }
@@ -367,7 +367,7 @@ impl OverlayThread {
         }
 
         for (window, segment) in self.windows.iter().zip(segments) {
-            window.position(segment.x, segment.y, segment.width, segment.height);
+            window.position(segment.x, segment.y, segment.width, segment.height)?;
             window.show();
         }
 
@@ -466,9 +466,9 @@ impl OverlayWindow {
         Ok(())
     }
 
-    fn position(&self, x: i32, y: i32, width: i32, height: i32) {
+    fn position(&self, x: i32, y: i32, width: i32, height: i32) -> Result<()> {
         unsafe {
-            let _ = SetWindowPos(
+            SetWindowPos(
                 self.hwnd,
                 Some(HWND_TOPMOST),
                 x,
@@ -476,8 +476,16 @@ impl OverlayWindow {
                 width,
                 height,
                 SWP_NOACTIVATE | SWP_NOOWNERZORDER,
-            );
+            )
+            .map_err(|error| {
+                windows_error(
+                    "failed to position share border overlay window with SetWindowPos",
+                    error,
+                )
+            })?;
         }
+
+        Ok(())
     }
 
     fn show(&self) {
