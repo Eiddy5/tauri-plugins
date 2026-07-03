@@ -19,6 +19,7 @@ use windows::{
         Foundation::{
             GetLastError, COLORREF, ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT, RECT, WPARAM,
         },
+        Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS},
         Graphics::Gdi::{
             CreateSolidBrush, DeleteObject, GetMonitorInfoW, HGDIOBJ, HMONITOR, MONITORINFO,
         },
@@ -30,7 +31,7 @@ use windows::{
             ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, EVENT_OBJECT_DESTROY,
             EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_SHOW,
             EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, HMENU, HWND_TOPMOST, LWA_ALPHA,
-            MSG, OBJID_WINDOW, PM_REMOVE, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SW_HIDE,
+            MSG, OBJID_WINDOW, PM_REMOVE, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER, SW_HIDE,
             SW_SHOWNOACTIVATE, WDA_EXCLUDEFROMCAPTURE, WINEVENT_OUTOFCONTEXT, WM_QUIT, WNDCLASSW,
             WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
             WS_POPUP,
@@ -110,9 +111,11 @@ impl ShareOverlay for WindowsShareOverlay {
                 match rect {
                     Some(rect) => {
                         let style = self.style;
+                        let placement = OverlayPlacement::for_window(target_hwnd);
                         send_overlay_command(sender, move |reply| OverlayCommand::ShowRect {
                             rect,
                             style,
+                            placement,
                             reply,
                         })
                         .await
@@ -165,10 +168,12 @@ impl WindowsShareOverlay {
     async fn show_rect(&self, rect: OverlayRect) -> Result<()> {
         let sender = self.ensure_host_sender()?;
         let style = self.style;
+        let placement = OverlayPlacement::for_display();
 
         send_overlay_command(sender, move |reply| OverlayCommand::ShowRect {
             rect,
             style,
+            placement,
             reply,
         })
         .await
@@ -288,8 +293,8 @@ fn window_bounds_from_source_id(source_id: &str) -> Result<Option<OverlayRect>> 
         return Ok(None);
     }
 
-    let mut rect = RECT::default();
-    unsafe { GetWindowRect(hwnd, &mut rect) }.map_err(|error| {
+    let mut window_rect = RECT::default();
+    unsafe { GetWindowRect(hwnd, &mut window_rect) }.map_err(|error| {
         Error::new(
             CaptureErrorCode::SourceUnavailable,
             format!("failed to resolve Windows window bounds for {source_id}: {error}"),
@@ -297,12 +302,63 @@ fn window_bounds_from_source_id(source_id: &str) -> Result<Option<OverlayRect>> 
         )
     })?;
 
-    Ok(Some(OverlayRect {
+    Ok(Some(preferred_window_bounds(
+        rect_to_overlay_rect(window_rect),
+        dwm_extended_frame_bounds(hwnd),
+    )))
+}
+
+fn dwm_extended_frame_bounds(hwnd: HWND) -> Option<OverlayRect> {
+    let mut rect = RECT::default();
+    unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut rect as *mut _ as *mut c_void,
+            std::mem::size_of::<RECT>() as u32,
+        )
+    }
+    .ok()?;
+
+    Some(rect_to_overlay_rect(rect))
+}
+
+fn rect_to_overlay_rect(rect: RECT) -> OverlayRect {
+    OverlayRect {
         left: rect.left,
         top: rect.top,
         right: rect.right,
         bottom: rect.bottom,
-    }))
+    }
+}
+
+fn preferred_window_bounds(
+    get_window_rect: OverlayRect,
+    dwm_frame_bounds: Option<OverlayRect>,
+) -> OverlayRect {
+    dwm_frame_bounds.unwrap_or(get_window_rect)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OverlayPlacement {
+    owner_hwnd: Option<usize>,
+    topmost: bool,
+}
+
+impl OverlayPlacement {
+    const fn for_window(owner_hwnd: usize) -> Self {
+        Self {
+            owner_hwnd: Some(owner_hwnd),
+            topmost: false,
+        }
+    }
+
+    const fn for_display() -> Self {
+        Self {
+            owner_hwnd: None,
+            topmost: true,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -355,6 +411,7 @@ enum WindowEventAction {
     RefreshBounds {
         source_id: String,
         style: OverlayStyle,
+        target_hwnd: usize,
         sender: mpsc::Sender<OverlayCommand>,
     },
 }
@@ -564,6 +621,7 @@ fn dispatch_window_event(hook: usize, event: u32, hwnd: usize, object_id: i32) {
                 Some(WindowEventAction::RefreshBounds {
                     source_id: target.source_id.clone(),
                     style: target.style,
+                    target_hwnd: hwnd,
                     sender: target.sender.clone(),
                 })
             }
@@ -595,6 +653,7 @@ fn dispatch_window_event(hook: usize, event: u32, hwnd: usize, object_id: i32) {
                     Some(WindowEventAction::RefreshBounds {
                         source_id: target.source_id.clone(),
                         style: target.style,
+                        target_hwnd: hwnd,
                         sender: target.sender.clone(),
                     })
                 }
@@ -619,10 +678,15 @@ fn dispatch_window_event(hook: usize, event: u32, hwnd: usize, object_id: i32) {
             WindowEventAction::RefreshBounds {
                 source_id,
                 style,
+                target_hwnd,
                 sender,
             } => {
                 let command = match window_bounds_from_source_id(&source_id) {
-                    Ok(Some(rect)) => OverlayCommand::ShowRectForWindowEvent { rect, style },
+                    Ok(Some(rect)) => OverlayCommand::ShowRectForWindowEvent {
+                        rect,
+                        style,
+                        placement: OverlayPlacement::for_window(target_hwnd),
+                    },
                     Ok(None) | Err(_) => OverlayCommand::HideForWindowEvent,
                 };
                 let _ = sender.send(command);
@@ -731,6 +795,7 @@ enum OverlayCommand {
     ShowRect {
         rect: OverlayRect,
         style: OverlayStyle,
+        placement: OverlayPlacement,
         reply: OverlayReply,
     },
     Show {
@@ -742,6 +807,7 @@ enum OverlayCommand {
     ShowRectForWindowEvent {
         rect: OverlayRect,
         style: OverlayStyle,
+        placement: OverlayPlacement,
     },
     HideForWindowEvent,
     RegisterWindowEventTarget {
@@ -841,8 +907,13 @@ impl OverlayThread {
 
     fn handle_command(&mut self, command: OverlayCommand) -> bool {
         match command {
-            OverlayCommand::ShowRect { rect, style, reply } => {
-                send_reply(reply, self.show_rect(rect, style));
+            OverlayCommand::ShowRect {
+                rect,
+                style,
+                placement,
+                reply,
+            } => {
+                send_reply(reply, self.show_rect(rect, style, placement));
                 false
             }
             OverlayCommand::Show { reply } => {
@@ -859,8 +930,12 @@ impl OverlayThread {
                 send_reply(reply, Ok(()));
                 false
             }
-            OverlayCommand::ShowRectForWindowEvent { rect, style } => {
-                if let Err(error) = self.show_rect(rect, style) {
+            OverlayCommand::ShowRectForWindowEvent {
+                rect,
+                style,
+                placement,
+            } => {
+                if let Err(error) = self.show_rect(rect, style, placement) {
                     eprintln!(
                         "[screen-capture] failed to refresh share overlay from WinEvent: {error}"
                     );
@@ -914,14 +989,24 @@ impl OverlayThread {
         }
     }
 
-    fn show_rect(&mut self, rect: OverlayRect, style: OverlayStyle) -> Result<()> {
+    fn show_rect(
+        &mut self,
+        rect: OverlayRect,
+        style: OverlayStyle,
+        placement: OverlayPlacement,
+    ) -> Result<()> {
         let segments = corner_segments(rect, style);
 
-        if self.windows.len() != segments.len() {
+        if self.windows.len() != segments.len()
+            || self
+                .windows
+                .first()
+                .is_some_and(|window| window.placement != placement)
+        {
             let mut windows = Vec::with_capacity(segments.len());
 
             for segment in &segments {
-                let window = OverlayWindow::new(style.color)?;
+                let window = OverlayWindow::new(style.color, placement)?;
                 window.position(segment.x, segment.y, segment.width, segment.height)?;
                 window.show();
                 windows.push(window);
@@ -1022,21 +1107,28 @@ fn send_reply(reply: OverlayReply, result: Result<()>) {
 #[derive(Debug)]
 struct OverlayWindow {
     hwnd: HWND,
+    placement: OverlayPlacement,
     _ui_thread: PhantomData<Rc<()>>,
 }
 
 impl OverlayWindow {
-    fn new(color: u32) -> Result<Self> {
+    fn new(color: u32, placement: OverlayPlacement) -> Result<Self> {
         register_window_class(color)?;
 
         let class_name = wide(CLASS_NAME);
+        let ex_style = WS_EX_TOOLWINDOW
+            | WS_EX_TRANSPARENT
+            | WS_EX_LAYERED
+            | WS_EX_NOACTIVATE
+            | if placement.topmost {
+                WS_EX_TOPMOST
+            } else {
+                Default::default()
+            };
+        let owner = placement.owner_hwnd.map(|owner| HWND(owner as *mut c_void));
         let hwnd = unsafe {
             CreateWindowExW(
-                WS_EX_TOOLWINDOW
-                    | WS_EX_TOPMOST
-                    | WS_EX_TRANSPARENT
-                    | WS_EX_LAYERED
-                    | WS_EX_NOACTIVATE,
+                ex_style,
                 PCWSTR(class_name.as_ptr()),
                 PCWSTR(class_name.as_ptr()),
                 WS_POPUP,
@@ -1044,7 +1136,7 @@ impl OverlayWindow {
                 0,
                 1,
                 1,
-                None,
+                owner,
                 Some(HMENU::default()),
                 None,
                 None,
@@ -1060,6 +1152,7 @@ impl OverlayWindow {
 
         let window = Self {
             hwnd,
+            placement,
             _ui_thread: PhantomData,
         };
         window.configure()?;
@@ -1090,17 +1183,14 @@ impl OverlayWindow {
     }
 
     fn position(&self, x: i32, y: i32, width: i32, height: i32) -> Result<()> {
+        let (insert_after, flags) = if self.placement.topmost {
+            (Some(HWND_TOPMOST), SWP_NOACTIVATE | SWP_NOOWNERZORDER)
+        } else {
+            (None, SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOZORDER)
+        };
+
         unsafe {
-            SetWindowPos(
-                self.hwnd,
-                Some(HWND_TOPMOST),
-                x,
-                y,
-                width,
-                height,
-                SWP_NOACTIVATE | SWP_NOOWNERZORDER,
-            )
-            .map_err(|error| {
+            SetWindowPos(self.hwnd, insert_after, x, y, width, height, flags).map_err(|error| {
                 windows_error(
                     "failed to position share border overlay window with SetWindowPos",
                     error,
@@ -1216,6 +1306,43 @@ mod tests {
     #[test]
     fn overlay_windows_are_not_send() {
         <OverlayWindow as AmbiguousIfSend<_>>::assert_not_send();
+    }
+
+    #[test]
+    fn window_capture_overlay_uses_owned_non_topmost_placement() {
+        let placement = OverlayPlacement::for_window(0x2a);
+
+        assert_eq!(placement.owner_hwnd, Some(0x2a));
+        assert!(!placement.topmost);
+    }
+
+    #[test]
+    fn display_capture_overlay_uses_topmost_placement() {
+        let placement = OverlayPlacement::for_display();
+
+        assert_eq!(placement.owner_hwnd, None);
+        assert!(placement.topmost);
+    }
+
+    #[test]
+    fn window_visible_bounds_prefer_dwm_frame_bounds() {
+        let get_window_rect = OverlayRect {
+            left: 96,
+            top: 96,
+            right: 504,
+            bottom: 404,
+        };
+        let dwm_frame_bounds = OverlayRect {
+            left: 100,
+            top: 100,
+            right: 500,
+            bottom: 400,
+        };
+
+        assert_eq!(
+            preferred_window_bounds(get_window_rect, Some(dwm_frame_bounds)),
+            dwm_frame_bounds
+        );
     }
 
     #[test]
