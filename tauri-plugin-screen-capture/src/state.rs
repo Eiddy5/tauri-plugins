@@ -15,6 +15,7 @@ use crate::{
         ListSourcesOptions, PermissionStatus, StartCaptureOptions, WebRtcAnswer,
         WebRtcIceCandidate, WebRtcOffer,
     },
+    overlay::{NoopShareOverlay, OverlayTarget, ShareOverlay},
     pipeline::CapturePipeline,
     publisher::{CapturePublisher, WebRtcPublisher},
     webrtc::signaling::WebRtcSignalingState,
@@ -26,11 +27,13 @@ struct SessionRecord {
     publisher: Arc<dyn CapturePublisher>,
     pipeline: Arc<CapturePipeline>,
     running_capture: Arc<dyn RunningCapture>,
+    overlay: Arc<dyn ShareOverlay>,
     webrtc_signaling: Arc<WebRtcSignalingState>,
 }
 
 pub struct ScreenCaptureState {
     backend: Arc<dyn CaptureBackend>,
+    overlay: Arc<dyn ShareOverlay>,
     sessions: Mutex<HashMap<String, SessionRecord>>,
 }
 
@@ -49,8 +52,16 @@ impl Default for ScreenCaptureState {
 
 impl ScreenCaptureState {
     pub fn with_backend(backend: Arc<dyn CaptureBackend>) -> Self {
+        Self::with_backend_and_overlay(backend, Arc::new(NoopShareOverlay))
+    }
+
+    pub fn with_backend_and_overlay(
+        backend: Arc<dyn CaptureBackend>,
+        overlay: Arc<dyn ShareOverlay>,
+    ) -> Self {
         Self {
             backend,
+            overlay,
             sessions: Mutex::new(HashMap::new()),
         }
     }
@@ -105,6 +116,19 @@ impl ScreenCaptureState {
             return Err(error);
         }
 
+        let overlay = Arc::clone(&self.overlay);
+        if let Err(error) = overlay
+            .start(OverlayTarget {
+                source_id: options.source_id.clone(),
+                source_kind: options.source_kind,
+            })
+            .await
+        {
+            let _ = running_capture.stop().await;
+            let _ = publisher.stop().await;
+            return Err(error);
+        }
+
         let session = CaptureSession {
             session_id: Uuid::new_v4().to_string(),
             source_id: options.source_id,
@@ -121,6 +145,7 @@ impl ScreenCaptureState {
                 publisher,
                 pipeline,
                 running_capture,
+                overlay,
                 webrtc_signaling,
             },
         );
@@ -129,7 +154,7 @@ impl ScreenCaptureState {
     }
 
     pub async fn pause_capture(&self, session_id: &str) -> Result<()> {
-        let (publisher, running_capture) = {
+        let (publisher, running_capture, overlay) = {
             let sessions = self.sessions.lock().await;
             sessions
                 .get(session_id)
@@ -137,6 +162,7 @@ impl ScreenCaptureState {
                     (
                         Arc::clone(&record.publisher),
                         Arc::clone(&record.running_capture),
+                        Arc::clone(&record.overlay),
                     )
                 })
                 .ok_or_else(invalid_session_error)?
@@ -144,6 +170,7 @@ impl ScreenCaptureState {
 
         running_capture.pause().await?;
         publisher.pause().await?;
+        overlay.hide().await?;
 
         let mut sessions = self.sessions.lock().await;
         let record = sessions
@@ -154,7 +181,7 @@ impl ScreenCaptureState {
     }
 
     pub async fn resume_capture(&self, session_id: &str) -> Result<()> {
-        let (publisher, running_capture) = {
+        let (publisher, running_capture, overlay) = {
             let sessions = self.sessions.lock().await;
             sessions
                 .get(session_id)
@@ -162,6 +189,7 @@ impl ScreenCaptureState {
                     (
                         Arc::clone(&record.publisher),
                         Arc::clone(&record.running_capture),
+                        Arc::clone(&record.overlay),
                     )
                 })
                 .ok_or_else(invalid_session_error)?
@@ -169,6 +197,7 @@ impl ScreenCaptureState {
 
         running_capture.resume().await?;
         publisher.resume().await?;
+        overlay.show().await?;
 
         let mut sessions = self.sessions.lock().await;
         let record = sessions
@@ -179,7 +208,7 @@ impl ScreenCaptureState {
     }
 
     pub async fn stop_capture(&self, session_id: &str) -> Result<()> {
-        let (publisher, running_capture) = {
+        let (publisher, running_capture, overlay) = {
             let sessions = self.sessions.lock().await;
             sessions
                 .get(session_id)
@@ -187,6 +216,7 @@ impl ScreenCaptureState {
                     (
                         Arc::clone(&record.publisher),
                         Arc::clone(&record.running_capture),
+                        Arc::clone(&record.overlay),
                     )
                 })
                 .ok_or_else(invalid_session_error)?
@@ -194,6 +224,7 @@ impl ScreenCaptureState {
 
         running_capture.stop().await?;
         publisher.stop().await?;
+        overlay.stop().await?;
         self.sessions
             .lock()
             .await

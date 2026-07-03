@@ -18,6 +18,45 @@ struct BackendLifecycleCounters {
     stops: AtomicUsize,
 }
 
+#[derive(Debug, Default)]
+struct OverlayLifecycleCounters {
+    starts: AtomicUsize,
+    hides: AtomicUsize,
+    shows: AtomicUsize,
+    stops: AtomicUsize,
+}
+
+#[derive(Debug)]
+struct OverlayProbe {
+    counters: Arc<OverlayLifecycleCounters>,
+}
+
+#[async_trait]
+impl tauri_plugin_screen_capture::overlay::ShareOverlay for OverlayProbe {
+    async fn start(
+        &self,
+        _target: tauri_plugin_screen_capture::overlay::OverlayTarget,
+    ) -> Result<()> {
+        self.counters.starts.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn hide(&self) -> Result<()> {
+        self.counters.hides.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn show(&self) -> Result<()> {
+        self.counters.shows.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        self.counters.stops.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 struct ObservableBackend {
     counters: Arc<BackendLifecycleCounters>,
@@ -194,6 +233,39 @@ async fn state_drives_backend_capture_lifecycle() {
 
     state.stop_capture(&session.session_id).await.expect("stop");
     assert_eq!(counters.stops.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn state_drives_share_overlay_lifecycle() {
+    let backend_counters = Arc::new(BackendLifecycleCounters::default());
+    let last_options = Arc::new(Mutex::new(None));
+    let backend = Arc::new(ObservableBackend {
+        counters: backend_counters,
+        last_options,
+    });
+    let overlay_counters = Arc::new(OverlayLifecycleCounters::default());
+    let overlay = Arc::new(OverlayProbe {
+        counters: Arc::clone(&overlay_counters),
+    });
+    let state = ScreenCaptureState::with_backend_and_overlay(backend, overlay);
+
+    let session = state.start_capture(start_options()).await.expect("start");
+    assert_eq!(overlay_counters.starts.load(Ordering::SeqCst), 1);
+
+    state
+        .pause_capture(&session.session_id)
+        .await
+        .expect("pause");
+    assert_eq!(overlay_counters.hides.load(Ordering::SeqCst), 1);
+
+    state
+        .resume_capture(&session.session_id)
+        .await
+        .expect("resume");
+    assert_eq!(overlay_counters.shows.load(Ordering::SeqCst), 1);
+
+    state.stop_capture(&session.session_id).await.expect("stop");
+    assert_eq!(overlay_counters.stops.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

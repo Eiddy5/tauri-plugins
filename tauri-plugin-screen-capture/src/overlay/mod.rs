@@ -4,6 +4,46 @@ mod windows;
 #[cfg(windows)]
 pub use windows::WindowsShareOverlay;
 
+use async_trait::async_trait;
+
+use crate::{models::CaptureSourceKind, Result};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OverlayTarget {
+    pub source_id: String,
+    pub source_kind: CaptureSourceKind,
+}
+
+#[async_trait]
+pub trait ShareOverlay: Send + Sync {
+    async fn start(&self, target: OverlayTarget) -> Result<()>;
+    async fn show(&self) -> Result<()>;
+    async fn hide(&self) -> Result<()>;
+    async fn stop(&self) -> Result<()>;
+}
+
+#[derive(Debug, Default)]
+pub struct NoopShareOverlay;
+
+#[async_trait]
+impl ShareOverlay for NoopShareOverlay {
+    async fn start(&self, _target: OverlayTarget) -> Result<()> {
+        Ok(())
+    }
+
+    async fn show(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn hide(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OverlayStyle {
     pub color: u32,
