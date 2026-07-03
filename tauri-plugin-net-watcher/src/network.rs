@@ -13,15 +13,18 @@ pub fn read_network_snapshot(include_mac_address: bool) -> crate::Result<Network
         ));
     }
 
-    let mut interfaces =
-        build_interfaces_from_entries(get_if_addrs::get_if_addrs()?.into_iter().map(|interface| {
+    let interface_types = read_platform_interface_types();
+    let mut interfaces = build_interfaces_from_entries_with_type_overrides(
+        get_if_addrs::get_if_addrs()?.into_iter().map(|interface| {
             let ip = match interface.addr {
                 IfAddr::V4(addr) => IpAddr::V4(addr.ip),
                 IfAddr::V6(addr) => IpAddr::V6(addr.ip),
             };
 
             (interface.name, ip)
-        }));
+        }),
+        &interface_types,
+    );
 
     mark_primary(&mut interfaces);
     let primary_interface_id = interfaces
@@ -35,14 +38,22 @@ pub fn read_network_snapshot(include_mac_address: bool) -> crate::Result<Network
     })
 }
 
+#[cfg(test)]
 fn build_interfaces_from_entries(
     entries: impl IntoIterator<Item = (String, IpAddr)>,
+) -> Vec<NetworkInterface> {
+    build_interfaces_from_entries_with_type_overrides(entries, &BTreeMap::new())
+}
+
+fn build_interfaces_from_entries_with_type_overrides(
+    entries: impl IntoIterator<Item = (String, IpAddr)>,
+    interface_types: &BTreeMap<String, InterfaceType>,
 ) -> Vec<NetworkInterface> {
     let mut interfaces = entries
         .into_iter()
         .fold(BTreeMap::new(), |mut interfaces, (name, ip)| {
             let interface = interfaces.entry(name.clone()).or_insert_with(|| {
-                let interface_type = classify_interface(&name);
+                let interface_type = resolve_interface_type(&name, interface_types);
                 let status = if interface_type == InterfaceType::Loopback {
                     InterfaceStatus::Down
                 } else {
@@ -88,6 +99,135 @@ fn build_interfaces_from_entries(
     interfaces
 }
 
+fn resolve_interface_type(
+    name: &str,
+    interface_types: &BTreeMap<String, InterfaceType>,
+) -> InterfaceType {
+    let name_type = classify_interface(name);
+
+    if should_prefer_name_classification(name_type.clone()) {
+        return name_type;
+    }
+
+    interface_types
+        .get(&normalize_interface_key(name))
+        .cloned()
+        .unwrap_or(name_type)
+}
+
+fn normalize_interface_key(name: &str) -> String {
+    name.trim_matches(|ch| ch == '{' || ch == '}')
+        .to_ascii_lowercase()
+}
+
+#[cfg(target_os = "macos")]
+fn should_prefer_name_classification(interface_type: InterfaceType) -> bool {
+    matches!(
+        interface_type,
+        InterfaceType::Wifi | InterfaceType::Vpn | InterfaceType::Loopback
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn should_prefer_name_classification(_interface_type: InterfaceType) -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn read_platform_interface_types() -> BTreeMap<String, InterfaceType> {
+    use system_configuration::network_configuration::{get_interfaces, SCNetworkInterfaceType};
+
+    get_interfaces()
+        .into_iter()
+        .filter_map(|interface| {
+            let name = interface.bsd_name()?.to_string();
+            let interface_type = match interface.interface_type()? {
+                SCNetworkInterfaceType::IEEE80211 => InterfaceType::Wifi,
+                SCNetworkInterfaceType::Ethernet
+                | SCNetworkInterfaceType::Bond
+                | SCNetworkInterfaceType::VLAN => InterfaceType::Ethernet,
+                SCNetworkInterfaceType::IPSec
+                | SCNetworkInterfaceType::L2TP
+                | SCNetworkInterfaceType::PPP
+                | SCNetworkInterfaceType::PPTP => InterfaceType::Vpn,
+                _ => return None,
+            };
+
+            Some((normalize_interface_key(&name), interface_type))
+        })
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn read_platform_interface_types() -> BTreeMap<String, InterfaceType> {
+    read_windows_current_profile_interface_type().unwrap_or_default()
+}
+
+#[cfg(target_os = "windows")]
+fn read_windows_current_profile_interface_type() -> Option<BTreeMap<String, InterfaceType>> {
+    use windows::Networking::Connectivity::NetworkInformation;
+
+    let profile = NetworkInformation::GetInternetConnectionProfile().ok()?;
+    let adapter = profile.NetworkAdapter().ok()?;
+    let adapter_id = format!("{:?}", adapter.NetworkAdapterId().ok()?);
+
+    if profile.IsWlanConnectionProfile().ok()? {
+        return Some(platform_interface_type_overrides_from_type(
+            Some(&adapter_id),
+            InterfaceType::Wifi,
+        ));
+    }
+
+    Some(platform_interface_type_overrides(
+        Some(&adapter_id),
+        adapter.IanaInterfaceType().ok(),
+    ))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn read_platform_interface_types() -> BTreeMap<String, InterfaceType> {
+    BTreeMap::new()
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn platform_interface_type_overrides(
+    adapter_id: Option<&str>,
+    iana_interface_type: Option<u32>,
+) -> BTreeMap<String, InterfaceType> {
+    platform_interface_type_overrides_from_type(
+        adapter_id,
+        iana_interface_type
+            .map(interface_type_from_windows_iana_type)
+            .unwrap_or(InterfaceType::Unknown),
+    )
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn platform_interface_type_overrides_from_type(
+    adapter_id: Option<&str>,
+    interface_type: InterfaceType,
+) -> BTreeMap<String, InterfaceType> {
+    let mut interface_types = BTreeMap::new();
+    if interface_type == InterfaceType::Unknown {
+        return interface_types;
+    }
+
+    if let Some(adapter_id) = adapter_id {
+        interface_types.insert(normalize_interface_key(adapter_id), interface_type);
+    }
+
+    interface_types
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn interface_type_from_windows_iana_type(interface_type: u32) -> InterfaceType {
+    match interface_type {
+        6 | 135 => InterfaceType::Ethernet,
+        71 => InterfaceType::Wifi,
+        _ => InterfaceType::Unknown,
+    }
+}
+
 fn assign_unique_ids(interfaces: &mut [NetworkInterface]) {
     let mut assigned = BTreeSet::<String>::new();
     let reserved_base_ids = interfaces
@@ -131,6 +271,7 @@ pub fn classify_interface(name: &str) -> InterfaceType {
         || normalized.contains("wireless")
         || normalized.contains("\u{65e0}\u{7ebf}")
         || normalized == "en0"
+        || normalized == "en1"
     {
         InterfaceType::Wifi
     } else if normalized.starts_with("utun")
@@ -255,6 +396,74 @@ mod tests {
 
     fn local_connection_name() -> String {
         chinese(&['\u{672c}', '\u{5730}', '\u{8fde}', '\u{63a5}'])
+    }
+
+    #[test]
+    fn platform_interface_types_classify_unknown_names() {
+        let mut interface_types = BTreeMap::new();
+        interface_types.insert("port-a".to_string(), InterfaceType::Ethernet);
+        interface_types.insert("port-b".to_string(), InterfaceType::Wifi);
+
+        let interfaces = build_interfaces_from_entries_with_type_overrides(
+            vec![
+                (
+                    "port-a".to_string(),
+                    IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
+                ),
+                (
+                    "port-b".to_string(),
+                    IpAddr::V4(Ipv4Addr::new(192, 168, 1, 11)),
+                ),
+            ],
+            &interface_types,
+        );
+
+        assert_eq!(interfaces[0].name, "port-a");
+        assert_eq!(interfaces[0].interface_type, InterfaceType::Ethernet);
+        assert_eq!(interfaces[1].name, "port-b");
+        assert_eq!(interfaces[1].interface_type, InterfaceType::Wifi);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_en1_with_ip_is_wifi_like_logger_enrichment() {
+        let mut interface_types = BTreeMap::new();
+        interface_types.insert("en1".to_string(), InterfaceType::Ethernet);
+
+        let interfaces = build_interfaces_from_entries_with_type_overrides(
+            vec![(
+                "en1".to_string(),
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 11)),
+            )],
+            &interface_types,
+        );
+
+        assert_eq!(interfaces[0].interface_type, InterfaceType::Wifi);
+    }
+
+    #[test]
+    fn platform_interface_type_overrides_match_adapter_guids_case_insensitively() {
+        let interface_types = platform_interface_type_overrides(
+            Some("{ABCDEF00-1111-2222-3333-444444444444}"),
+            Some(71),
+        );
+
+        let interfaces = build_interfaces_from_entries_with_type_overrides(
+            vec![
+                (
+                    "abcdef00-1111-2222-3333-444444444444".to_string(),
+                    IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
+                ),
+                (
+                    "other-adapter".to_string(),
+                    IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)),
+                ),
+            ],
+            &interface_types,
+        );
+
+        assert_eq!(interfaces[0].interface_type, InterfaceType::Wifi);
+        assert_ne!(interfaces[1].interface_type, InterfaceType::Wifi);
     }
 
     #[test]

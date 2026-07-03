@@ -228,6 +228,9 @@ async fn wait_for_next_wake(
 }
 
 struct SystemNetworkWatcher {
+    #[cfg(target_os = "macos")]
+    #[allow(dead_code)]
+    inner: macos_events::MacosSystemNetworkWatcher,
     #[cfg(target_os = "windows")]
     #[allow(dead_code)]
     inner: windows_events::WindowsSystemNetworkWatcher,
@@ -249,9 +252,151 @@ fn start_platform_watcher(
 
 #[cfg(target_os = "macos")]
 fn start_platform_watcher(
-    _tx: mpsc::UnboundedSender<WatcherSignal>,
+    tx: mpsc::UnboundedSender<WatcherSignal>,
 ) -> crate::Result<Option<SystemNetworkWatcher>> {
-    Ok(None)
+    macos_events::MacosSystemNetworkWatcher::start(tx)
+        .map(|inner| Some(SystemNetworkWatcher { inner }))
+}
+
+#[cfg(target_os = "macos")]
+mod macos_events {
+    use std::{
+        sync::mpsc as std_mpsc,
+        thread::{self, JoinHandle},
+    };
+
+    use core_foundation_sys::runloop::CFRunLoopWakeUp;
+    use system_configuration::core_foundation::{
+        array::CFArray,
+        base::TCFType,
+        runloop::{kCFRunLoopCommonModes, CFRunLoop},
+        string::CFString,
+    };
+    use system_configuration::dynamic_store::{
+        SCDynamicStore, SCDynamicStoreBuilder, SCDynamicStoreCallBackContext,
+    };
+    use tokio::sync::mpsc;
+
+    use super::WatcherSignal;
+
+    const WATCHER_NAME: &str = "tauri-plugin-net-watcher";
+    const NETWORK_CHANGE_PATTERN: &str = "(State|Setup):/Network/.*";
+
+    struct CallbackContext {
+        tx: mpsc::UnboundedSender<WatcherSignal>,
+    }
+
+    pub(super) struct MacosSystemNetworkWatcher {
+        run_loop: CFRunLoop,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    unsafe impl Send for MacosSystemNetworkWatcher {}
+
+    impl MacosSystemNetworkWatcher {
+        pub(super) fn start(tx: mpsc::UnboundedSender<WatcherSignal>) -> crate::Result<Self> {
+            let (ready_tx, ready_rx) = std_mpsc::channel();
+            let thread = thread::spawn(move || run_watcher_thread(tx, ready_tx));
+            let run_loop = match ready_rx.recv() {
+                Ok(Ok(run_loop)) => run_loop,
+                Ok(Err(message)) => {
+                    let _ = thread.join();
+                    return Err(crate::Error::internal(message));
+                }
+                Err(error) => {
+                    return Err(crate::Error::internal(format!(
+                        "failed to start macOS network watcher thread: {error}"
+                    )));
+                }
+            };
+
+            Ok(Self {
+                run_loop,
+                thread: Some(thread),
+            })
+        }
+    }
+
+    impl Drop for MacosSystemNetworkWatcher {
+        fn drop(&mut self) {
+            self.run_loop.stop();
+            unsafe {
+                CFRunLoopWakeUp(self.run_loop.as_concrete_TypeRef());
+            }
+
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    fn run_watcher_thread(
+        tx: mpsc::UnboundedSender<WatcherSignal>,
+        ready_tx: std_mpsc::Sender<Result<CFRunLoop, String>>,
+    ) {
+        let callback_context = SCDynamicStoreCallBackContext {
+            callout: network_changed,
+            info: CallbackContext { tx },
+        };
+
+        let Some(store) = SCDynamicStoreBuilder::new(WATCHER_NAME)
+            .callback_context(callback_context)
+            .build()
+        else {
+            let _ = ready_tx.send(Err("failed to create macOS dynamic store".to_string()));
+            return;
+        };
+
+        let watch_keys: CFArray<CFString> = CFArray::from_CFTypes(&[]);
+        let watch_patterns = CFArray::from_CFTypes(&[CFString::from(NETWORK_CHANGE_PATTERN)]);
+        if !store.set_notification_keys(&watch_keys, &watch_patterns) {
+            let _ = ready_tx.send(Err(
+                "failed to subscribe to macOS network changes".to_string()
+            ));
+            return;
+        }
+
+        let Some(run_loop_source) = store.create_run_loop_source() else {
+            let _ = ready_tx.send(Err(
+                "failed to create macOS network watcher run loop source".to_string(),
+            ));
+            return;
+        };
+
+        let run_loop = CFRunLoop::get_current();
+        run_loop.add_source(&run_loop_source, unsafe { kCFRunLoopCommonModes });
+
+        let _ = ready_tx.send(Ok(run_loop.clone()));
+        CFRunLoop::run_current();
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn network_changed(
+        _store: SCDynamicStore,
+        _changed_keys: CFArray<CFString>,
+        context: &mut CallbackContext,
+    ) {
+        send_system_network_changed(context);
+    }
+
+    fn send_system_network_changed(context: &CallbackContext) {
+        let _ = context.tx.send(WatcherSignal::SystemNetworkChanged);
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn callback_context_sends_system_network_changed_signal() {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let context = CallbackContext { tx };
+
+            send_system_network_changed(&context);
+
+            assert_eq!(rx.try_recv().unwrap(), WatcherSignal::SystemNetworkChanged);
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -361,5 +506,15 @@ mod tests {
         let wake = wait_for_next_wake(Duration::from_secs(60), &mut rx).await;
 
         assert_eq!(wake, WatcherWake::Stop);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_starts_system_network_watcher() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let watcher = start_platform_watcher(tx).unwrap();
+
+        assert!(watcher.is_some());
     }
 }
