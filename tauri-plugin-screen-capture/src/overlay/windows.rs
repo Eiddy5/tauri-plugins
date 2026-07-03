@@ -1,9 +1,13 @@
 use std::{
+    collections::HashMap,
     ffi::{c_void, OsStr},
     marker::PhantomData,
     os::windows::ffi::OsStrExt,
     rc::Rc,
-    sync::{mpsc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc, Mutex, OnceLock,
+    },
     thread::{self, JoinHandle},
     time::Duration,
 };
@@ -16,14 +20,18 @@ use windows::{
             GetLastError, COLORREF, ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT, RECT, WPARAM,
         },
         Graphics::Gdi::{CreateSolidBrush, DeleteObject, HGDIOBJ},
+        UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK},
         UI::WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetWindowRect,
-            IsIconic, IsWindow, IsWindowVisible, PeekMessageW, RegisterClassW,
-            SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowPos, ShowWindow,
-            TranslateMessage, CS_HREDRAW, CS_VREDRAW, HMENU, HWND_TOPMOST, LWA_ALPHA, MSG,
-            PM_REMOVE, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SW_HIDE, SW_SHOWNOACTIVATE,
-            WDA_EXCLUDEFROMCAPTURE, WM_QUIT, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-            WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+            GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, PeekMessageW,
+            RegisterClassW, SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowPos,
+            ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, EVENT_OBJECT_DESTROY,
+            EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_SHOW,
+            EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, HMENU, HWND_TOPMOST, LWA_ALPHA,
+            MSG, OBJID_WINDOW, PM_REMOVE, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SW_HIDE,
+            SW_SHOWNOACTIVATE, WDA_EXCLUDEFROMCAPTURE, WINEVENT_OUTOFCONTEXT, WM_QUIT, WNDCLASSW,
+            WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+            WS_POPUP,
         },
     },
 };
@@ -37,11 +45,16 @@ use crate::{
 
 const CLASS_NAME: &str = "TauriPluginScreenCaptureShareBorder";
 const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(16);
+static NEXT_WINDOW_EVENT_REGISTRATION_ID: AtomicU64 = AtomicU64::new(1);
+static WINDOW_EVENT_REGISTRY: OnceLock<Mutex<HashMap<usize, Vec<WindowEventTarget>>>> =
+    OnceLock::new();
 
 #[derive(Debug)]
 pub struct WindowsShareOverlay {
     style: OverlayStyle,
     host: Mutex<Option<OverlayHost>>,
+    window_event_hooks: Mutex<Option<WindowEventHooks>>,
+    window_event_registration_id: u64,
 }
 
 impl Default for WindowsShareOverlay {
@@ -49,6 +62,8 @@ impl Default for WindowsShareOverlay {
         Self {
             style: OverlayStyle::default(),
             host: Mutex::new(None),
+            window_event_hooks: Mutex::new(None),
+            window_event_registration_id: next_window_event_registration_id(),
         }
     }
 }
@@ -57,11 +72,41 @@ impl Default for WindowsShareOverlay {
 impl ShareOverlay for WindowsShareOverlay {
     async fn start(&self, target: OverlayTarget) -> Result<()> {
         match target.source_kind {
-            CaptureSourceKind::Window => match window_bounds_from_source_id(&target.source_id)? {
-                Some(rect) => self.show_rect(rect).await,
-                None => self.hide().await,
-            },
+            CaptureSourceKind::Window => {
+                let target_hwnd = windows_target_handle_from_source_id(&target.source_id)
+                    .ok_or_else(|| {
+                        Error::new(
+                            CaptureErrorCode::SourceNotFound,
+                            format!("invalid Windows window source id: {}", target.source_id),
+                            false,
+                        )
+                    })?;
+                let rect = window_bounds_from_source_id(&target.source_id)?;
+                let sender = self.ensure_host_sender()?;
+                self.replace_window_event_hooks(
+                    target_hwnd,
+                    target.source_id.clone(),
+                    sender.clone(),
+                )?;
+
+                match rect {
+                    Some(rect) => {
+                        let style = self.style;
+                        send_overlay_command(sender, move |reply| OverlayCommand::ShowRect {
+                            rect,
+                            style,
+                            reply,
+                        })
+                        .await
+                    }
+                    None => {
+                        send_overlay_command(sender, OverlayCommand::hide).await?;
+                        Ok(())
+                    }
+                }
+            }
             CaptureSourceKind::Display => {
+                self.clear_window_event_hooks()?;
                 self.show_rect(OverlayRect {
                     left: 100,
                     top: 100,
@@ -90,6 +135,8 @@ impl ShareOverlay for WindowsShareOverlay {
     }
 
     async fn stop(&self) -> Result<()> {
+        self.clear_window_event_hooks()?;
+
         if let Some(host) = self.take_host()? {
             host.shutdown().await?;
         }
@@ -142,6 +189,74 @@ impl WindowsShareOverlay {
             )
         })
     }
+
+    fn replace_window_event_hooks(
+        &self,
+        target_hwnd: usize,
+        source_id: String,
+        sender: mpsc::Sender<OverlayCommand>,
+    ) -> Result<()> {
+        self.clear_window_event_hooks()?;
+
+        let process_id = window_process_id(HWND(target_hwnd as *mut c_void));
+        let handles = install_window_event_hooks(process_id)?;
+        let mut hook_state = match self.lock_window_event_hooks() {
+            Ok(hook_state) => hook_state,
+            Err(error) => {
+                for handle in handles {
+                    unsafe {
+                        let _ = UnhookWinEvent(HWINEVENTHOOK(handle as *mut c_void));
+                    }
+                }
+                return Err(error);
+            }
+        };
+        register_window_event_target(
+            self.window_event_registration_id,
+            target_hwnd,
+            source_id,
+            self.style,
+            sender,
+        );
+
+        *hook_state = Some(WindowEventHooks {
+            target_hwnd,
+            registration_id: self.window_event_registration_id,
+            handles,
+        });
+
+        Ok(())
+    }
+
+    fn clear_window_event_hooks(&self) -> Result<()> {
+        if let Some(hooks) = self.lock_window_event_hooks()?.take() {
+            hooks.unregister();
+        }
+
+        Ok(())
+    }
+
+    fn lock_window_event_hooks(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, Option<WindowEventHooks>>> {
+        self.window_event_hooks.lock().map_err(|_| {
+            Error::new(
+                CaptureErrorCode::Internal,
+                "share border overlay WinEvent hook state lock was poisoned",
+                false,
+            )
+        })
+    }
+}
+
+impl Drop for WindowsShareOverlay {
+    fn drop(&mut self) {
+        if let Ok(mut hooks) = self.window_event_hooks.lock() {
+            if let Some(hooks) = hooks.take() {
+                hooks.unregister();
+            }
+        }
+    }
 }
 
 pub fn windows_target_handle_from_source_id(source_id: &str) -> Option<usize> {
@@ -187,6 +302,228 @@ fn window_bounds_from_source_id(source_id: &str) -> Result<Option<OverlayRect>> 
         right: rect.right,
         bottom: rect.bottom,
     }))
+}
+
+#[derive(Debug)]
+struct WindowEventHooks {
+    target_hwnd: usize,
+    registration_id: u64,
+    handles: Vec<usize>,
+}
+
+impl WindowEventHooks {
+    fn unregister(self) {
+        unregister_window_event_target(self.registration_id, self.target_hwnd);
+
+        for handle in self.handles {
+            unsafe {
+                let _ = UnhookWinEvent(HWINEVENTHOOK(handle as *mut c_void));
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+struct WindowEventTarget {
+    registration_id: u64,
+    source_id: String,
+    style: OverlayStyle,
+    sender: mpsc::Sender<OverlayCommand>,
+    moving_or_sizing: bool,
+}
+
+enum WindowEventAction {
+    Hide {
+        sender: mpsc::Sender<OverlayCommand>,
+    },
+    RefreshBounds {
+        source_id: String,
+        style: OverlayStyle,
+        sender: mpsc::Sender<OverlayCommand>,
+    },
+}
+
+fn next_window_event_registration_id() -> u64 {
+    NEXT_WINDOW_EVENT_REGISTRATION_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn window_event_registry() -> &'static Mutex<HashMap<usize, Vec<WindowEventTarget>>> {
+    WINDOW_EVENT_REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn register_window_event_target(
+    registration_id: u64,
+    target_hwnd: usize,
+    source_id: String,
+    style: OverlayStyle,
+    sender: mpsc::Sender<OverlayCommand>,
+) {
+    let Ok(mut registry) = window_event_registry().lock() else {
+        return;
+    };
+    let targets = registry.entry(target_hwnd).or_default();
+    targets.retain(|target| target.registration_id != registration_id);
+    targets.push(WindowEventTarget {
+        registration_id,
+        source_id,
+        style,
+        sender,
+        moving_or_sizing: false,
+    });
+}
+
+fn unregister_window_event_target(registration_id: u64, target_hwnd: usize) {
+    let Ok(mut registry) = window_event_registry().lock() else {
+        return;
+    };
+
+    if let Some(targets) = registry.get_mut(&target_hwnd) {
+        targets.retain(|target| target.registration_id != registration_id);
+        if targets.is_empty() {
+            registry.remove(&target_hwnd);
+        }
+    }
+}
+
+fn install_window_event_hooks(process_id: u32) -> Result<Vec<usize>> {
+    let mut handles = Vec::with_capacity(2);
+
+    for (event_min, event_max) in [
+        (EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND),
+        (EVENT_OBJECT_DESTROY, EVENT_OBJECT_LOCATIONCHANGE),
+    ] {
+        match install_window_event_hook(event_min, event_max, process_id) {
+            Ok(handle) => handles.push(handle),
+            Err(error) => {
+                for handle in handles {
+                    unsafe {
+                        let _ = UnhookWinEvent(HWINEVENTHOOK(handle as *mut c_void));
+                    }
+                }
+                return Err(error);
+            }
+        }
+    }
+
+    Ok(handles)
+}
+
+fn install_window_event_hook(event_min: u32, event_max: u32, process_id: u32) -> Result<usize> {
+    let hook = unsafe {
+        SetWinEventHook(
+            event_min,
+            event_max,
+            None,
+            Some(win_event_proc),
+            process_id,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        )
+    };
+
+    if hook.is_invalid() {
+        return Err(Error::new(
+            CaptureErrorCode::Internal,
+            format!(
+                "failed to install Windows share border WinEvent hook for event range {event_min}..={event_max}: {:?}",
+                unsafe { GetLastError() }
+            ),
+            true,
+        ));
+    }
+
+    Ok(hook.0 as usize)
+}
+
+fn window_process_id(hwnd: HWND) -> u32 {
+    let mut process_id = 0;
+    unsafe {
+        let _ = GetWindowThreadProcessId(hwnd, Some(&mut process_id));
+    }
+    process_id
+}
+
+unsafe extern "system" fn win_event_proc(
+    _hook: HWINEVENTHOOK,
+    event: u32,
+    hwnd: HWND,
+    object_id: i32,
+    _child_id: i32,
+    _event_thread: u32,
+    _event_time: u32,
+) {
+    dispatch_window_event(event, hwnd.0 as usize, object_id);
+}
+
+fn dispatch_window_event(event: u32, hwnd: usize, object_id: i32) {
+    if object_id != OBJID_WINDOW.0 {
+        return;
+    }
+
+    let actions = {
+        let Ok(mut registry) = window_event_registry().lock() else {
+            return;
+        };
+        let Some(targets) = registry.get_mut(&hwnd) else {
+            return;
+        };
+
+        let mut actions = Vec::new();
+        for target in targets {
+            match event {
+                EVENT_SYSTEM_MOVESIZESTART => {
+                    target.moving_or_sizing = true;
+                    actions.push(WindowEventAction::Hide {
+                        sender: target.sender.clone(),
+                    });
+                }
+                EVENT_SYSTEM_MOVESIZEEND => {
+                    target.moving_or_sizing = false;
+                    actions.push(WindowEventAction::RefreshBounds {
+                        source_id: target.source_id.clone(),
+                        style: target.style,
+                        sender: target.sender.clone(),
+                    });
+                }
+                EVENT_OBJECT_HIDE | EVENT_OBJECT_DESTROY => {
+                    target.moving_or_sizing = false;
+                    actions.push(WindowEventAction::Hide {
+                        sender: target.sender.clone(),
+                    });
+                }
+                EVENT_OBJECT_SHOW | EVENT_OBJECT_LOCATIONCHANGE => {
+                    if !target.moving_or_sizing {
+                        actions.push(WindowEventAction::RefreshBounds {
+                            source_id: target.source_id.clone(),
+                            style: target.style,
+                            sender: target.sender.clone(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        actions
+    };
+
+    for action in actions {
+        match action {
+            WindowEventAction::Hide { sender } => {
+                let _ = sender.send(OverlayCommand::HideForWindowEvent);
+            }
+            WindowEventAction::RefreshBounds {
+                source_id,
+                style,
+                sender,
+            } => {
+                let command = match window_bounds_from_source_id(&source_id) {
+                    Ok(Some(rect)) => OverlayCommand::ShowRectForWindowEvent { rect, style },
+                    Ok(None) | Err(_) => OverlayCommand::HideForWindowEvent,
+                };
+                let _ = sender.send(command);
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -297,6 +634,11 @@ enum OverlayCommand {
     Hide {
         reply: OverlayReply,
     },
+    ShowRectForWindowEvent {
+        rect: OverlayRect,
+        style: OverlayStyle,
+    },
+    HideForWindowEvent,
     Shutdown {
         reply: OverlayReply,
     },
@@ -393,6 +735,20 @@ impl OverlayThread {
                     window.hide();
                 }
                 send_reply(reply, Ok(()));
+                false
+            }
+            OverlayCommand::ShowRectForWindowEvent { rect, style } => {
+                if let Err(error) = self.show_rect(rect, style) {
+                    eprintln!(
+                        "[screen-capture] failed to refresh share overlay from WinEvent: {error}"
+                    );
+                }
+                false
+            }
+            OverlayCommand::HideForWindowEvent => {
+                for window in &self.windows {
+                    window.hide();
+                }
                 false
             }
             OverlayCommand::Shutdown { reply } => {
@@ -647,5 +1003,81 @@ mod tests {
     #[test]
     fn overlay_windows_are_not_send() {
         <OverlayWindow as AmbiguousIfSend<_>>::assert_not_send();
+    }
+
+    #[test]
+    fn win_event_registry_dispatches_to_multiple_sessions_for_same_window() {
+        let hwnd = 0x1234usize;
+        let first_id = next_window_event_registration_id();
+        let second_id = next_window_event_registration_id();
+        let (first_sender, first_receiver) = mpsc::channel();
+        let (second_sender, second_receiver) = mpsc::channel();
+
+        register_window_event_target(
+            first_id,
+            hwnd,
+            "window:1234".to_string(),
+            OverlayStyle::default(),
+            first_sender,
+        );
+        register_window_event_target(
+            second_id,
+            hwnd,
+            "window:1234".to_string(),
+            OverlayStyle::default(),
+            second_sender,
+        );
+
+        dispatch_window_event(EVENT_SYSTEM_MOVESIZESTART, hwnd, OBJID_WINDOW.0);
+
+        assert!(matches!(
+            first_receiver.recv_timeout(Duration::from_millis(50)),
+            Ok(OverlayCommand::HideForWindowEvent)
+        ));
+        assert!(matches!(
+            second_receiver.recv_timeout(Duration::from_millis(50)),
+            Ok(OverlayCommand::HideForWindowEvent)
+        ));
+
+        unregister_window_event_target(first_id, hwnd);
+        unregister_window_event_target(second_id, hwnd);
+    }
+
+    #[test]
+    fn win_event_registry_unregisters_one_session_without_removing_others() {
+        let hwnd = 0x5678usize;
+        let first_id = next_window_event_registration_id();
+        let second_id = next_window_event_registration_id();
+        let (first_sender, first_receiver) = mpsc::channel();
+        let (second_sender, second_receiver) = mpsc::channel();
+
+        register_window_event_target(
+            first_id,
+            hwnd,
+            "window:5678".to_string(),
+            OverlayStyle::default(),
+            first_sender,
+        );
+        register_window_event_target(
+            second_id,
+            hwnd,
+            "window:5678".to_string(),
+            OverlayStyle::default(),
+            second_sender,
+        );
+        unregister_window_event_target(first_id, hwnd);
+
+        dispatch_window_event(EVENT_SYSTEM_MOVESIZESTART, hwnd, OBJID_WINDOW.0);
+
+        assert!(matches!(
+            first_receiver.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected)
+        ));
+        assert!(matches!(
+            second_receiver.recv_timeout(Duration::from_millis(50)),
+            Ok(OverlayCommand::HideForWindowEvent)
+        ));
+
+        unregister_window_event_target(second_id, hwnd);
     }
 }
