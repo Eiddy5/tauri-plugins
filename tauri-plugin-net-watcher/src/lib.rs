@@ -15,19 +15,18 @@ mod commands;
 mod error;
 mod models;
 mod network;
-mod probe;
-mod state;
-mod stats;
+mod quality;
+mod snapshot;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
-mod system_events;
+mod watcher;
 
 pub use config::{NetWatcherConfig, StartWatchingOptions};
 pub use error::{Error, Result};
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
-use desktop::NetWatcher;
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 use mobile::NetWatcher;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+use watcher::NetWatcher;
 
 /// Extensions to [`tauri::App`], [`tauri::AppHandle`] and [`tauri::Window`] to access the net-watcher APIs.
 pub trait NetWatcherExt<R: Runtime> {
