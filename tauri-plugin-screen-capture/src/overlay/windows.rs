@@ -29,12 +29,12 @@ use windows::{
             GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, PeekMessageW,
             RegisterClassW, SetForegroundWindow, SetLayeredWindowAttributes,
             SetWindowDisplayAffinity, SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW,
-            CS_VREDRAW, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE,
-            EVENT_OBJECT_SHOW, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, HMENU,
-            HWND_TOPMOST, LWA_ALPHA, MSG, OBJID_WINDOW, PM_REMOVE, SWP_NOACTIVATE,
-            SWP_NOOWNERZORDER, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, WDA_EXCLUDEFROMCAPTURE,
-            WINEVENT_OUTOFCONTEXT, WM_QUIT, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-            WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+            CS_VREDRAW, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW,
+            EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, HMENU, HWND_TOPMOST, LWA_ALPHA,
+            MSG, OBJID_WINDOW, PM_REMOVE, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER, SW_HIDE,
+            SW_SHOWNOACTIVATE, WDA_EXCLUDEFROMCAPTURE, WINEVENT_OUTOFCONTEXT, WM_QUIT, WNDCLASSW,
+            WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+            WS_POPUP,
         },
     },
 };
@@ -527,11 +527,13 @@ fn lock_window_event_registry() -> Result<std::sync::MutexGuard<'static, WindowE
 }
 
 fn install_window_event_hooks(process_id: u32, thread_id: u32) -> Result<Vec<usize>> {
-    let mut handles = Vec::with_capacity(2);
+    let mut handles = Vec::with_capacity(4);
 
     for (event_min, event_max) in [
         (EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND),
-        (EVENT_OBJECT_DESTROY, EVENT_OBJECT_LOCATIONCHANGE),
+        (EVENT_OBJECT_DESTROY, EVENT_OBJECT_DESTROY),
+        (EVENT_OBJECT_HIDE, EVENT_OBJECT_HIDE),
+        (EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW),
     ] {
         match install_window_event_hook(event_min, event_max, process_id, thread_id) {
             Ok(handle) => handles.push(handle),
@@ -671,7 +673,7 @@ fn dispatch_window_event(hook: usize, event: u32, hwnd: usize, object_id: i32) {
                     registration_id: target.registration_id,
                 })
             }
-            EVENT_OBJECT_SHOW | EVENT_OBJECT_LOCATIONCHANGE => {
+            EVENT_OBJECT_SHOW => {
                 let target = &targets[target_index];
                 if target.moving_or_sizing {
                     None
@@ -1490,6 +1492,40 @@ mod tests {
         ));
 
         unregister_window_event_target(second_id);
+    }
+
+    #[test]
+    fn win_event_registry_ignores_location_change_to_avoid_drag_event_storms() {
+        const EVENT_OBJECT_LOCATIONCHANGE_FOR_TEST: u32 = 0x800B;
+
+        let hwnd = 0x7777usize;
+        let hook = 0xddd1usize;
+        let registration_id = next_window_event_registration_id();
+        let (sender, receiver) = mpsc::channel();
+
+        register_window_event_target(
+            registration_id,
+            hwnd,
+            "window:7777".to_string(),
+            OverlayStyle::default(),
+            sender,
+        )
+        .unwrap();
+        register_window_event_hook_handles(registration_id, hwnd, &[hook]).unwrap();
+
+        dispatch_window_event(
+            hook,
+            EVENT_OBJECT_LOCATIONCHANGE_FOR_TEST,
+            hwnd,
+            OBJID_WINDOW.0,
+        );
+
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected)
+        ));
+
+        unregister_window_event_target(registration_id);
     }
 
     #[test]
