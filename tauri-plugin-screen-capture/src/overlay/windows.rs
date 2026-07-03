@@ -79,6 +79,14 @@ impl ShareOverlay for WindowsShareOverlay {
                     }
                 };
                 let sender = self.ensure_host_sender()?;
+                let rect = match window_bounds_from_source_id(&target.source_id) {
+                    Ok(rect) => rect,
+                    Err(_) => {
+                        self.clear_window_event_hooks().await?;
+                        send_overlay_command(sender, OverlayCommand::hide).await?;
+                        return Ok(());
+                    }
+                };
                 let source_id = target.source_id.clone();
                 let style = self.style;
                 let registration_id = self.window_event_registration_id;
@@ -95,10 +103,6 @@ impl ShareOverlay for WindowsShareOverlay {
                     }
                 })
                 .await?;
-
-                let rect = window_bounds_from_source_id(&target.source_id)
-                    .ok()
-                    .flatten();
 
                 match rect {
                     Some(rect) => {
