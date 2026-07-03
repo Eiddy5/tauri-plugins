@@ -49,48 +49,51 @@ impl OverlaySegment {
 }
 
 pub fn corner_segments(rect: OverlayRect, style: OverlayStyle) -> Vec<OverlaySegment> {
-    let width = rect.right - rect.left;
-    let height = rect.bottom - rect.top;
-    let horizontal_length = style.corner_length.min(width / 2);
-    let vertical_length = style.corner_length.min(height / 2);
+    let thickness = style.thickness.max(1);
+    let corner_length = style.corner_length.max(thickness);
+    let min_dimension = thickness.saturating_mul(2);
+    let width = rect.right.saturating_sub(rect.left).max(min_dimension);
+    let height = rect.bottom.saturating_sub(rect.top).max(min_dimension);
+    let horizontal_length = corner_length.min(width / 2);
+    let vertical_length = corner_length.min(height / 2);
 
     vec![
-        OverlaySegment::new(rect.left, rect.top, horizontal_length, style.thickness),
-        OverlaySegment::new(rect.left, rect.top, style.thickness, vertical_length),
+        OverlaySegment::new(rect.left, rect.top, horizontal_length, thickness),
+        OverlaySegment::new(rect.left, rect.top, thickness, vertical_length),
         OverlaySegment::new(
-            rect.right - horizontal_length,
+            rect.right.saturating_sub(horizontal_length),
             rect.top,
             horizontal_length,
-            style.thickness,
+            thickness,
         ),
         OverlaySegment::new(
-            rect.right - style.thickness,
+            rect.right.saturating_sub(thickness),
             rect.top,
-            style.thickness,
+            thickness,
             vertical_length,
         ),
         OverlaySegment::new(
             rect.left,
-            rect.bottom - style.thickness,
+            rect.bottom.saturating_sub(thickness),
             horizontal_length,
-            style.thickness,
+            thickness,
         ),
         OverlaySegment::new(
             rect.left,
-            rect.bottom - vertical_length,
-            style.thickness,
+            rect.bottom.saturating_sub(vertical_length),
+            thickness,
             vertical_length,
         ),
         OverlaySegment::new(
-            rect.right - horizontal_length,
-            rect.bottom - style.thickness,
+            rect.right.saturating_sub(horizontal_length),
+            rect.bottom.saturating_sub(thickness),
             horizontal_length,
-            style.thickness,
+            thickness,
         ),
         OverlaySegment::new(
-            rect.right - style.thickness,
-            rect.bottom - vertical_length,
-            style.thickness,
+            rect.right.saturating_sub(thickness),
+            rect.bottom.saturating_sub(vertical_length),
+            thickness,
             vertical_length,
         ),
     ]

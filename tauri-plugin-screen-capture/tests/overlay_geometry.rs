@@ -77,3 +77,25 @@ fn default_style_matches_the_share_border_spec() {
         }
     );
 }
+
+#[test]
+fn corner_segments_keep_positive_dimensions_for_invalid_public_inputs() {
+    let segments = corner_segments(
+        OverlayRect {
+            left: 50,
+            top: 60,
+            right: 10,
+            bottom: 20,
+        },
+        OverlayStyle {
+            color: 0x22C55E,
+            thickness: 0,
+            corner_length: -8,
+        },
+    );
+
+    assert_eq!(segments.len(), 8);
+    assert!(segments
+        .iter()
+        .all(|segment| segment.width >= 1 && segment.height >= 1));
+}
