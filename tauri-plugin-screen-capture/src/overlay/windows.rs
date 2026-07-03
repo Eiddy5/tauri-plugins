@@ -27,14 +27,14 @@ use windows::{
         UI::WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetWindowRect,
             GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, PeekMessageW,
-            RegisterClassW, SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowPos,
-            ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, EVENT_OBJECT_DESTROY,
-            EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_SHOW,
-            EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, HMENU, HWND_TOPMOST, LWA_ALPHA,
-            MSG, OBJID_WINDOW, PM_REMOVE, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER, SW_HIDE,
-            SW_SHOWNOACTIVATE, WDA_EXCLUDEFROMCAPTURE, WINEVENT_OUTOFCONTEXT, WM_QUIT, WNDCLASSW,
-            WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
-            WS_POPUP,
+            RegisterClassW, SetForegroundWindow, SetLayeredWindowAttributes,
+            SetWindowDisplayAffinity, SetWindowPos, ShowWindow, TranslateMessage, CS_HREDRAW,
+            CS_VREDRAW, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE,
+            EVENT_OBJECT_SHOW, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, HMENU,
+            HWND_TOPMOST, LWA_ALPHA, MSG, OBJID_WINDOW, PM_REMOVE, SWP_NOACTIVATE,
+            SWP_NOOWNERZORDER, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE, WDA_EXCLUDEFROMCAPTURE,
+            WINEVENT_OUTOFCONTEXT, WM_QUIT, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+            WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
         },
     },
 };
@@ -116,6 +116,7 @@ impl ShareOverlay for WindowsShareOverlay {
                             rect,
                             style,
                             placement,
+                            focus: OverlayFocus::for_window_start(target_hwnd),
                             reply,
                         })
                         .await
@@ -174,6 +175,7 @@ impl WindowsShareOverlay {
             rect,
             style,
             placement,
+            focus: OverlayFocus::none(),
             reply,
         })
         .await
@@ -357,6 +359,30 @@ impl OverlayPlacement {
         Self {
             owner_hwnd: None,
             topmost: true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OverlayFocus {
+    None,
+    OwnerOnce(usize),
+}
+
+impl OverlayFocus {
+    const fn for_window_start(owner_hwnd: usize) -> Self {
+        Self::OwnerOnce(owner_hwnd)
+    }
+
+    const fn none() -> Self {
+        Self::None
+    }
+
+    fn apply(self) {
+        if let Self::OwnerOnce(owner_hwnd) = self {
+            unsafe {
+                let _ = SetForegroundWindow(HWND(owner_hwnd as *mut c_void));
+            }
         }
     }
 }
@@ -796,6 +822,7 @@ enum OverlayCommand {
         rect: OverlayRect,
         style: OverlayStyle,
         placement: OverlayPlacement,
+        focus: OverlayFocus,
         reply: OverlayReply,
     },
     Show {
@@ -911,9 +938,10 @@ impl OverlayThread {
                 rect,
                 style,
                 placement,
+                focus,
                 reply,
             } => {
-                send_reply(reply, self.show_rect(rect, style, placement));
+                send_reply(reply, self.show_rect(rect, style, placement, focus));
                 false
             }
             OverlayCommand::Show { reply } => {
@@ -935,7 +963,7 @@ impl OverlayThread {
                 style,
                 placement,
             } => {
-                if let Err(error) = self.show_rect(rect, style, placement) {
+                if let Err(error) = self.show_rect(rect, style, placement, OverlayFocus::none()) {
                     eprintln!(
                         "[screen-capture] failed to refresh share overlay from WinEvent: {error}"
                     );
@@ -994,8 +1022,10 @@ impl OverlayThread {
         rect: OverlayRect,
         style: OverlayStyle,
         placement: OverlayPlacement,
+        focus: OverlayFocus,
     ) -> Result<()> {
         let segments = corner_segments(rect, style);
+        focus.apply();
 
         if self.windows.len() != segments.len()
             || self
@@ -1322,6 +1352,15 @@ mod tests {
 
         assert_eq!(placement.owner_hwnd, None);
         assert!(placement.topmost);
+    }
+
+    #[test]
+    fn window_capture_start_focuses_owner_once() {
+        assert_eq!(
+            OverlayFocus::for_window_start(0x2a),
+            OverlayFocus::OwnerOnce(0x2a)
+        );
+        assert_eq!(OverlayFocus::none(), OverlayFocus::None);
     }
 
     #[test]
