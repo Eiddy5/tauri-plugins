@@ -144,11 +144,10 @@ impl WindowsShareOverlay {
     }
 }
 
-pub fn windows_target_handle_from_source_id(source_id: &str) -> Option<isize> {
+pub fn windows_target_handle_from_source_id(source_id: &str) -> Option<usize> {
     source_id
         .strip_prefix("window:")
         .and_then(|id| usize::from_str_radix(id, 16).ok())
-        .and_then(|handle| isize::try_from(handle).ok())
 }
 
 fn window_bounds_from_source_id(source_id: &str) -> Result<Option<OverlayRect>> {

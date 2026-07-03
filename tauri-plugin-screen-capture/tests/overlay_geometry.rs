@@ -112,3 +112,12 @@ fn windows_target_handle_from_source_id_parses_only_window_hex_ids() {
     );
     assert_eq!(windows_target_handle_from_source_id("display:1"), None);
 }
+
+#[cfg(all(windows, target_pointer_width = "64"))]
+#[test]
+fn windows_target_handle_from_source_id_accepts_pointer_sized_hex_values() {
+    assert_eq!(
+        windows_target_handle_from_source_id("window:8000000000000000"),
+        Some(0x8000_0000_0000_0000)
+    );
+}
