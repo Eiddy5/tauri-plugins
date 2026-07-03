@@ -30,6 +30,23 @@ pub trait ShareOverlayFactory: Send + Sync {
 }
 
 #[derive(Debug, Default)]
+pub struct DefaultShareOverlayFactory;
+
+impl ShareOverlayFactory for DefaultShareOverlayFactory {
+    fn create_overlay(&self) -> Arc<dyn ShareOverlay> {
+        #[cfg(windows)]
+        {
+            Arc::new(WindowsShareOverlay::default())
+        }
+
+        #[cfg(not(windows))]
+        {
+            Arc::new(NoopShareOverlay)
+        }
+    }
+}
+
+#[derive(Debug, Default)]
 pub struct NoopShareOverlay;
 
 #[async_trait]

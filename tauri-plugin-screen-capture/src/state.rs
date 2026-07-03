@@ -15,7 +15,7 @@ use crate::{
         ListSourcesOptions, PermissionStatus, StartCaptureOptions, WebRtcAnswer,
         WebRtcIceCandidate, WebRtcOffer,
     },
-    overlay::{NoopShareOverlayFactory, OverlayTarget, ShareOverlay, ShareOverlayFactory},
+    overlay::{DefaultShareOverlayFactory, OverlayTarget, ShareOverlay, ShareOverlayFactory},
     pipeline::CapturePipeline,
     publisher::{CapturePublisher, WebRtcPublisher},
     webrtc::signaling::WebRtcSignalingState,
@@ -62,7 +62,7 @@ impl Default for ScreenCaptureState {
 
 impl ScreenCaptureState {
     pub fn with_backend(backend: Arc<dyn CaptureBackend>) -> Self {
-        Self::with_backend_and_overlay_factory(backend, Arc::new(NoopShareOverlayFactory))
+        Self::with_backend_and_overlay_factory(backend, Arc::new(DefaultShareOverlayFactory))
     }
 
     pub fn with_backend_and_overlay(
