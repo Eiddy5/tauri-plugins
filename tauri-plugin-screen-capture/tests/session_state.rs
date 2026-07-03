@@ -6,6 +6,7 @@ use std::sync::{
 use async_trait::async_trait;
 use tauri_plugin_screen_capture::{
     capture::{CaptureBackend, DummyCaptureBackend, FrameConsumer, RunningCapture},
+    overlay::ShareOverlayFactory,
     CaptureSourceKind, CaptureStatus, ListSourcesOptions, PermissionStatus, Result,
     ScreenCaptureState, StartCaptureOptions,
 };
@@ -29,6 +30,7 @@ struct OverlayLifecycleCounters {
 #[derive(Debug)]
 struct OverlayProbe {
     counters: Arc<OverlayLifecycleCounters>,
+    fail_lifecycle_calls: bool,
 }
 
 #[async_trait]
@@ -43,17 +45,66 @@ impl tauri_plugin_screen_capture::overlay::ShareOverlay for OverlayProbe {
 
     async fn hide(&self) -> Result<()> {
         self.counters.hides.fetch_add(1, Ordering::SeqCst);
+        if self.fail_lifecycle_calls {
+            return Err(tauri_plugin_screen_capture::Error::new(
+                tauri_plugin_screen_capture::CaptureErrorCode::Internal,
+                "overlay hide failed",
+                true,
+            ));
+        }
         Ok(())
     }
 
     async fn show(&self) -> Result<()> {
         self.counters.shows.fetch_add(1, Ordering::SeqCst);
+        if self.fail_lifecycle_calls {
+            return Err(tauri_plugin_screen_capture::Error::new(
+                tauri_plugin_screen_capture::CaptureErrorCode::Internal,
+                "overlay show failed",
+                true,
+            ));
+        }
         Ok(())
     }
 
     async fn stop(&self) -> Result<()> {
         self.counters.stops.fetch_add(1, Ordering::SeqCst);
+        if self.fail_lifecycle_calls {
+            return Err(tauri_plugin_screen_capture::Error::new(
+                tauri_plugin_screen_capture::CaptureErrorCode::Internal,
+                "overlay stop failed",
+                true,
+            ));
+        }
         Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
+struct OverlayProbeFactory {
+    creates: AtomicUsize,
+    overlays: Mutex<Vec<Arc<OverlayLifecycleCounters>>>,
+    fail_lifecycle_calls: bool,
+}
+
+impl OverlayProbeFactory {
+    fn overlay_counters(&self) -> Vec<Arc<OverlayLifecycleCounters>> {
+        self.overlays.lock().expect("overlays lock").clone()
+    }
+}
+
+impl ShareOverlayFactory for OverlayProbeFactory {
+    fn create_overlay(&self) -> Arc<dyn tauri_plugin_screen_capture::overlay::ShareOverlay> {
+        self.creates.fetch_add(1, Ordering::SeqCst);
+        let counters = Arc::new(OverlayLifecycleCounters::default());
+        self.overlays
+            .lock()
+            .expect("overlays lock")
+            .push(Arc::clone(&counters));
+        Arc::new(OverlayProbe {
+            counters,
+            fail_lifecycle_calls: self.fail_lifecycle_calls,
+        })
     }
 }
 
@@ -246,6 +297,7 @@ async fn state_drives_share_overlay_lifecycle() {
     let overlay_counters = Arc::new(OverlayLifecycleCounters::default());
     let overlay = Arc::new(OverlayProbe {
         counters: Arc::clone(&overlay_counters),
+        fail_lifecycle_calls: false,
     });
     let state = ScreenCaptureState::with_backend_and_overlay(backend, overlay);
 
@@ -266,6 +318,106 @@ async fn state_drives_share_overlay_lifecycle() {
 
     state.stop_capture(&session.session_id).await.expect("stop");
     assert_eq!(overlay_counters.stops.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn state_creates_independent_share_overlay_per_session() {
+    let backend = Arc::new(ObservableBackend {
+        counters: Arc::new(BackendLifecycleCounters::default()),
+        last_options: Arc::new(Mutex::new(None)),
+    });
+    let overlay_factory = Arc::new(OverlayProbeFactory::default());
+    let state = ScreenCaptureState::with_backend_and_overlay_factory(
+        backend,
+        Arc::clone(&overlay_factory) as Arc<dyn ShareOverlayFactory>,
+    );
+
+    let first_session = state
+        .start_capture(start_options())
+        .await
+        .expect("first start");
+    let second_session = state
+        .start_capture(StartCaptureOptions {
+            source_id: "dummy-display-2".to_string(),
+            ..start_options()
+        })
+        .await
+        .expect("second start");
+
+    assert_ne!(first_session.session_id, second_session.session_id);
+    assert_eq!(overlay_factory.creates.load(Ordering::SeqCst), 2);
+
+    let overlays = overlay_factory.overlay_counters();
+    assert_eq!(overlays.len(), 2);
+    assert!(!Arc::ptr_eq(&overlays[0], &overlays[1]));
+    assert_eq!(overlays[0].starts.load(Ordering::SeqCst), 1);
+    assert_eq!(overlays[1].starts.load(Ordering::SeqCst), 1);
+
+    state
+        .pause_capture(&first_session.session_id)
+        .await
+        .expect("pause first session");
+    assert_eq!(overlays[0].hides.load(Ordering::SeqCst), 1);
+    assert_eq!(overlays[1].hides.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn state_keeps_session_consistent_when_overlay_lifecycle_calls_fail() {
+    let backend = Arc::new(ObservableBackend {
+        counters: Arc::new(BackendLifecycleCounters::default()),
+        last_options: Arc::new(Mutex::new(None)),
+    });
+    let overlay_factory = Arc::new(OverlayProbeFactory {
+        fail_lifecycle_calls: true,
+        ..OverlayProbeFactory::default()
+    });
+    let state = ScreenCaptureState::with_backend_and_overlay_factory(
+        backend,
+        Arc::clone(&overlay_factory) as Arc<dyn ShareOverlayFactory>,
+    );
+
+    let session = state.start_capture(start_options()).await.expect("start");
+
+    state
+        .pause_capture(&session.session_id)
+        .await
+        .expect("pause ignores overlay hide failure");
+    assert_eq!(
+        state
+            .get_capture_session(&session.session_id)
+            .await
+            .expect("session after pause")
+            .status,
+        CaptureStatus::Paused
+    );
+
+    state
+        .resume_capture(&session.session_id)
+        .await
+        .expect("resume ignores overlay show failure");
+    assert_eq!(
+        state
+            .get_capture_session(&session.session_id)
+            .await
+            .expect("session after resume")
+            .status,
+        CaptureStatus::Publishing
+    );
+
+    state
+        .stop_capture(&session.session_id)
+        .await
+        .expect("stop ignores overlay stop failure");
+    assert!(state
+        .get_capture_session(&session.session_id)
+        .await
+        .is_err());
+
+    let overlays = overlay_factory.overlay_counters();
+    assert_eq!(overlays.len(), 1);
+    assert_eq!(overlays[0].hides.load(Ordering::SeqCst), 1);
+    assert_eq!(overlays[0].shows.load(Ordering::SeqCst), 1);
+    assert_eq!(overlays[0].stops.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

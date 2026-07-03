@@ -15,7 +15,7 @@ use crate::{
         ListSourcesOptions, PermissionStatus, StartCaptureOptions, WebRtcAnswer,
         WebRtcIceCandidate, WebRtcOffer,
     },
-    overlay::{NoopShareOverlay, OverlayTarget, ShareOverlay},
+    overlay::{NoopShareOverlayFactory, OverlayTarget, ShareOverlay, ShareOverlayFactory},
     pipeline::CapturePipeline,
     publisher::{CapturePublisher, WebRtcPublisher},
     webrtc::signaling::WebRtcSignalingState,
@@ -33,8 +33,18 @@ struct SessionRecord {
 
 pub struct ScreenCaptureState {
     backend: Arc<dyn CaptureBackend>,
-    overlay: Arc<dyn ShareOverlay>,
+    overlay_factory: Arc<dyn ShareOverlayFactory>,
     sessions: Mutex<HashMap<String, SessionRecord>>,
+}
+
+struct SharedShareOverlayFactory {
+    overlay: Arc<dyn ShareOverlay>,
+}
+
+impl ShareOverlayFactory for SharedShareOverlayFactory {
+    fn create_overlay(&self) -> Arc<dyn ShareOverlay> {
+        Arc::clone(&self.overlay)
+    }
 }
 
 impl Default for ScreenCaptureState {
@@ -52,16 +62,26 @@ impl Default for ScreenCaptureState {
 
 impl ScreenCaptureState {
     pub fn with_backend(backend: Arc<dyn CaptureBackend>) -> Self {
-        Self::with_backend_and_overlay(backend, Arc::new(NoopShareOverlay))
+        Self::with_backend_and_overlay_factory(backend, Arc::new(NoopShareOverlayFactory))
     }
 
     pub fn with_backend_and_overlay(
         backend: Arc<dyn CaptureBackend>,
         overlay: Arc<dyn ShareOverlay>,
     ) -> Self {
+        Self::with_backend_and_overlay_factory(
+            backend,
+            Arc::new(SharedShareOverlayFactory { overlay }),
+        )
+    }
+
+    pub fn with_backend_and_overlay_factory(
+        backend: Arc<dyn CaptureBackend>,
+        overlay_factory: Arc<dyn ShareOverlayFactory>,
+    ) -> Self {
         Self {
             backend,
-            overlay,
+            overlay_factory,
             sessions: Mutex::new(HashMap::new()),
         }
     }
@@ -116,7 +136,7 @@ impl ScreenCaptureState {
             return Err(error);
         }
 
-        let overlay = Arc::clone(&self.overlay);
+        let overlay = self.overlay_factory.create_overlay();
         if let Err(error) = overlay
             .start(OverlayTarget {
                 source_id: options.source_id.clone(),
@@ -170,7 +190,9 @@ impl ScreenCaptureState {
 
         running_capture.pause().await?;
         publisher.pause().await?;
-        overlay.hide().await?;
+        if let Err(error) = overlay.hide().await {
+            eprintln!("[screen-capture] failed to hide share overlay: {error}");
+        }
 
         let mut sessions = self.sessions.lock().await;
         let record = sessions
@@ -197,7 +219,9 @@ impl ScreenCaptureState {
 
         running_capture.resume().await?;
         publisher.resume().await?;
-        overlay.show().await?;
+        if let Err(error) = overlay.show().await {
+            eprintln!("[screen-capture] failed to show share overlay: {error}");
+        }
 
         let mut sessions = self.sessions.lock().await;
         let record = sessions
@@ -224,7 +248,9 @@ impl ScreenCaptureState {
 
         running_capture.stop().await?;
         publisher.stop().await?;
-        overlay.stop().await?;
+        if let Err(error) = overlay.stop().await {
+            eprintln!("[screen-capture] failed to stop share overlay: {error}");
+        }
         self.sessions
             .lock()
             .await

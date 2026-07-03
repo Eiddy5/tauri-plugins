@@ -5,6 +5,7 @@ mod windows;
 pub use windows::WindowsShareOverlay;
 
 use async_trait::async_trait;
+use std::sync::Arc;
 
 use crate::{models::CaptureSourceKind, Result};
 
@@ -20,6 +21,10 @@ pub trait ShareOverlay: Send + Sync {
     async fn show(&self) -> Result<()>;
     async fn hide(&self) -> Result<()>;
     async fn stop(&self) -> Result<()>;
+}
+
+pub trait ShareOverlayFactory: Send + Sync {
+    fn create_overlay(&self) -> Arc<dyn ShareOverlay>;
 }
 
 #[derive(Debug, Default)]
@@ -41,6 +46,15 @@ impl ShareOverlay for NoopShareOverlay {
 
     async fn stop(&self) -> Result<()> {
         Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct NoopShareOverlayFactory;
+
+impl ShareOverlayFactory for NoopShareOverlayFactory {
+    fn create_overlay(&self) -> Arc<dyn ShareOverlay> {
+        Arc::new(NoopShareOverlay)
     }
 }
 
