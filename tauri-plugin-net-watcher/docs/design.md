@@ -63,7 +63,7 @@ net-watcher://snapshot-updated
 
 1. watcher 启动时创建后台任务，并尝试订阅系统网络变化事件。
 2. Windows 当前通过 `NotifyIpInterfaceChange` 监听网卡、IP 地址和接口状态变化；收到系统回调后立即唤醒一次刷新。
-3. macOS 当前保留平台入口，第一版先使用 `intervalMs` 定时刷新兜底，后续接入 `SCDynamicStore` 或 `NWPathMonitor`。
+3. macOS 当前通过 `SCDynamicStore` 监听网络配置变化；收到系统回调后立即唤醒一次刷新。
 4. 无论是系统事件唤醒还是定时唤醒，刷新流程都相同：读取系统网络接口快照。
 5. 对 `target` 执行 HTTP/HTTPS 主动探测。
 6. 把探测结果写入滚动窗口。
