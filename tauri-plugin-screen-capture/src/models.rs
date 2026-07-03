@@ -108,6 +108,24 @@ impl StartCaptureOptions {
     pub fn effective_capture_cursor(&self) -> bool {
         self.capture_cursor.unwrap_or(true)
     }
+
+    pub fn effective_video_size(&self) -> (u32, u32) {
+        (
+            even_video_dimension(self.width.unwrap_or(1280)),
+            even_video_dimension(self.height.unwrap_or(720)),
+        )
+    }
+
+    pub fn with_effective_video_size(mut self) -> Self {
+        let (width, height) = self.effective_video_size();
+        self.width = Some(width);
+        self.height = Some(height);
+        self
+    }
+}
+
+fn even_video_dimension(value: u32) -> u32 {
+    value.max(2) & !1
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -79,6 +79,7 @@ impl ScreenCaptureState {
     }
 
     pub async fn start_capture(&self, options: StartCaptureOptions) -> Result<CaptureSession> {
+        let options = options.with_effective_video_size();
         let signaling = WebRtcSignalingState::new().await?;
         let publisher = WebRtcPublisher::new(signaling);
         let webrtc_signaling = publisher.signaling();

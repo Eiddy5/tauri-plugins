@@ -1,6 +1,6 @@
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 
 use async_trait::async_trait;
@@ -21,6 +21,7 @@ struct BackendLifecycleCounters {
 #[derive(Debug)]
 struct ObservableBackend {
     counters: Arc<BackendLifecycleCounters>,
+    last_options: Arc<Mutex<Option<StartCaptureOptions>>>,
 }
 
 #[async_trait]
@@ -42,10 +43,11 @@ impl CaptureBackend for ObservableBackend {
 
     async fn start_capture(
         &self,
-        _options: StartCaptureOptions,
+        options: StartCaptureOptions,
         _consumer: Box<dyn FrameConsumer>,
     ) -> Result<Box<dyn RunningCapture>> {
         self.counters.starts.fetch_add(1, Ordering::SeqCst);
+        *self.last_options.lock().expect("last options lock") = Some(options);
         Ok(Box::new(ObservableRunningCapture {
             counters: Arc::clone(&self.counters),
         }))
@@ -168,8 +170,10 @@ async fn state_tracks_capture_lifecycle() {
 #[tokio::test]
 async fn state_drives_backend_capture_lifecycle() {
     let counters = Arc::new(BackendLifecycleCounters::default());
+    let last_options = Arc::new(Mutex::new(None));
     let backend = Arc::new(ObservableBackend {
         counters: Arc::clone(&counters),
+        last_options,
     });
     let state = ScreenCaptureState::with_backend(backend);
 
@@ -190,4 +194,35 @@ async fn state_drives_backend_capture_lifecycle() {
 
     state.stop_capture(&session.session_id).await.expect("stop");
     assert_eq!(counters.stops.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn state_normalizes_capture_size_before_starting_backend() {
+    let counters = Arc::new(BackendLifecycleCounters::default());
+    let last_options = Arc::new(Mutex::new(None));
+    let backend = Arc::new(ObservableBackend {
+        counters,
+        last_options: Arc::clone(&last_options),
+    });
+    let state = ScreenCaptureState::with_backend(backend);
+
+    state
+        .start_capture(StartCaptureOptions {
+            source_id: "dummy-window-1".to_string(),
+            source_kind: CaptureSourceKind::Window,
+            fps: Some(30),
+            width: Some(853),
+            height: Some(481),
+            capture_cursor: Some(true),
+        })
+        .await
+        .expect("start");
+
+    let options = last_options
+        .lock()
+        .expect("last options lock")
+        .clone()
+        .expect("backend options");
+    assert_eq!(options.width, Some(852));
+    assert_eq!(options.height, Some(480));
 }

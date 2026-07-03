@@ -58,6 +58,21 @@ fn start_capture_options_use_video_defaults() {
 
     assert_eq!(options.effective_fps(), 30);
     assert!(options.effective_capture_cursor());
+    assert_eq!(options.effective_video_size(), (1280, 720));
+}
+
+#[test]
+fn start_capture_options_normalize_video_size_for_h264() {
+    let options = StartCaptureOptions {
+        source_id: "window:abc".to_string(),
+        source_kind: CaptureSourceKind::Window,
+        fps: Some(60),
+        width: Some(853),
+        height: Some(481),
+        capture_cursor: Some(true),
+    };
+
+    assert_eq!(options.effective_video_size(), (852, 480));
 }
 
 #[test]
