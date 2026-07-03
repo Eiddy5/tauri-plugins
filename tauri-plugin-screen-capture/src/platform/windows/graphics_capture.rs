@@ -272,7 +272,7 @@ fn start_windows_capture(
             let settings = Settings::new(
                 monitor,
                 cursor_settings(options),
-                DrawBorderSettings::Default,
+                capture_draw_border_settings(),
                 SecondaryWindowSettings::Default,
                 minimum_update_interval(options),
                 DirtyRegionSettings::Default,
@@ -286,7 +286,7 @@ fn start_windows_capture(
             let settings = Settings::new(
                 window,
                 cursor_settings(options),
-                DrawBorderSettings::Default,
+                capture_draw_border_settings(),
                 SecondaryWindowSettings::Default,
                 minimum_update_interval(options),
                 DirtyRegionSettings::Default,
@@ -352,7 +352,7 @@ where
     let settings = Settings::new(
         item,
         CursorCaptureSettings::WithoutCursor,
-        DrawBorderSettings::Default,
+        capture_draw_border_settings(),
         SecondaryWindowSettings::Default,
         MinimumUpdateIntervalSettings::Default,
         DirtyRegionSettings::Default,
@@ -688,6 +688,10 @@ fn cursor_settings(options: &StartCaptureOptions) -> CursorCaptureSettings {
     }
 }
 
+fn capture_draw_border_settings() -> DrawBorderSettings {
+    DrawBorderSettings::WithoutBorder
+}
+
 fn minimum_update_interval(options: &StartCaptureOptions) -> MinimumUpdateIntervalSettings {
     let fps = options.effective_fps();
     MinimumUpdateIntervalSettings::Custom(Duration::from_secs_f64(1.0 / f64::from(fps)))
@@ -833,4 +837,17 @@ fn runtime_error(error: impl std::fmt::Display) -> Error {
 
 fn source_error(error: impl std::fmt::Display) -> Error {
     Error::new(CaptureErrorCode::SourceUnavailable, error.to_string(), true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_sessions_do_not_request_windows_system_border() {
+        assert_eq!(
+            capture_draw_border_settings(),
+            DrawBorderSettings::WithoutBorder
+        );
+    }
 }

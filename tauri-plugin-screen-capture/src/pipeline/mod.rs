@@ -1,10 +1,16 @@
 pub mod frame;
 pub mod stats;
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use async_trait::async_trait;
-use tokio::sync::Mutex;
+use tokio::{
+    sync::{Mutex, Notify},
+    task::JoinHandle,
+};
 
 use crate::{
     capture::FrameConsumer, models::CaptureStats, pipeline::frame::VideoFrame,
@@ -15,14 +21,32 @@ pub struct CapturePipeline {
     publisher: Arc<dyn CapturePublisher>,
     stats: Mutex<CaptureStats>,
     latest_frame: Mutex<Option<VideoFrame>>,
+    pending_frame: Arc<Mutex<Option<VideoFrame>>>,
+    notify: Arc<Notify>,
+    stopped: Arc<AtomicBool>,
+    worker: JoinHandle<()>,
 }
 
 impl CapturePipeline {
     pub fn new(publisher: Arc<dyn CapturePublisher>) -> Self {
+        let pending_frame = Arc::new(Mutex::new(None));
+        let notify = Arc::new(Notify::new());
+        let stopped = Arc::new(AtomicBool::new(false));
+        let worker = spawn_latest_frame_worker(
+            Arc::clone(&publisher),
+            Arc::clone(&pending_frame),
+            Arc::clone(&notify),
+            Arc::clone(&stopped),
+        );
+
         Self {
             publisher,
             stats: Mutex::new(CaptureStats::default()),
             latest_frame: Mutex::new(None),
+            pending_frame,
+            notify,
+            stopped,
+            worker,
         }
     }
 
@@ -36,6 +60,14 @@ impl CapturePipeline {
         };
 
         self.publisher.push_frame(frame).await
+    }
+}
+
+impl Drop for CapturePipeline {
+    fn drop(&mut self) {
+        self.stopped.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+        self.worker.abort();
     }
 }
 
@@ -54,7 +86,13 @@ impl FrameConsumer for CapturePipeline {
             }
         }
         *self.latest_frame.lock().await = Some(frame.clone());
-        self.publisher.push_frame(frame).await?;
+        {
+            let mut pending_frame = self.pending_frame.lock().await;
+            if pending_frame.replace(frame).is_some() {
+                self.stats.lock().await.frames_dropped += 1;
+            }
+        }
+        self.notify.notify_one();
 
         Ok(())
     }
@@ -65,4 +103,30 @@ impl FrameConsumer for Arc<CapturePipeline> {
     async fn push_frame(&self, frame: VideoFrame) -> Result<()> {
         self.as_ref().push_frame(frame).await
     }
+}
+
+fn spawn_latest_frame_worker(
+    publisher: Arc<dyn CapturePublisher>,
+    pending_frame: Arc<Mutex<Option<VideoFrame>>>,
+    notify: Arc<Notify>,
+    stopped: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            notify.notified().await;
+
+            while let Some(frame) = pending_frame.lock().await.take() {
+                if stopped.load(Ordering::Acquire) {
+                    return;
+                }
+                if let Err(error) = publisher.push_frame(frame).await {
+                    eprintln!("[screen-capture] pipeline publish failed: {error:?}");
+                }
+            }
+
+            if stopped.load(Ordering::Acquire) {
+                return;
+            }
+        }
+    })
 }
