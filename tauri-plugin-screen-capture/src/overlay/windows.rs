@@ -125,7 +125,7 @@ impl ShareOverlay for WindowsShareOverlay {
             }
             CaptureSourceKind::Display => {
                 self.clear_window_event_hooks().await?;
-                match display_bounds_from_source_id(&target.source_id)? {
+                match display_bounds_from_source_id(&target.source_id) {
                     Some(rect) => self.show_rect(rect).await,
                     None => {
                         self.hide().await?;
@@ -229,20 +229,25 @@ pub fn windows_target_handle_from_source_id(source_id: &str) -> Option<usize> {
 }
 
 pub fn windows_display_index_from_source_id(source_id: &str) -> Option<usize> {
-    source_id
-        .strip_prefix("display:")
-        .and_then(|display_id| display_id.rsplit_once(':').map(|(_, index)| index))
-        .and_then(|index| index.parse::<usize>().ok())
+    let display_id = source_id.strip_prefix("display:")?;
+    let index = display_id
+        .rsplit_once(':')
+        .map(|(_, index)| index)
+        .unwrap_or(display_id);
+
+    index
+        .parse::<usize>()
+        .ok()
         .and_then(|index| index.checked_sub(1))
 }
 
-fn display_bounds_from_source_id(source_id: &str) -> Result<Option<OverlayRect>> {
+fn display_bounds_from_source_id(source_id: &str) -> Option<OverlayRect> {
     let Some(index) = windows_display_index_from_source_id(source_id) else {
-        return Ok(None);
+        return None;
     };
     let monitor = match Monitor::from_index(index + 1) {
         Ok(monitor) => monitor,
-        Err(_) => return Ok(None),
+        Err(_) => return None,
     };
     let mut info = MONITORINFO {
         cbSize: std::mem::size_of::<MONITORINFO>() as u32,
@@ -250,21 +255,15 @@ fn display_bounds_from_source_id(source_id: &str) -> Result<Option<OverlayRect>>
     };
     let ok = unsafe { GetMonitorInfoW(HMONITOR(monitor.as_raw_hmonitor()), &mut info).as_bool() };
     if !ok {
-        return Err(Error::new(
-            CaptureErrorCode::Internal,
-            format!(
-                "failed to resolve Windows display bounds for {source_id}: GetMonitorInfoW failed"
-            ),
-            true,
-        ));
+        return None;
     }
 
-    Ok(Some(OverlayRect {
+    Some(OverlayRect {
         left: info.rcMonitor.left,
         top: info.rcMonitor.top,
         right: info.rcMonitor.right,
         bottom: info.rcMonitor.bottom,
-    }))
+    })
 }
 
 fn window_bounds_from_source_id(source_id: &str) -> Result<Option<OverlayRect>> {

@@ -122,6 +122,7 @@ fn windows_display_index_from_source_id_uses_trailing_one_based_display_index() 
         windows_display_index_from_source_id(r"display:\\.\DISPLAY1:1"),
         Some(0)
     );
+    assert_eq!(windows_display_index_from_source_id("display:1"), Some(0));
     assert_eq!(
         windows_display_index_from_source_id(r"display:\\.\DISPLAY7:7"),
         Some(6)
@@ -132,7 +133,6 @@ fn windows_display_index_from_source_id_uses_trailing_one_based_display_index() 
 #[test]
 fn windows_display_index_from_source_id_rejects_invalid_or_non_display_ids() {
     assert_eq!(windows_display_index_from_source_id("window:1"), None);
-    assert_eq!(windows_display_index_from_source_id("display:1"), None);
     assert_eq!(
         windows_display_index_from_source_id(r"display:\\.\DISPLAY1:0"),
         None
