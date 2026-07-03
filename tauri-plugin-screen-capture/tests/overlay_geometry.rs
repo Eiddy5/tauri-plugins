@@ -3,7 +3,9 @@ use tauri_plugin_screen_capture::overlay::{
 };
 
 #[cfg(windows)]
-use tauri_plugin_screen_capture::overlay::windows_target_handle_from_source_id;
+use tauri_plugin_screen_capture::overlay::{
+    windows_display_index_from_source_id, windows_target_handle_from_source_id,
+};
 
 #[test]
 fn corner_segments_frame_the_target_rect_with_eight_segments() {
@@ -111,6 +113,34 @@ fn windows_target_handle_from_source_id_parses_only_window_hex_ids() {
         Some(0x2a)
     );
     assert_eq!(windows_target_handle_from_source_id("display:1"), None);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_display_index_from_source_id_uses_trailing_one_based_display_index() {
+    assert_eq!(
+        windows_display_index_from_source_id(r"display:\\.\DISPLAY1:1"),
+        Some(0)
+    );
+    assert_eq!(
+        windows_display_index_from_source_id(r"display:\\.\DISPLAY7:7"),
+        Some(6)
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_display_index_from_source_id_rejects_invalid_or_non_display_ids() {
+    assert_eq!(windows_display_index_from_source_id("window:1"), None);
+    assert_eq!(windows_display_index_from_source_id("display:1"), None);
+    assert_eq!(
+        windows_display_index_from_source_id(r"display:\\.\DISPLAY1:0"),
+        None
+    );
+    assert_eq!(
+        windows_display_index_from_source_id(r"display:\\.\DISPLAY1:not-a-number"),
+        None
+    );
 }
 
 #[cfg(all(windows, target_pointer_width = "64"))]

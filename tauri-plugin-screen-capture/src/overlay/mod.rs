@@ -2,7 +2,9 @@
 mod windows;
 
 #[cfg(windows)]
-pub use windows::{windows_target_handle_from_source_id, WindowsShareOverlay};
+pub use windows::{
+    windows_display_index_from_source_id, windows_target_handle_from_source_id, WindowsShareOverlay,
+};
 
 use async_trait::async_trait;
 use std::sync::Arc;
