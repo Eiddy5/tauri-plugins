@@ -69,8 +69,11 @@ fn is_system_ui(source: &CaptureSource) -> bool {
         "dock"
             | "windowserver"
             | "systemuiserver"
+            | "applicationframehost"
             | "shellexperiencehost"
             | "startmenuexperiencehost"
+            | "systemsettings"
+            | "textinputhost"
     ) || matches!(
         title.as_str(),
         "dock" | "menu bar" | "taskbar" | "start" | "shell_traywnd"
