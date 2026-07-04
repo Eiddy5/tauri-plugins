@@ -1,6 +1,12 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+use url::Url;
 
 const DEFAULT_TARGET: &str = "https://www.apple.com/library/test/success.html";
+const MIN_INTERVAL_MS: u64 = 1_000;
+const MAX_INTERVAL_MS: u64 = 3_600_000;
+const MIN_TIMEOUT_MS: u64 = 100;
+const MAX_TIMEOUT_MS: u64 = 60_000;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -9,16 +15,26 @@ pub struct NetWatcherConfig {
     pub auto_start: bool,
     #[serde(default = "default_target")]
     pub target: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<ReachabilityTargetConfig>,
     #[serde(default = "default_interval_ms")]
     pub interval_ms: u64,
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReachabilityTargetConfig {
+    pub id: String,
+    pub url: String,
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartWatchingOptions {
     pub target: Option<String>,
+    pub targets: Option<Vec<ReachabilityTargetConfig>>,
     pub interval_ms: Option<u64>,
     pub timeout_ms: Option<u64>,
 }
@@ -28,6 +44,7 @@ impl Default for NetWatcherConfig {
         Self {
             auto_start: false,
             target: default_target(),
+            targets: Vec::new(),
             interval_ms: default_interval_ms(),
             timeout_ms: default_timeout_ms(),
         }
@@ -38,6 +55,10 @@ impl NetWatcherConfig {
     pub fn with_runtime_options(mut self, options: StartWatchingOptions) -> Self {
         if let Some(target) = options.target {
             self.target = target;
+        }
+
+        if let Some(targets) = options.targets {
+            self.targets = targets;
         }
 
         if let Some(interval_ms) = options.interval_ms {
@@ -52,25 +73,56 @@ impl NetWatcherConfig {
     }
 
     pub fn validate(&self) -> crate::Result<()> {
-        if !self.target.starts_with("http://") && !self.target.starts_with("https://") {
+        validate_target_url(&self.target)?;
+
+        let mut target_ids = BTreeSet::new();
+        for target in &self.targets {
+            if target.id.trim().is_empty() {
+                return Err(crate::Error::invalid_config(
+                    "net watcher target id must not be empty",
+                ));
+            }
+
+            if !target_ids.insert(target.id.clone()) {
+                return Err(crate::Error::invalid_config(format!(
+                    "net watcher target id is duplicated: {}",
+                    target.id
+                )));
+            }
+
+            validate_target_url(&target.url)?;
+        }
+
+        if !(MIN_INTERVAL_MS..=MAX_INTERVAL_MS).contains(&self.interval_ms) {
             return Err(crate::Error::invalid_config(
-                "net watcher target must use http or https",
+                "net watcher interval_ms must be between 1000 and 3600000",
             ));
         }
 
-        if self.interval_ms == 0 {
+        if !(MIN_TIMEOUT_MS..=MAX_TIMEOUT_MS).contains(&self.timeout_ms) {
             return Err(crate::Error::invalid_config(
-                "net watcher interval_ms must be greater than zero",
+                "net watcher timeout_ms must be between 100 and 60000",
             ));
         }
 
-        if self.timeout_ms == 0 {
+        if self.timeout_ms > self.interval_ms {
             return Err(crate::Error::invalid_config(
-                "net watcher timeout_ms must be greater than zero",
+                "net watcher timeout_ms must not be greater than interval_ms",
             ));
         }
 
         Ok(())
+    }
+
+    pub(crate) fn effective_targets(&self) -> Vec<ReachabilityTargetConfig> {
+        if self.targets.is_empty() {
+            vec![ReachabilityTargetConfig {
+                id: "default".to_string(),
+                url: self.target.clone(),
+            }]
+        } else {
+            self.targets.clone()
+        }
     }
 
     pub(crate) fn window_size(&self) -> usize {
@@ -96,6 +148,26 @@ impl NetWatcherConfig {
 
 fn default_target() -> String {
     DEFAULT_TARGET.to_string()
+}
+
+fn validate_target_url(value: &str) -> crate::Result<()> {
+    let target = Url::parse(value).map_err(|error| {
+        crate::Error::invalid_config(format!("net watcher target is invalid: {error}"))
+    })?;
+
+    if target.scheme() != "http" && target.scheme() != "https" {
+        return Err(crate::Error::invalid_config(
+            "net watcher target must use http or https",
+        ));
+    }
+
+    if target.host().is_none() {
+        return Err(crate::Error::invalid_config(
+            "net watcher target host is required",
+        ));
+    }
+
+    Ok(())
 }
 
 fn default_interval_ms() -> u64 {
@@ -172,6 +244,7 @@ mod tests {
         let base = NetWatcherConfig::default();
         let options = StartWatchingOptions {
             target: Some("https://api.example.com/health".to_string()),
+            targets: None,
             interval_ms: Some(5_000),
             timeout_ms: Some(1_500),
         };
@@ -184,9 +257,61 @@ mod tests {
     }
 
     #[test]
+    fn effective_targets_use_legacy_target_when_targets_are_empty() {
+        let config = NetWatcherConfig {
+            target: "https://api.example.com/health".to_string(),
+            ..Default::default()
+        };
+
+        let targets = config.effective_targets();
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].id, "default");
+        assert_eq!(targets[0].url, "https://api.example.com/health");
+    }
+
+    #[test]
+    fn effective_targets_prefer_explicit_targets() {
+        let config = NetWatcherConfig {
+            target: "https://legacy.example.com/health".to_string(),
+            targets: vec![ReachabilityTargetConfig {
+                id: "api".to_string(),
+                url: "https://api.example.com/health".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        let targets = config.effective_targets();
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].id, "api");
+        assert_eq!(targets[0].url, "https://api.example.com/health");
+    }
+
+    #[test]
+    fn rejects_duplicate_target_ids() {
+        let config = NetWatcherConfig {
+            targets: vec![
+                ReachabilityTargetConfig {
+                    id: "api".to_string(),
+                    url: "https://api.example.com/health".to_string(),
+                },
+                ReachabilityTargetConfig {
+                    id: "api".to_string(),
+                    url: "https://api-backup.example.com/health".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert_eq!(config.validate().unwrap_err().code(), "invalid_config");
+    }
+
+    #[test]
     fn invalid_runtime_values_are_rejected() {
         let options = StartWatchingOptions {
             target: Some("file:///tmp/health".to_string()),
+            targets: None,
             interval_ms: Some(0),
             timeout_ms: Some(0),
         };
@@ -197,6 +322,57 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.code(), "invalid_config");
+    }
+
+    #[test]
+    fn rejects_malformed_target_url() {
+        let config = NetWatcherConfig {
+            target: "https://".to_string(),
+            ..Default::default()
+        };
+
+        let error = config.validate().unwrap_err();
+
+        assert_eq!(error.code(), "invalid_config");
+    }
+
+    #[test]
+    fn rejects_interval_values_outside_production_bounds() {
+        let too_fast = NetWatcherConfig {
+            interval_ms: 999,
+            ..Default::default()
+        };
+        let too_slow = NetWatcherConfig {
+            interval_ms: 3_600_001,
+            ..Default::default()
+        };
+
+        assert_eq!(too_fast.validate().unwrap_err().code(), "invalid_config");
+        assert_eq!(too_slow.validate().unwrap_err().code(), "invalid_config");
+    }
+
+    #[test]
+    fn rejects_timeout_values_outside_production_bounds() {
+        let too_short = NetWatcherConfig {
+            timeout_ms: 99,
+            ..Default::default()
+        };
+        let too_long = NetWatcherConfig {
+            timeout_ms: 60_001,
+            ..Default::default()
+        };
+        let longer_than_interval = NetWatcherConfig {
+            interval_ms: 1_000,
+            timeout_ms: 1_001,
+            ..Default::default()
+        };
+
+        assert_eq!(too_short.validate().unwrap_err().code(), "invalid_config");
+        assert_eq!(too_long.validate().unwrap_err().code(), "invalid_config");
+        assert_eq!(
+            longer_than_interval.validate().unwrap_err().code(),
+            "invalid_config"
+        );
     }
 
     #[test]

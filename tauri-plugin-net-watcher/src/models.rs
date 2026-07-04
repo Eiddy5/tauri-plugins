@@ -37,6 +37,7 @@ pub struct NetWatcherSnapshot {
     pub meta: SnapshotMeta,
     pub state: SnapshotState,
     pub network: NetworkSnapshot,
+    pub reachability: ReachabilitySnapshot,
     pub quality: QualitySnapshot,
     pub changes: SnapshotChanges,
 }
@@ -111,9 +112,31 @@ pub struct InterfaceAddresses {
 #[serde(rename_all = "camelCase")]
 pub struct QualitySnapshot {
     pub config: QualityConfigSnapshot,
+    pub summary: QualitySummary,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReachabilitySnapshot {
+    pub targets: Vec<ReachabilityTargetSnapshot>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReachabilityTargetSnapshot {
+    pub id: String,
+    pub status: ReachabilityStatus,
     pub target: ProbeTarget,
     pub current_probe: Option<ProbeResult>,
     pub summary: QualitySummary,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ReachabilityStatus {
+    Unknown,
+    Reachable,
+    Unreachable,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -236,17 +259,28 @@ impl NetWatcherSnapshot {
                 reason: "insufficient_data".to_string(),
             },
             network: NetworkSnapshot::default(),
+            reachability: ReachabilitySnapshot {
+                targets: config
+                    .effective_targets()
+                    .into_iter()
+                    .map(|target| ReachabilityTargetSnapshot {
+                        id: target.id,
+                        status: ReachabilityStatus::Unknown,
+                        target: ProbeTarget {
+                            target_type: ProbeTargetType::Http,
+                            url: target.url,
+                        },
+                        current_probe: None,
+                        summary: QualitySummary::default(),
+                    })
+                    .collect(),
+            },
             quality: QualitySnapshot {
                 config: QualityConfigSnapshot {
                     interval_ms: config.interval_ms,
                     window_size: config.window_size(),
                     timeout_ms: config.timeout_ms,
                 },
-                target: ProbeTarget {
-                    target_type: ProbeTargetType::Http,
-                    url: config.target.clone(),
-                },
-                current_probe: None,
                 summary: QualitySummary::default(),
             },
             changes: SnapshotChanges {
@@ -271,7 +305,14 @@ mod tests {
         assert_eq!(value["state"]["overall"], "unknown");
         assert_eq!(value["state"]["network"], "unknown");
         assert_eq!(value["state"]["quality"], "unknown");
+        assert_eq!(value["reachability"]["targets"][0]["id"], "default");
+        assert_eq!(
+            value["reachability"]["targets"][0]["target"]["url"],
+            "https://www.apple.com/library/test/success.html"
+        );
         assert_eq!(value["quality"]["summary"]["sampleCount"], 0);
+        assert!(value["quality"].get("target").is_none());
+        assert!(value["quality"].get("currentProbe").is_none());
     }
 
     #[test]
@@ -285,9 +326,45 @@ mod tests {
 
         let snapshot = NetWatcherSnapshot::initial_with_config("0.1.0", &config);
 
-        assert_eq!(snapshot.quality.target.url, "https://example.com/health");
+        assert_eq!(snapshot.reachability.targets[0].id, "default");
+        assert_eq!(
+            snapshot.reachability.targets[0].target.url,
+            "https://example.com/health"
+        );
         assert_eq!(snapshot.quality.config.interval_ms, 5_000);
         assert_eq!(snapshot.quality.config.timeout_ms, 1_500);
         assert_eq!(snapshot.quality.config.window_size, 20);
+    }
+
+    #[test]
+    fn initial_snapshot_reflects_multiple_reachability_targets() {
+        let config = crate::NetWatcherConfig {
+            targets: vec![
+                crate::ReachabilityTargetConfig {
+                    id: "api".to_string(),
+                    url: "https://api.example.com/health".to_string(),
+                },
+                crate::ReachabilityTargetConfig {
+                    id: "cdn".to_string(),
+                    url: "https://cdn.example.com/ping".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let snapshot = NetWatcherSnapshot::initial_with_config("0.1.0", &config);
+
+        assert_eq!(snapshot.reachability.targets.len(), 2);
+        assert_eq!(snapshot.reachability.targets[0].id, "api");
+        assert_eq!(
+            snapshot.reachability.targets[0].target.url,
+            "https://api.example.com/health"
+        );
+        assert_eq!(snapshot.reachability.targets[1].id, "cdn");
+        assert_eq!(
+            snapshot.reachability.targets[1].target.url,
+            "https://cdn.example.com/ping"
+        );
+        assert_eq!(snapshot.quality.summary.sample_count, 0);
     }
 }

@@ -32,7 +32,8 @@
       ?? null,
   )
   const interfaces = $derived(snapshot?.network.interfaces ?? [])
-  const currentProbe = $derived(snapshot?.quality.currentProbe ?? null)
+  const reachabilityTargets = $derived(snapshot?.reachability.targets ?? [])
+  const currentProbe = $derived(reachabilityTargets[0]?.currentProbe ?? null)
   const changedFields = $derived(snapshot?.changes.changedFields ?? [])
   const rawSnapshot = $derived(snapshot ? JSON.stringify(snapshot, null, 2) : '')
 
@@ -63,7 +64,7 @@
   function hasObservedData(value: NetWatcherSnapshot | null) {
     return Boolean(
       value?.network.interfaces.length
-        || value?.quality.currentProbe
+        || value?.reachability.targets.some((item) => item.currentProbe)
         || value?.quality.summary.sampleCount,
     )
   }
@@ -225,11 +226,11 @@
 
       <div class="grid">
         <article>
-          <h2>Probe target</h2>
+          <h2>Reachability</h2>
           <dl>
             <div>
-              <dt>URL</dt>
-              <dd>{snapshot.quality.target.url}</dd>
+              <dt>Targets</dt>
+              <dd>{reachabilityTargets.length}</dd>
             </div>
             <div>
               <dt>Failure rate</dt>
@@ -350,6 +351,42 @@
           </div>
         {:else}
           <p class="muted">No network interfaces reported.</p>
+        {/if}
+      </section>
+
+      <section class="data-section" aria-labelledby="reachability-title">
+        <h2 id="reachability-title">Reachability targets ({reachabilityTargets.length})</h2>
+        {#if reachabilityTargets.length}
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Status</th>
+                  <th>URL</th>
+                  <th>Samples</th>
+                  <th>Failure rate</th>
+                  <th>P95 latency</th>
+                  <th>Last error</th>
+                </tr>
+              </thead>
+              <tbody>
+                {#each reachabilityTargets as item}
+                  <tr>
+                    <td>{item.id}</td>
+                    <td>{item.status}</td>
+                    <td>{item.target.url}</td>
+                    <td>{item.summary.sampleCount}</td>
+                    <td>{formatPercent(item.summary.failureRate)}</td>
+                    <td>{formatLatency(item.summary.latencyMs.p95)}</td>
+                    <td>{item.currentProbe?.error?.code ?? 'n/a'}</td>
+                  </tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {:else}
+          <p class="muted">No reachability targets configured.</p>
         {/if}
       </section>
 

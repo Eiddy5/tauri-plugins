@@ -1,16 +1,16 @@
 use chrono::Utc;
 
 use crate::{
-    NetWatcherSnapshot, NetworkSnapshot, ProbeResult, ProbeTarget, QualityConfigSnapshot,
-    QualitySnapshot, QualitySummary, SnapshotChanges, SnapshotMeta, SnapshotState,
+    NetWatcherSnapshot, NetworkSnapshot, ProbeResult, QualityConfigSnapshot, QualitySnapshot,
+    QualitySummary, ReachabilitySnapshot, ReachabilityTargetSnapshot, SnapshotChanges,
+    SnapshotMeta, SnapshotState,
 };
 
 pub(crate) struct SnapshotBuildInput {
     pub(crate) network: NetworkSnapshot,
     pub(crate) state: SnapshotState,
     pub(crate) quality_config: QualityConfigSnapshot,
-    pub(crate) target: ProbeTarget,
-    pub(crate) current_probe: Option<ProbeResult>,
+    pub(crate) reachability_targets: Vec<ReachabilityTargetSnapshot>,
     pub(crate) summary: QualitySummary,
 }
 
@@ -28,10 +28,11 @@ pub(crate) fn build_snapshot(
         },
         state: input.state,
         network: input.network,
+        reachability: ReachabilitySnapshot {
+            targets: input.reachability_targets,
+        },
         quality: QualitySnapshot {
             config: input.quality_config,
-            target: input.target,
-            current_probe: input.current_probe,
             summary: input.summary,
         },
         changes: SnapshotChanges {
@@ -72,12 +73,8 @@ fn changed_fields(previous: &NetWatcherSnapshot, next: &NetWatcherSnapshot) -> V
         fields.push("quality.config.timeoutMs".to_string());
     }
 
-    if previous.quality.target != next.quality.target {
-        fields.push("quality.target".to_string());
-    }
-
-    if probe_changed(&previous.quality.current_probe, &next.quality.current_probe) {
-        fields.push("quality.currentProbe".to_string());
+    if reachability_targets_changed(&previous.reachability.targets, &next.reachability.targets) {
+        fields.push("reachability.targets".to_string());
     }
 
     changed_summary_fields(
@@ -119,6 +116,30 @@ fn probe_changed(previous: &Option<ProbeResult>, next: &Option<ProbeResult>) -> 
                 || previous.error != next.error
         }
     }
+}
+
+fn reachability_targets_changed(
+    previous: &[ReachabilityTargetSnapshot],
+    next: &[ReachabilityTargetSnapshot],
+) -> bool {
+    if previous.len() != next.len() {
+        return true;
+    }
+
+    previous.iter().zip(next).any(|(previous, next)| {
+        previous.id != next.id
+            || previous.status != next.status
+            || previous.target != next.target
+            || probe_changed(&previous.current_probe, &next.current_probe)
+            || previous.summary.sample_count != next.summary.sample_count
+            || previous.summary.success_count != next.summary.success_count
+            || previous.summary.failure_count != next.summary.failure_count
+            || previous.summary.failure_rate != next.summary.failure_rate
+            || previous.summary.latency_ms != next.summary.latency_ms
+            || previous.summary.jitter_ms != next.summary.jitter_ms
+            || previous.summary.consecutive_failures != next.summary.consecutive_failures
+            || previous.summary.last_failure_reason != next.summary.last_failure_reason
+    })
 }
 
 fn changed_summary_fields(
@@ -176,6 +197,7 @@ mod tests {
     use super::*;
     use crate::{
         LatencySummary, NetWatcherConfig, OverallState, ProbePhases, ProbeStatus, QualitySummary,
+        ReachabilityStatus,
     };
 
     fn snapshot() -> NetWatcherSnapshot {
@@ -204,35 +226,35 @@ mod tests {
     }
 
     #[test]
-    fn changed_fields_reports_quality_config_target_and_probe() {
+    fn changed_fields_reports_quality_config_and_reachability_target() {
         let mut next = snapshot();
         next.quality.config.interval_ms += 1;
-        next.quality.target.url = "https://example.com/health".to_string();
-        next.quality.current_probe = Some(probe("probe_1"));
+        next.reachability.targets[0].target.url = "https://example.com/health".to_string();
+        next.reachability.targets[0].current_probe = Some(probe("probe_1"));
+        next.reachability.targets[0].status = ReachabilityStatus::Reachable;
 
         let fields = fields_for(&next);
 
         assert!(fields.contains(&"quality.config.intervalMs".to_string()));
-        assert!(fields.contains(&"quality.target".to_string()));
-        assert!(fields.contains(&"quality.currentProbe".to_string()));
+        assert!(fields.contains(&"reachability.targets".to_string()));
     }
 
     #[test]
     fn changed_fields_ignores_probe_identity_and_timestamps() {
         let mut previous = snapshot();
-        previous.quality.current_probe = Some(probe("probe_1"));
+        previous.reachability.targets[0].current_probe = Some(probe("probe_1"));
         let mut next = previous.clone();
-        next.quality.current_probe = Some(probe("probe_2"));
+        next.reachability.targets[0].current_probe = Some(probe("probe_2"));
 
         let fields = changed_fields(&previous, &next);
 
-        assert!(!fields.contains(&"quality.currentProbe".to_string()));
+        assert!(!fields.contains(&"reachability.targets".to_string()));
     }
 
     #[test]
     fn changed_fields_reports_probe_semantic_changes() {
         let mut previous = snapshot();
-        previous.quality.current_probe = Some(probe("probe_1"));
+        previous.reachability.targets[0].current_probe = Some(probe("probe_1"));
         let mut next = previous.clone();
         let mut failed_probe = probe("probe_2");
         failed_probe.status = ProbeStatus::Failed;
@@ -240,11 +262,11 @@ mod tests {
             code: "http_timeout".to_string(),
             message: "timed out".to_string(),
         });
-        next.quality.current_probe = Some(failed_probe);
+        next.reachability.targets[0].current_probe = Some(failed_probe);
 
         let fields = changed_fields(&previous, &next);
 
-        assert!(fields.contains(&"quality.currentProbe".to_string()));
+        assert!(fields.contains(&"reachability.targets".to_string()));
     }
 
     #[test]

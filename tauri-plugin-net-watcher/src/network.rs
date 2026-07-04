@@ -6,6 +6,14 @@ use crate::{
     InterfaceAddresses, InterfaceStatus, InterfaceType, NetworkInterface, NetworkSnapshot,
 };
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PlatformInterfaceDetails {
+    interface_type: Option<InterfaceType>,
+    gateway: Option<String>,
+    dns_servers: Vec<String>,
+    mac: Option<String>,
+}
+
 pub fn read_network_snapshot(include_mac_address: bool) -> crate::Result<NetworkSnapshot> {
     if include_mac_address {
         return Err(crate::Error::invalid_config(
@@ -13,8 +21,8 @@ pub fn read_network_snapshot(include_mac_address: bool) -> crate::Result<Network
         ));
     }
 
-    let interface_types = read_platform_interface_types();
-    let mut interfaces = build_interfaces_from_entries_with_type_overrides(
+    let interface_details = read_platform_interface_details();
+    let mut interfaces = build_interfaces_from_entries_with_platform_details(
         get_if_addrs::get_if_addrs()?.into_iter().map(|interface| {
             let ip = match interface.addr {
                 IfAddr::V4(addr) => IpAddr::V4(addr.ip),
@@ -23,7 +31,7 @@ pub fn read_network_snapshot(include_mac_address: bool) -> crate::Result<Network
 
             (interface.name, ip)
         }),
-        &interface_types,
+        &interface_details,
     );
 
     mark_primary(&mut interfaces);
@@ -42,18 +50,22 @@ pub fn read_network_snapshot(include_mac_address: bool) -> crate::Result<Network
 fn build_interfaces_from_entries(
     entries: impl IntoIterator<Item = (String, IpAddr)>,
 ) -> Vec<NetworkInterface> {
-    build_interfaces_from_entries_with_type_overrides(entries, &BTreeMap::new())
+    build_interfaces_from_entries_with_platform_details(entries, &BTreeMap::new())
 }
 
-fn build_interfaces_from_entries_with_type_overrides(
+fn build_interfaces_from_entries_with_platform_details(
     entries: impl IntoIterator<Item = (String, IpAddr)>,
-    interface_types: &BTreeMap<String, InterfaceType>,
+    interface_details: &BTreeMap<String, PlatformInterfaceDetails>,
 ) -> Vec<NetworkInterface> {
     let mut interfaces = entries
         .into_iter()
         .fold(BTreeMap::new(), |mut interfaces, (name, ip)| {
             let interface = interfaces.entry(name.clone()).or_insert_with(|| {
-                let interface_type = resolve_interface_type(&name, interface_types);
+                let details = interface_details
+                    .get(&normalize_interface_key(&name))
+                    .cloned()
+                    .unwrap_or_default();
+                let interface_type = resolve_interface_type(&name, &details);
                 let status = if interface_type == InterfaceType::Loopback {
                     InterfaceStatus::Down
                 } else {
@@ -68,12 +80,11 @@ fn build_interfaces_from_entries_with_type_overrides(
                     status,
                     is_primary: false,
                     addresses: InterfaceAddresses {
-                        // get_if_addrs does not expose MAC addresses, so this backend always leaves it unset.
-                        mac: None,
+                        mac: details.mac,
                         ..InterfaceAddresses::default()
                     },
-                    gateway: None,
-                    dns_servers: Vec::new(),
+                    gateway: details.gateway,
+                    dns_servers: details.dns_servers,
                 }
             });
 
@@ -99,19 +110,17 @@ fn build_interfaces_from_entries_with_type_overrides(
     interfaces
 }
 
-fn resolve_interface_type(
-    name: &str,
-    interface_types: &BTreeMap<String, InterfaceType>,
-) -> InterfaceType {
+fn resolve_interface_type(name: &str, details: &PlatformInterfaceDetails) -> InterfaceType {
     let name_type = classify_interface(name);
 
     if should_prefer_name_classification(name_type.clone()) {
         return name_type;
     }
 
-    interface_types
-        .get(&normalize_interface_key(name))
-        .cloned()
+    details
+        .interface_type
+        .clone()
+        .filter(|interface_type| *interface_type != InterfaceType::Unknown)
         .unwrap_or(name_type)
 }
 
@@ -142,14 +151,17 @@ struct MacosPrimaryServiceInterface {
 
 #[cfg(any(target_os = "macos", test))]
 fn apply_macos_primary_service_interface_type(
-    interface_types: &mut BTreeMap<String, InterfaceType>,
+    interface_details: &mut BTreeMap<String, PlatformInterfaceDetails>,
     interface: MacosPrimaryServiceInterface,
 ) {
     if let Some(interface_type) = macos_service_interface_type(
         interface.hardware.as_deref(),
         interface.interface_type.as_deref(),
     ) {
-        interface_types.insert(normalize_interface_key(&interface.bsd_name), interface_type);
+        interface_details
+            .entry(normalize_interface_key(&interface.bsd_name))
+            .or_default()
+            .interface_type = Some(interface_type);
     }
 }
 
@@ -170,10 +182,10 @@ fn macos_service_interface_type(
 }
 
 #[cfg(target_os = "macos")]
-fn read_platform_interface_types() -> BTreeMap<String, InterfaceType> {
+fn read_platform_interface_details() -> BTreeMap<String, PlatformInterfaceDetails> {
     use system_configuration::network_configuration::{get_interfaces, SCNetworkInterfaceType};
 
-    let mut interface_types = get_interfaces()
+    let mut interface_details = get_interfaces()
         .into_iter()
         .filter_map(|interface| {
             let name = interface.bsd_name()?.to_string();
@@ -189,15 +201,21 @@ fn read_platform_interface_types() -> BTreeMap<String, InterfaceType> {
                 _ => return None,
             };
 
-            Some((normalize_interface_key(&name), interface_type))
+            Some((
+                normalize_interface_key(&name),
+                PlatformInterfaceDetails {
+                    interface_type: Some(interface_type),
+                    ..Default::default()
+                },
+            ))
         })
         .collect();
 
     if let Some(interface) = read_macos_primary_service_interface() {
-        apply_macos_primary_service_interface_type(&mut interface_types, interface);
+        apply_macos_primary_service_interface_type(&mut interface_details, interface);
     }
 
-    interface_types
+    interface_details
 }
 
 #[cfg(target_os = "macos")]
@@ -247,12 +265,18 @@ fn read_macos_primary_service_interface() -> Option<MacosPrimaryServiceInterface
 }
 
 #[cfg(target_os = "windows")]
-fn read_platform_interface_types() -> BTreeMap<String, InterfaceType> {
-    read_windows_current_profile_interface_type().unwrap_or_default()
+fn read_platform_interface_details() -> BTreeMap<String, PlatformInterfaceDetails> {
+    let mut details = read_windows_adapter_details().unwrap_or_default();
+    for (key, value) in read_windows_current_profile_interface_type().unwrap_or_default() {
+        details.entry(key).or_default().merge(value);
+    }
+
+    details
 }
 
 #[cfg(target_os = "windows")]
-fn read_windows_current_profile_interface_type() -> Option<BTreeMap<String, InterfaceType>> {
+fn read_windows_current_profile_interface_type(
+) -> Option<BTreeMap<String, PlatformInterfaceDetails>> {
     use windows::Networking::Connectivity::NetworkInformation;
 
     let profile = NetworkInformation::GetInternetConnectionProfile().ok()?;
@@ -273,7 +297,7 @@ fn read_windows_current_profile_interface_type() -> Option<BTreeMap<String, Inte
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn read_platform_interface_types() -> BTreeMap<String, InterfaceType> {
+fn read_platform_interface_details() -> BTreeMap<String, PlatformInterfaceDetails> {
     BTreeMap::new()
 }
 
@@ -281,7 +305,7 @@ fn read_platform_interface_types() -> BTreeMap<String, InterfaceType> {
 fn platform_interface_type_overrides(
     adapter_id: Option<&str>,
     iana_interface_type: Option<u32>,
-) -> BTreeMap<String, InterfaceType> {
+) -> BTreeMap<String, PlatformInterfaceDetails> {
     platform_interface_type_overrides_from_type(
         adapter_id,
         iana_interface_type
@@ -294,17 +318,200 @@ fn platform_interface_type_overrides(
 fn platform_interface_type_overrides_from_type(
     adapter_id: Option<&str>,
     interface_type: InterfaceType,
-) -> BTreeMap<String, InterfaceType> {
-    let mut interface_types = BTreeMap::new();
+) -> BTreeMap<String, PlatformInterfaceDetails> {
+    let mut interface_details = BTreeMap::new();
     if interface_type == InterfaceType::Unknown {
-        return interface_types;
+        return interface_details;
     }
 
     if let Some(adapter_id) = adapter_id {
-        interface_types.insert(normalize_interface_key(adapter_id), interface_type);
+        interface_details.insert(
+            normalize_interface_key(adapter_id),
+            PlatformInterfaceDetails {
+                interface_type: Some(interface_type),
+                ..Default::default()
+            },
+        );
     }
 
-    interface_types
+    interface_details
+}
+
+impl PlatformInterfaceDetails {
+    fn merge(&mut self, other: Self) {
+        if other.interface_type.is_some() {
+            self.interface_type = other.interface_type;
+        }
+
+        if other.gateway.is_some() {
+            self.gateway = other.gateway;
+        }
+
+        if !other.dns_servers.is_empty() {
+            self.dns_servers = other.dns_servers;
+        }
+
+        if other.mac.is_some() {
+            self.mac = other.mac;
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn read_windows_adapter_details() -> crate::Result<BTreeMap<String, PlatformInterfaceDetails>> {
+    use std::ffi::CStr;
+    use windows_sys::Win32::{
+        Foundation::{ERROR_BUFFER_OVERFLOW, NO_ERROR},
+        NetworkManagement::{
+            IpHelper::{GetAdaptersAddresses, GAA_FLAG_INCLUDE_GATEWAYS, IP_ADAPTER_ADDRESSES_LH},
+            Ndis::IfOperStatusUp,
+        },
+        Networking::WinSock::AF_UNSPEC,
+    };
+
+    let mut buffer_len = 15_000_u32;
+    let mut buffer = vec![0_u8; buffer_len as usize];
+    let mut error = unsafe {
+        GetAdaptersAddresses(
+            AF_UNSPEC as u32,
+            GAA_FLAG_INCLUDE_GATEWAYS,
+            std::ptr::null(),
+            buffer.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>(),
+            &mut buffer_len,
+        )
+    };
+
+    if error == ERROR_BUFFER_OVERFLOW {
+        buffer.resize(buffer_len as usize, 0);
+        error = unsafe {
+            GetAdaptersAddresses(
+                AF_UNSPEC as u32,
+                GAA_FLAG_INCLUDE_GATEWAYS,
+                std::ptr::null(),
+                buffer.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>(),
+                &mut buffer_len,
+            )
+        };
+    }
+
+    if error != NO_ERROR {
+        return Err(crate::Error::internal(format!(
+            "failed to read Windows adapter addresses: {error}"
+        )));
+    }
+
+    let mut details = BTreeMap::new();
+    let mut adapter =
+        buffer.as_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>() as *mut IP_ADAPTER_ADDRESSES_LH;
+    while !adapter.is_null() {
+        let adapter_ref = unsafe { &*adapter };
+        let adapter_name = unsafe {
+            (!adapter_ref.AdapterName.is_null()).then(|| {
+                CStr::from_ptr(adapter_ref.AdapterName.cast())
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        };
+        let friendly_name = unsafe { wide_ptr_to_string(adapter_ref.FriendlyName) };
+        let interface_type = interface_type_from_windows_iana_type(adapter_ref.IfType);
+        let gateway = first_socket_address_to_string(adapter_ref.FirstGatewayAddress);
+        let dns_servers = socket_address_list_to_strings(adapter_ref.FirstDnsServerAddress);
+
+        let mut entry = PlatformInterfaceDetails {
+            interface_type: Some(interface_type),
+            gateway,
+            dns_servers,
+            mac: None,
+        };
+
+        if adapter_ref.OperStatus != IfOperStatusUp {
+            entry.gateway = None;
+        }
+
+        if let Some(name) = adapter_name {
+            details.insert(normalize_interface_key(&name), entry.clone());
+        }
+
+        if let Some(name) = friendly_name {
+            details.insert(normalize_interface_key(&name), entry);
+        }
+
+        adapter = adapter_ref.Next;
+    }
+
+    Ok(details)
+}
+
+#[cfg(target_os = "windows")]
+unsafe fn wide_ptr_to_string(value: windows_sys::core::PWSTR) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+
+    let mut len = 0;
+    while unsafe { *value.add(len) } != 0 {
+        len += 1;
+    }
+
+    let slice = unsafe { std::slice::from_raw_parts(value, len) };
+    Some(String::from_utf16_lossy(slice))
+}
+
+#[cfg(target_os = "windows")]
+fn first_socket_address_to_string(
+    address: *mut windows_sys::Win32::NetworkManagement::IpHelper::IP_ADAPTER_GATEWAY_ADDRESS_LH,
+) -> Option<String> {
+    if address.is_null() {
+        return None;
+    }
+
+    socket_address_to_string(unsafe { (*address).Address })
+}
+
+#[cfg(target_os = "windows")]
+fn socket_address_list_to_strings(
+    mut address: *mut windows_sys::Win32::NetworkManagement::IpHelper::IP_ADAPTER_DNS_SERVER_ADDRESS_XP,
+) -> Vec<String> {
+    let mut addresses = Vec::new();
+
+    while !address.is_null() {
+        if let Some(value) = socket_address_to_string(unsafe { (*address).Address }) {
+            addresses.push(value);
+        }
+        address = unsafe { (*address).Next };
+    }
+
+    addresses.sort();
+    addresses.dedup();
+    addresses
+}
+
+#[cfg(target_os = "windows")]
+fn socket_address_to_string(
+    address: windows_sys::Win32::Networking::WinSock::SOCKET_ADDRESS,
+) -> Option<String> {
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6, SOCKADDR_IN, SOCKADDR_IN6};
+
+    if address.lpSockaddr.is_null() {
+        return None;
+    }
+
+    let family = unsafe { (*address.lpSockaddr).sa_family };
+    match family {
+        AF_INET if address.iSockaddrLength as usize >= std::mem::size_of::<SOCKADDR_IN>() => {
+            let socket = unsafe { &*(address.lpSockaddr.cast::<SOCKADDR_IN>()) };
+            let octets = unsafe { socket.sin_addr.S_un.S_un_b };
+            Some(Ipv4Addr::new(octets.s_b1, octets.s_b2, octets.s_b3, octets.s_b4).to_string())
+        }
+        AF_INET6 if address.iSockaddrLength as usize >= std::mem::size_of::<SOCKADDR_IN6>() => {
+            let socket = unsafe { &*(address.lpSockaddr.cast::<SOCKADDR_IN6>()) };
+            let octets = unsafe { socket.sin6_addr.u.Byte };
+            Some(Ipv6Addr::from(octets).to_string())
+        }
+        _ => None,
+    }
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -489,10 +696,22 @@ mod tests {
     #[test]
     fn platform_interface_types_classify_unknown_names() {
         let mut interface_types = BTreeMap::new();
-        interface_types.insert("port-a".to_string(), InterfaceType::Ethernet);
-        interface_types.insert("port-b".to_string(), InterfaceType::Wifi);
+        interface_types.insert(
+            "port-a".to_string(),
+            PlatformInterfaceDetails {
+                interface_type: Some(InterfaceType::Ethernet),
+                ..Default::default()
+            },
+        );
+        interface_types.insert(
+            "port-b".to_string(),
+            PlatformInterfaceDetails {
+                interface_type: Some(InterfaceType::Wifi),
+                ..Default::default()
+            },
+        );
 
-        let interfaces = build_interfaces_from_entries_with_type_overrides(
+        let interfaces = build_interfaces_from_entries_with_platform_details(
             vec![
                 (
                     "port-a".to_string(),
@@ -516,9 +735,15 @@ mod tests {
     #[test]
     fn macos_en1_with_ip_is_wifi_like_logger_enrichment() {
         let mut interface_types = BTreeMap::new();
-        interface_types.insert("en1".to_string(), InterfaceType::Ethernet);
+        interface_types.insert(
+            "en1".to_string(),
+            PlatformInterfaceDetails {
+                interface_type: Some(InterfaceType::Ethernet),
+                ..Default::default()
+            },
+        );
 
-        let interfaces = build_interfaces_from_entries_with_type_overrides(
+        let interfaces = build_interfaces_from_entries_with_platform_details(
             vec![(
                 "en1".to_string(),
                 IpAddr::V4(Ipv4Addr::new(192, 168, 1, 11)),
@@ -530,12 +755,122 @@ mod tests {
     }
 
     #[test]
+    fn platform_interface_details_enrich_gateway_and_dns() {
+        let mut interface_details = BTreeMap::new();
+        interface_details.insert(
+            "wlan".to_string(),
+            PlatformInterfaceDetails {
+                interface_type: Some(InterfaceType::Wifi),
+                gateway: Some("192.168.1.1".to_string()),
+                dns_servers: vec!["1.1.1.1".to_string(), "8.8.8.8".to_string()],
+                ..Default::default()
+            },
+        );
+
+        let interfaces = build_interfaces_from_entries_with_platform_details(
+            vec![(
+                "WLAN".to_string(),
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
+            )],
+            &interface_details,
+        );
+
+        assert_eq!(interfaces[0].interface_type, InterfaceType::Wifi);
+        assert_eq!(interfaces[0].gateway.as_deref(), Some("192.168.1.1"));
+        assert_eq!(interfaces[0].dns_servers, vec!["1.1.1.1", "8.8.8.8"]);
+        assert_eq!(interfaces[0].addresses.mac, None);
+    }
+
+    #[test]
+    fn unknown_platform_interface_type_does_not_mask_name_classification() {
+        let mut interface_details = BTreeMap::new();
+        interface_details.insert(
+            "wlan".to_string(),
+            PlatformInterfaceDetails {
+                interface_type: Some(InterfaceType::Unknown),
+                gateway: Some("192.168.1.1".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let interfaces = build_interfaces_from_entries_with_platform_details(
+            vec![(
+                "WLAN".to_string(),
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)),
+            )],
+            &interface_details,
+        );
+
+        assert_eq!(interfaces[0].interface_type, InterfaceType::Wifi);
+        assert_eq!(interfaces[0].gateway.as_deref(), Some("192.168.1.1"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_socket_address_to_string_reads_ipv4() {
+        use windows_sys::Win32::Networking::WinSock::{
+            AF_INET, IN_ADDR_0_0, SOCKADDR_IN, SOCKET_ADDRESS,
+        };
+
+        let mut socket = SOCKADDR_IN {
+            sin_family: AF_INET,
+            ..Default::default()
+        };
+        socket.sin_addr.S_un.S_un_b = IN_ADDR_0_0 {
+            s_b1: 192,
+            s_b2: 168,
+            s_b3: 1,
+            s_b4: 1,
+        };
+        let address = SOCKET_ADDRESS {
+            lpSockaddr: (&mut socket as *mut SOCKADDR_IN).cast(),
+            iSockaddrLength: std::mem::size_of::<SOCKADDR_IN>() as i32,
+        };
+
+        assert_eq!(
+            socket_address_to_string(address).as_deref(),
+            Some("192.168.1.1")
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_socket_address_to_string_reads_ipv6() {
+        use windows_sys::Win32::Networking::WinSock::{
+            AF_INET6, IN6_ADDR_0, SOCKADDR_IN6, SOCKET_ADDRESS,
+        };
+
+        let mut socket = SOCKADDR_IN6 {
+            sin6_family: AF_INET6,
+            ..Default::default()
+        };
+        socket.sin6_addr.u = IN6_ADDR_0 {
+            Byte: [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+        };
+        let address = SOCKET_ADDRESS {
+            lpSockaddr: (&mut socket as *mut SOCKADDR_IN6).cast(),
+            iSockaddrLength: std::mem::size_of::<SOCKADDR_IN6>() as i32,
+        };
+
+        assert_eq!(
+            socket_address_to_string(address).as_deref(),
+            Some("2001:db8::1")
+        );
+    }
+
+    #[test]
     fn macos_primary_service_type_overrides_generic_en_name() {
-        let mut interface_types = BTreeMap::new();
-        interface_types.insert("en5".to_string(), InterfaceType::Ethernet);
+        let mut interface_details = BTreeMap::new();
+        interface_details.insert(
+            "en5".to_string(),
+            PlatformInterfaceDetails {
+                interface_type: Some(InterfaceType::Ethernet),
+                ..Default::default()
+            },
+        );
 
         apply_macos_primary_service_interface_type(
-            &mut interface_types,
+            &mut interface_details,
             MacosPrimaryServiceInterface {
                 bsd_name: "en5".to_string(),
                 hardware: Some("AirPort".to_string()),
@@ -543,12 +878,12 @@ mod tests {
             },
         );
 
-        let interfaces = build_interfaces_from_entries_with_type_overrides(
+        let interfaces = build_interfaces_from_entries_with_platform_details(
             vec![(
                 "en5".to_string(),
                 IpAddr::V4(Ipv4Addr::new(192, 168, 1, 12)),
             )],
-            &interface_types,
+            &interface_details,
         );
 
         assert_eq!(interfaces[0].interface_type, InterfaceType::Wifi);
@@ -561,7 +896,7 @@ mod tests {
             Some(71),
         );
 
-        let interfaces = build_interfaces_from_entries_with_type_overrides(
+        let interfaces = build_interfaces_from_entries_with_platform_details(
             vec![
                 (
                     "abcdef00-1111-2222-3333-444444444444".to_string(),

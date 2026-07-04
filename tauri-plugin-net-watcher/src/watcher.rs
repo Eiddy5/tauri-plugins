@@ -13,11 +13,13 @@ use crate::{
     network::{has_available_interface, read_network_snapshot},
     quality::{evaluate_state, HttpProber, RollingWindow, StateConfig},
     snapshot::{build_snapshot, SnapshotBuildInput},
-    Error, NetWatcherConfig, NetWatcherSnapshot, NetworkSnapshot, ProbeTarget, ProbeTargetType,
-    QualityConfigSnapshot, Result, StartWatchingOptions,
+    Error, NetWatcherConfig, NetWatcherSnapshot, NetworkSnapshot, ProbeStatus, ProbeTarget,
+    ProbeTargetType, QualityConfigSnapshot, ReachabilityStatus, ReachabilityTargetSnapshot, Result,
+    StartWatchingOptions,
 };
 
 const SNAPSHOT_EVENT: &str = "net-watcher://snapshot-updated";
+const SYSTEM_EVENT_DEBOUNCE: Duration = Duration::from_millis(500);
 
 /// Access to the net-watcher APIs.
 pub struct NetWatcher<R: Runtime> {
@@ -44,6 +46,12 @@ enum WatcherWake {
     Interval,
     SystemNetworkChanged,
     Stop,
+}
+
+struct TargetProbeState {
+    id: String,
+    target: ProbeTarget,
+    window: RollingWindow,
 }
 
 impl<R> NetWatcher<R>
@@ -120,7 +128,8 @@ where
         let app = self.app.clone();
         let snapshot = self.snapshot.clone();
         let (signal_tx, signal_rx) = mpsc::unbounded_channel();
-        let system_watcher = start_system_network_watcher(signal_tx.clone())?;
+        let system_watcher =
+            system_watcher_or_interval_only(start_system_network_watcher(signal_tx.clone()));
         let handle = async_runtime::spawn(run_loop(app, snapshot, config, signal_rx));
         *task = Some(WatcherTask {
             signal_tx,
@@ -159,12 +168,25 @@ async fn run_loop<R>(
 ) where
     R: Runtime,
 {
-    let mut window = RollingWindow::new(config.window_size());
+    let target_configs = config.effective_targets();
+    let mut aggregate_window = RollingWindow::new(
+        config
+            .window_size()
+            .saturating_mul(target_configs.len())
+            .max(1),
+    );
+    let mut targets = target_configs
+        .into_iter()
+        .map(|target| TargetProbeState {
+            id: target.id,
+            target: ProbeTarget {
+                target_type: ProbeTargetType::Http,
+                url: target.url,
+            },
+            window: RollingWindow::new(config.window_size()),
+        })
+        .collect::<Vec<_>>();
     let prober = HttpProber::new(config.timeout_ms);
-    let target = ProbeTarget {
-        target_type: ProbeTargetType::Http,
-        url: config.target.clone(),
-    };
     let state_config = StateConfig {
         degraded_failure_rate: config.degraded_failure_rate(),
         degraded_p95_latency_ms: config.degraded_p95_latency_ms(),
@@ -182,9 +204,13 @@ async fn run_loop<R>(
             Err(error) => (NetworkSnapshot::default(), Some(error)),
         };
 
-        let probe = prober.probe(&target).await;
-        window.push(probe);
-        let summary = window.summary();
+        for target in &mut targets {
+            let probe = prober.probe(&target.target).await;
+            target.window.push(probe.clone());
+            aggregate_window.push(probe);
+        }
+
+        let summary = aggregate_window.summary();
         let previous = snapshot.read().await.clone();
         let mut state = evaluate_state(has_available_interface(&network), &summary, &state_config);
         if let Some(error) = network_error {
@@ -197,8 +223,7 @@ async fn run_loop<R>(
                 network,
                 state,
                 quality_config: quality_config.clone(),
-                target: target.clone(),
-                current_probe: window.latest(),
+                reachability_targets: targets.iter().map(reachability_target_snapshot).collect(),
                 summary,
             },
         );
@@ -216,14 +241,57 @@ async fn run_loop<R>(
     }
 }
 
+fn reachability_target_snapshot(target: &TargetProbeState) -> ReachabilityTargetSnapshot {
+    let current_probe = target.window.latest();
+
+    ReachabilityTargetSnapshot {
+        id: target.id.clone(),
+        status: reachability_status(current_probe.as_ref()),
+        target: target.target.clone(),
+        current_probe,
+        summary: target.window.summary(),
+    }
+}
+
+fn reachability_status(probe: Option<&crate::ProbeResult>) -> ReachabilityStatus {
+    match probe.map(|probe| &probe.status) {
+        Some(ProbeStatus::Success) => ReachabilityStatus::Reachable,
+        Some(ProbeStatus::Failed) => ReachabilityStatus::Unreachable,
+        None => ReachabilityStatus::Unknown,
+    }
+}
+
 async fn wait_for_next_wake(
     interval: Duration,
     signal_rx: &mut mpsc::UnboundedReceiver<WatcherSignal>,
 ) -> WatcherWake {
+    wait_for_next_wake_with_debounce(interval, SYSTEM_EVENT_DEBOUNCE, signal_rx).await
+}
+
+async fn wait_for_next_wake_with_debounce(
+    interval: Duration,
+    debounce: Duration,
+    signal_rx: &mut mpsc::UnboundedReceiver<WatcherSignal>,
+) -> WatcherWake {
     match tokio::time::timeout(interval, signal_rx.recv()).await {
-        Ok(Some(WatcherSignal::SystemNetworkChanged)) => WatcherWake::SystemNetworkChanged,
+        Ok(Some(WatcherSignal::SystemNetworkChanged)) => {
+            coalesce_system_network_events(debounce, signal_rx).await
+        }
         Ok(Some(WatcherSignal::Stop)) | Ok(None) => WatcherWake::Stop,
         Err(_) => WatcherWake::Interval,
+    }
+}
+
+async fn coalesce_system_network_events(
+    debounce: Duration,
+    signal_rx: &mut mpsc::UnboundedReceiver<WatcherSignal>,
+) -> WatcherWake {
+    loop {
+        match tokio::time::timeout(debounce, signal_rx.recv()).await {
+            Ok(Some(WatcherSignal::SystemNetworkChanged)) => {}
+            Ok(Some(WatcherSignal::Stop)) | Ok(None) => return WatcherWake::Stop,
+            Err(_) => return WatcherWake::SystemNetworkChanged,
+        }
     }
 }
 
@@ -240,6 +308,12 @@ fn start_system_network_watcher(
     tx: mpsc::UnboundedSender<WatcherSignal>,
 ) -> crate::Result<Option<SystemNetworkWatcher>> {
     start_platform_watcher(tx)
+}
+
+fn system_watcher_or_interval_only(
+    result: crate::Result<Option<SystemNetworkWatcher>>,
+) -> Option<SystemNetworkWatcher> {
+    result.unwrap_or_default()
 }
 
 #[cfg(target_os = "windows")]
@@ -506,6 +580,47 @@ mod tests {
         let wake = wait_for_next_wake(Duration::from_secs(60), &mut rx).await;
 
         assert_eq!(wake, WatcherWake::Stop);
+    }
+
+    #[tokio::test]
+    async fn system_network_events_are_coalesced_during_debounce_window() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(WatcherSignal::SystemNetworkChanged).unwrap();
+        tx.send(WatcherSignal::SystemNetworkChanged).unwrap();
+        tx.send(WatcherSignal::SystemNetworkChanged).unwrap();
+
+        let wake = wait_for_next_wake_with_debounce(
+            Duration::from_secs(60),
+            Duration::from_millis(1),
+            &mut rx,
+        )
+        .await;
+
+        assert_eq!(wake, WatcherWake::SystemNetworkChanged);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn stop_signal_wins_during_system_event_debounce() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(WatcherSignal::SystemNetworkChanged).unwrap();
+        tx.send(WatcherSignal::Stop).unwrap();
+
+        let wake = wait_for_next_wake_with_debounce(
+            Duration::from_secs(60),
+            Duration::from_millis(1),
+            &mut rx,
+        )
+        .await;
+
+        assert_eq!(wake, WatcherWake::Stop);
+    }
+
+    #[test]
+    fn system_watcher_start_errors_fall_back_to_interval_only() {
+        let watcher = system_watcher_or_interval_only(Err(Error::internal("boom")));
+
+        assert!(watcher.is_none());
     }
 
     #[cfg(target_os = "macos")]

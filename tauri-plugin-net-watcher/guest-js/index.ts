@@ -6,6 +6,7 @@ export type OverallState = 'unknown' | 'offline' | 'localOnly' | 'degraded' | 'o
 
 export interface StartWatchingOptions {
   target?: string
+  targets?: ReachabilityTargetConfig[]
   intervalMs?: number
   timeoutMs?: number
 }
@@ -13,14 +14,21 @@ export interface StartWatchingOptions {
 export interface NetWatcherConfig {
   autoStart: boolean
   target: string
+  targets?: ReachabilityTargetConfig[]
   intervalMs: number
   timeoutMs: number
+}
+
+export interface ReachabilityTargetConfig {
+  id: string
+  url: string
 }
 
 export interface NetWatcherSnapshot {
   meta: SnapshotMeta
   state: SnapshotState
   network: NetworkSnapshot
+  reachability: ReachabilitySnapshot
   quality: QualitySnapshot
   changes: SnapshotChanges
 }
@@ -73,10 +81,22 @@ export interface InterfaceAddresses {
 
 export interface QualitySnapshot {
   config: QualityConfigSnapshot
+  summary: QualitySummary
+}
+
+export interface ReachabilitySnapshot {
+  targets: ReachabilityTargetSnapshot[]
+}
+
+export interface ReachabilityTargetSnapshot {
+  id: string
+  status: ReachabilityStatus
   target: ProbeTarget
   currentProbe: ProbeResult | null
   summary: QualitySummary
 }
+
+export type ReachabilityStatus = 'unknown' | 'reachable' | 'unreachable'
 
 export interface QualityConfigSnapshot {
   intervalMs: number

@@ -20,7 +20,7 @@ mod snapshot;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod watcher;
 
-pub use config::{NetWatcherConfig, StartWatchingOptions};
+pub use config::{NetWatcherConfig, ReachabilityTargetConfig, StartWatchingOptions};
 pub use error::{Error, Result};
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
