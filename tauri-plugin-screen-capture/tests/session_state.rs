@@ -2,14 +2,16 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
 };
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tauri_plugin_screen_capture::{
     capture::{CaptureBackend, DummyCaptureBackend, FrameConsumer, RunningCapture},
     overlay::ShareOverlayFactory,
-    CaptureSourceKind, CaptureStatus, ListSourcesOptions, PermissionStatus, Result,
-    ScreenCaptureState, StartCaptureOptions,
+    CaptureErrorCode, CaptureErrorPayload, CaptureSourceKind, CaptureStatus, ListSourcesOptions,
+    PermissionStatus, Result, ScreenCaptureState, StartCaptureOptions,
 };
+use tokio::sync::watch;
 
 #[derive(Debug, Default)]
 struct BackendLifecycleCounters {
@@ -164,6 +166,68 @@ impl RunningCapture for ObservableRunningCapture {
     async fn stop(&self) -> Result<()> {
         self.counters.stops.fetch_add(1, Ordering::SeqCst);
         Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct FinishingBackend {
+    counters: Arc<BackendLifecycleCounters>,
+    finish_sender: watch::Sender<Option<CaptureErrorPayload>>,
+}
+
+#[async_trait]
+impl CaptureBackend for FinishingBackend {
+    async fn check_permission(&self) -> Result<PermissionStatus> {
+        Ok(PermissionStatus::Granted)
+    }
+
+    async fn request_permission(&self) -> Result<PermissionStatus> {
+        Ok(PermissionStatus::Granted)
+    }
+
+    async fn list_sources(
+        &self,
+        options: ListSourcesOptions,
+    ) -> Result<Vec<tauri_plugin_screen_capture::CaptureSource>> {
+        DummyCaptureBackend.list_sources(options).await
+    }
+
+    async fn start_capture(
+        &self,
+        _options: StartCaptureOptions,
+        _consumer: Box<dyn FrameConsumer>,
+    ) -> Result<Box<dyn RunningCapture>> {
+        self.counters.starts.fetch_add(1, Ordering::SeqCst);
+        Ok(Box::new(FinishingRunningCapture {
+            counters: Arc::clone(&self.counters),
+            finish_receiver: self.finish_sender.subscribe(),
+        }))
+    }
+}
+
+#[derive(Debug)]
+struct FinishingRunningCapture {
+    counters: Arc<BackendLifecycleCounters>,
+    finish_receiver: watch::Receiver<Option<CaptureErrorPayload>>,
+}
+
+#[async_trait]
+impl RunningCapture for FinishingRunningCapture {
+    async fn pause(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn resume(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        self.counters.stops.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn finish_receiver(&self) -> Option<watch::Receiver<Option<CaptureErrorPayload>>> {
+        Some(self.finish_receiver.clone())
     }
 }
 
@@ -417,6 +481,59 @@ async fn state_keeps_session_consistent_when_overlay_lifecycle_calls_fail() {
     assert_eq!(overlays.len(), 1);
     assert_eq!(overlays[0].hides.load(Ordering::SeqCst), 1);
     assert_eq!(overlays[0].shows.load(Ordering::SeqCst), 1);
+    assert_eq!(overlays[0].stops.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn state_removes_session_when_running_capture_finishes_after_source_closes() {
+    let counters = Arc::new(BackendLifecycleCounters::default());
+    let (finish_sender, _) = watch::channel(None);
+    let backend = Arc::new(FinishingBackend {
+        counters: Arc::clone(&counters),
+        finish_sender: finish_sender.clone(),
+    });
+    let overlay_factory = Arc::new(OverlayProbeFactory::default());
+    let state = ScreenCaptureState::with_backend_and_overlay_factory(
+        backend,
+        Arc::clone(&overlay_factory) as Arc<dyn ShareOverlayFactory>,
+    );
+
+    let session = state
+        .start_capture(StartCaptureOptions {
+            source_id: "dummy-window-1".to_string(),
+            source_kind: CaptureSourceKind::Window,
+            ..start_options()
+        })
+        .await
+        .expect("start");
+
+    finish_sender
+        .send(Some(CaptureErrorPayload {
+            code: CaptureErrorCode::SourceUnavailable,
+            message: "window closed".to_string(),
+            recoverable: true,
+            details: None,
+        }))
+        .expect("send finish");
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if state
+                .get_capture_session(&session.session_id)
+                .await
+                .is_err()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("session removed after capture finish");
+
+    assert_eq!(counters.stops.load(Ordering::SeqCst), 1);
+    let overlays = overlay_factory.overlay_counters();
+    assert_eq!(overlays.len(), 1);
     assert_eq!(overlays[0].stops.load(Ordering::SeqCst), 1);
 }
 

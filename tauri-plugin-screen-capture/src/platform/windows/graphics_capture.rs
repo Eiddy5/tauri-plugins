@@ -8,7 +8,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use tokio::task::JoinHandle;
+use tokio::{sync::watch, task::JoinHandle};
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, GetMonitorInfoW,
     ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
@@ -75,8 +75,10 @@ pub fn start_capture(
     let fps = options.effective_fps();
     let paused = Arc::new(AtomicBool::new(false));
     let frame_slot = Arc::new(Mutex::new(None));
+    let (finish_sender, _) = watch::channel(None);
     let control = start_windows_capture(&options, Arc::clone(&paused), Arc::clone(&frame_slot))?;
     let frame_interval = Duration::from_secs_f64(1.0 / f64::from(fps));
+    let task_finish_sender = finish_sender.clone();
 
     let task = tokio::spawn(async move {
         let mut tick = tokio::time::interval(frame_interval);
@@ -94,6 +96,7 @@ pub fn start_capture(
                 }
                 Some(Err(error)) => {
                     eprintln!("[screen-capture] Windows frame capture failed: {error:?}");
+                    let _ = task_finish_sender.send(Some(error.payload()));
                     break;
                 }
                 None => {}
@@ -105,6 +108,7 @@ pub fn start_capture(
         control: Mutex::new(Some(control)),
         paused,
         task,
+        finish_sender,
     }))
 }
 
@@ -114,6 +118,7 @@ struct WindowsRunningCapture {
     control: Mutex<Option<WindowsCaptureControl>>,
     paused: Arc<AtomicBool>,
     task: JoinHandle<()>,
+    finish_sender: watch::Sender<Option<crate::models::CaptureErrorPayload>>,
 }
 
 #[async_trait]
@@ -130,6 +135,12 @@ impl RunningCapture for WindowsRunningCapture {
 
     async fn stop(&self) -> Result<()> {
         self.stop_capture()
+    }
+
+    fn finish_receiver(
+        &self,
+    ) -> Option<watch::Receiver<Option<crate::models::CaptureErrorPayload>>> {
+        Some(self.finish_sender.subscribe())
     }
 }
 

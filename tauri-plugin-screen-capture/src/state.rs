@@ -4,6 +4,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use tokio::sync::watch;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -11,9 +12,9 @@ use crate::{
     capture::{CaptureBackend, RunningCapture},
     error::Error,
     models::{
-        Capabilities, CaptureErrorCode, CaptureSession, CaptureSource, CaptureStats, CaptureStatus,
-        ListSourcesOptions, PermissionStatus, StartCaptureOptions, WebRtcAnswer,
-        WebRtcIceCandidate, WebRtcOffer,
+        Capabilities, CaptureErrorCode, CaptureErrorPayload, CaptureSession, CaptureSource,
+        CaptureStats, CaptureStatus, ListSourcesOptions, PermissionStatus, StartCaptureOptions,
+        WebRtcAnswer, WebRtcIceCandidate, WebRtcOffer,
     },
     overlay::{DefaultShareOverlayFactory, OverlayTarget, ShareOverlay, ShareOverlayFactory},
     pipeline::CapturePipeline,
@@ -34,7 +35,7 @@ struct SessionRecord {
 pub struct ScreenCaptureState {
     backend: Arc<dyn CaptureBackend>,
     overlay_factory: Arc<dyn ShareOverlayFactory>,
-    sessions: Mutex<HashMap<String, SessionRecord>>,
+    sessions: Arc<Mutex<HashMap<String, SessionRecord>>>,
 }
 
 struct SharedShareOverlayFactory {
@@ -82,7 +83,7 @@ impl ScreenCaptureState {
         Self {
             backend,
             overlay_factory,
-            sessions: Mutex::new(HashMap::new()),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -129,6 +130,7 @@ impl ScreenCaptureState {
             }
         };
         let running_capture: Arc<dyn RunningCapture> = running_capture.into();
+        let finish_receiver = running_capture.finish_receiver();
 
         if let Err(error) = publisher.start(options.clone()).await {
             let _ = running_capture.stop().await;
@@ -169,6 +171,14 @@ impl ScreenCaptureState {
                 webrtc_signaling,
             },
         );
+
+        if let Some(finish_receiver) = finish_receiver {
+            spawn_capture_finish_monitor(
+                Arc::clone(&self.sessions),
+                session.session_id.clone(),
+                finish_receiver,
+            );
+        }
 
         Ok(session)
     }
@@ -340,4 +350,50 @@ fn invalid_session_error() -> Error {
         "capture session was not found",
         true,
     )
+}
+
+fn spawn_capture_finish_monitor(
+    sessions: Arc<Mutex<HashMap<String, SessionRecord>>>,
+    session_id: String,
+    finish_receiver: watch::Receiver<Option<CaptureErrorPayload>>,
+) {
+    tokio::spawn(async move {
+        let finish = wait_for_capture_finish(finish_receiver).await;
+        let record = sessions.lock().await.remove(&session_id);
+
+        if let Some(record) = record {
+            if let Some(payload) = finish {
+                eprintln!(
+                    "[screen-capture] capture session {} finished: {}",
+                    session_id, payload.message
+                );
+            }
+
+            if let Err(error) = record.running_capture.stop().await {
+                eprintln!("[screen-capture] failed to stop finished capture source: {error}");
+            }
+            if let Err(error) = record.publisher.stop().await {
+                eprintln!(
+                    "[screen-capture] failed to stop publisher for finished capture: {error}"
+                );
+            }
+            if let Err(error) = record.overlay.stop().await {
+                eprintln!("[screen-capture] failed to stop overlay for finished capture: {error}");
+            }
+        }
+    });
+}
+
+async fn wait_for_capture_finish(
+    mut finish_receiver: watch::Receiver<Option<CaptureErrorPayload>>,
+) -> Option<CaptureErrorPayload> {
+    loop {
+        if let Some(payload) = finish_receiver.borrow().clone() {
+            return Some(payload);
+        }
+
+        if finish_receiver.changed().await.is_err() {
+            return None;
+        }
+    }
 }
