@@ -1,18 +1,24 @@
 use std::{
+    collections::HashMap,
     sync::mpsc as std_mpsc,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
 use tokio::{sync::watch, task::JoinHandle};
-use windows::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, GetMonitorInfoW,
-    ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
-    HMONITOR, MONITORINFO, SRCCOPY,
+use windows::Win32::{
+    Foundation::HWND,
+    Graphics::Gdi::{
+        BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC,
+        GetMonitorInfoW, GetWindowDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
+        BI_RGB, DIB_RGB_COLORS, HGDIOBJ, HMONITOR, MONITORINFO, SRCCOPY,
+    },
+    Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS},
+    UI::WindowsAndMessaging::PW_RENDERFULLCONTENT,
 };
 use windows_capture::{
     capture::{CaptureControl, Context, GraphicsCaptureApiError, GraphicsCaptureApiHandler},
@@ -42,7 +48,10 @@ use crate::{
 
 const THUMBNAIL_TIMEOUT: Duration = Duration::from_millis(600);
 const THUMBNAIL_MAX_WIDTH: u32 = 420;
-const WINDOW_THUMBNAIL_LIMIT: usize = 12;
+const WINDOW_THUMBNAIL_CACHE_TTL: Duration = Duration::from_secs(5);
+const WINDOW_THUMBNAIL_WGC_FALLBACK_LIMIT: usize = 3;
+
+static WINDOW_THUMBNAIL_CACHE: OnceLock<Mutex<WindowThumbnailCache>> = OnceLock::new();
 
 type SharedFrameSlot = Arc<Mutex<Option<Result<VideoFrame>>>>;
 
@@ -245,6 +254,71 @@ struct ThumbnailCaptureFlags {
     sender: std_mpsc::Sender<Result<String>>,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct WindowThumbnailCacheKey {
+    hwnd: usize,
+    width: u32,
+    height: u32,
+    title: String,
+}
+
+struct WindowThumbnailCacheEntry {
+    thumbnail: String,
+    captured_at: Instant,
+}
+
+#[derive(Default)]
+struct WindowThumbnailCache {
+    entries: HashMap<WindowThumbnailCacheKey, WindowThumbnailCacheEntry>,
+}
+
+impl WindowThumbnailCache {
+    fn get(&self, key: &WindowThumbnailCacheKey, now: Instant) -> Option<String> {
+        let entry = self.entries.get(key)?;
+        let age = now
+            .checked_duration_since(entry.captured_at)
+            .unwrap_or_default();
+        (age <= WINDOW_THUMBNAIL_CACHE_TTL).then(|| entry.thumbnail.clone())
+    }
+
+    fn get_stale(&self, key: &WindowThumbnailCacheKey) -> Option<String> {
+        self.entries.get(key).map(|entry| entry.thumbnail.clone())
+    }
+
+    fn insert(&mut self, key: WindowThumbnailCacheKey, thumbnail: String, captured_at: Instant) {
+        self.entries.insert(
+            key,
+            WindowThumbnailCacheEntry {
+                thumbnail,
+                captured_at,
+            },
+        );
+    }
+}
+
+struct WindowThumbnailWgcFallbackBudget {
+    remaining: usize,
+}
+
+impl Default for WindowThumbnailWgcFallbackBudget {
+    fn default() -> Self {
+        Self {
+            remaining: WINDOW_THUMBNAIL_WGC_FALLBACK_LIMIT,
+        }
+    }
+}
+
+impl WindowThumbnailWgcFallbackBudget {
+    fn take(&mut self) -> bool {
+        if self.remaining == 0 {
+            return false;
+        }
+
+        self.remaining -= 1;
+        true
+    }
+}
+
 impl GraphicsCaptureApiHandler for ThumbnailCaptureHandler {
     type Flags = ThumbnailCaptureFlags;
     type Error = String;
@@ -408,6 +482,190 @@ fn capture_monitor_thumbnail(monitor: Monitor) -> Option<String> {
             None
         }
     }
+}
+
+fn capture_window_thumbnail(
+    window: Window,
+    key: &WindowThumbnailCacheKey,
+    wgc_fallback_budget: &mut WindowThumbnailWgcFallbackBudget,
+) -> Option<String> {
+    let now = Instant::now();
+    if let Some(thumbnail) = cached_window_thumbnail(key, now) {
+        return Some(thumbnail);
+    }
+
+    if let Some(thumbnail) = capture_window_thumbnail_gdi(window) {
+        store_window_thumbnail(key.clone(), thumbnail.clone(), now);
+        return Some(thumbnail);
+    }
+
+    if wgc_fallback_budget.take() {
+        if let Some(thumbnail) = capture_thumbnail(window) {
+            store_window_thumbnail(key.clone(), thumbnail.clone(), now);
+            return Some(thumbnail);
+        }
+    }
+
+    stale_window_thumbnail(key)
+}
+
+fn cached_window_thumbnail(key: &WindowThumbnailCacheKey, now: Instant) -> Option<String> {
+    WINDOW_THUMBNAIL_CACHE
+        .get_or_init(|| Mutex::new(WindowThumbnailCache::default()))
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(key, now))
+}
+
+fn stale_window_thumbnail(key: &WindowThumbnailCacheKey) -> Option<String> {
+    WINDOW_THUMBNAIL_CACHE
+        .get_or_init(|| Mutex::new(WindowThumbnailCache::default()))
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get_stale(key))
+}
+
+fn store_window_thumbnail(key: WindowThumbnailCacheKey, thumbnail: String, captured_at: Instant) {
+    if let Ok(mut cache) = WINDOW_THUMBNAIL_CACHE
+        .get_or_init(|| Mutex::new(WindowThumbnailCache::default()))
+        .lock()
+    {
+        cache.insert(key, thumbnail, captured_at);
+    }
+}
+
+fn capture_window_thumbnail_gdi(window: Window) -> Option<String> {
+    capture_window_thumbnail_gdi_result(window)
+        .map_err(|error| {
+            eprintln!("[screen-capture] Windows GDI window thumbnail failed: {error:?}");
+            error
+        })
+        .ok()
+}
+
+fn capture_window_thumbnail_gdi_result(window: Window) -> Result<String> {
+    let source_width =
+        u32::try_from(window.width().map_err(runtime_error)?.max(0)).map_err(runtime_error)?;
+    let source_height =
+        u32::try_from(window.height().map_err(runtime_error)?.max(0)).map_err(runtime_error)?;
+    if source_width == 0 || source_height == 0 {
+        return Err(runtime_error("window has empty bounds"));
+    }
+
+    let hwnd = HWND(window.as_raw_hwnd());
+    if hwnd.is_invalid() {
+        return Err(runtime_error("window has an invalid HWND"));
+    }
+
+    let mut bits = std::ptr::null_mut();
+    let bitmap_info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: i32::try_from(source_width).map_err(runtime_error)?,
+            biHeight: -i32::try_from(source_height).map_err(runtime_error)?,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let window_dc = unsafe { GetWindowDC(Some(hwnd)) };
+    if window_dc.is_invalid() {
+        return Err(runtime_error(
+            "GetWindowDC returned an invalid window device context",
+        ));
+    }
+
+    let memory_dc = unsafe { CreateCompatibleDC(Some(window_dc)) };
+    if memory_dc.is_invalid() {
+        unsafe {
+            ReleaseDC(Some(hwnd), window_dc);
+        }
+        return Err(runtime_error(
+            "CreateCompatibleDC returned an invalid memory context",
+        ));
+    }
+
+    let bitmap = match unsafe {
+        CreateDIBSection(
+            Some(window_dc),
+            &bitmap_info,
+            DIB_RGB_COLORS,
+            &mut bits,
+            None,
+            0,
+        )
+    } {
+        Ok(bitmap) => bitmap,
+        Err(error) => {
+            unsafe {
+                let _ = DeleteDC(memory_dc);
+                ReleaseDC(Some(hwnd), window_dc);
+            }
+            return Err(runtime_error(error));
+        }
+    };
+
+    let old_object = unsafe { SelectObject(memory_dc, HGDIOBJ(bitmap.0)) };
+    let mut captured = false;
+    for flags in [
+        PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT),
+        PRINT_WINDOW_FLAGS(0),
+        PRINT_WINDOW_FLAGS(4),
+    ] {
+        if unsafe { PrintWindow(hwnd, memory_dc, flags).as_bool() } {
+            captured = true;
+            break;
+        }
+    }
+
+    if !captured {
+        captured = unsafe {
+            BitBlt(
+                memory_dc,
+                0,
+                0,
+                i32::try_from(source_width).map_err(runtime_error)?,
+                i32::try_from(source_height).map_err(runtime_error)?,
+                Some(window_dc),
+                0,
+                0,
+                SRCCOPY,
+            )
+            .is_ok()
+        };
+    }
+
+    let result = if !captured {
+        Err(runtime_error("PrintWindow and BitBlt failed for window"))
+    } else if bits.is_null() {
+        Err(runtime_error(
+            "CreateDIBSection returned a null pixel pointer",
+        ))
+    } else {
+        let len = source_width as usize * source_height as usize * 4;
+        let bgra = unsafe { std::slice::from_raw_parts(bits.cast::<u8>(), len) };
+        let rgba = bgra_to_opaque_rgba(bgra);
+        let (width, height, rgba) = resize_rgba_for_thumbnail(&rgba, source_width, source_height);
+        encode_png_base64(&rgba, width, height).ok_or_else(|| {
+            Error::new(
+                CaptureErrorCode::CaptureRuntimeFailed,
+                "failed to encode Windows GDI window thumbnail",
+                true,
+            )
+        })
+    };
+
+    unsafe {
+        SelectObject(memory_dc, old_object);
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        let _ = DeleteDC(memory_dc);
+        ReleaseDC(Some(hwnd), window_dc);
+    }
+
+    result
 }
 
 fn capture_monitor_thumbnail_result(monitor: Monitor) -> Result<String> {
@@ -618,16 +876,18 @@ fn display_source(
 
 fn enumerate_windows(include_thumbnails: bool) -> Result<Vec<CaptureSource>> {
     let windows = Window::enumerate().map_err(source_error)?;
+    let mut wgc_fallback_budget = WindowThumbnailWgcFallbackBudget::default();
     Ok(windows
         .into_iter()
-        .enumerate()
-        .filter_map(|(index, window)| {
-            window_source(window, include_thumbnails && index < WINDOW_THUMBNAIL_LIMIT)
-        })
+        .filter_map(|window| window_source(window, include_thumbnails, &mut wgc_fallback_budget))
         .collect())
 }
 
-fn window_source(window: Window, include_thumbnail: bool) -> Option<CaptureSource> {
+fn window_source(
+    window: Window,
+    include_thumbnail: bool,
+    wgc_fallback_budget: &mut WindowThumbnailWgcFallbackBudget,
+) -> Option<CaptureSource> {
     let title = window.title().ok()?;
     if title.trim().is_empty() {
         return None;
@@ -646,12 +906,19 @@ fn window_source(window: Window, include_thumbnail: bool) -> Option<CaptureSourc
         .map(|name| name.trim_end_matches(".exe").to_string())
         .filter(|name| !name.is_empty());
 
+    let hwnd = window.as_raw_hwnd() as usize;
+    let thumbnail_key = WindowThumbnailCacheKey {
+        hwnd,
+        width,
+        height,
+        title: title.clone(),
+    };
     let thumbnail_base64 = include_thumbnail
-        .then(|| capture_thumbnail(window))
+        .then(|| capture_window_thumbnail(window, &thumbnail_key, wgc_fallback_budget))
         .flatten();
 
     Some(CaptureSource {
-        id: format!("window:{:x}", window.as_raw_hwnd() as usize),
+        id: format!("window:{hwnd:x}"),
         kind: CaptureSourceKind::Window,
         name: title.clone(),
         title: Some(title),
@@ -751,6 +1018,14 @@ fn bgra_to_rgba(data: &[u8]) -> Vec<u8> {
     let mut rgba = Vec::with_capacity(data.len());
     for pixel in data.chunks_exact(4) {
         rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+    }
+    rgba
+}
+
+fn bgra_to_opaque_rgba(data: &[u8]) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity(data.len());
+    for pixel in data.chunks_exact(4) {
+        rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], 255]);
     }
     rgba
 }
@@ -860,5 +1135,34 @@ mod tests {
             capture_draw_border_settings(),
             DrawBorderSettings::WithoutBorder
         );
+    }
+
+    #[test]
+    fn window_thumbnail_cache_reuses_only_fresh_entries() {
+        let mut cache = WindowThumbnailCache::default();
+        let key = WindowThumbnailCacheKey {
+            hwnd: 42,
+            width: 1280,
+            height: 720,
+            title: "Document".to_string(),
+        };
+        let captured_at = std::time::Instant::now();
+
+        cache.insert(key.clone(), "png-a".to_string(), captured_at);
+
+        assert_eq!(
+            cache.get(&key, captured_at + Duration::from_secs(2)),
+            Some("png-a".to_string())
+        );
+        assert_eq!(cache.get(&key, captured_at + Duration::from_secs(10)), None);
+    }
+
+    #[test]
+    fn window_thumbnail_wgc_fallback_budget_is_limited() {
+        let mut budget = WindowThumbnailWgcFallbackBudget::default();
+
+        let allowed = (0..5).map(|_| budget.take()).collect::<Vec<bool>>();
+
+        assert_eq!(allowed, vec![true, true, true, false, false]);
     }
 }
