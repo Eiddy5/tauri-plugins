@@ -59,6 +59,22 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             commands::accept_webrtc_answer,
             commands::add_webrtc_ice_candidate
         ])
+        .on_event(|_, event| {
+            #[cfg(target_os = "macos")]
+            {
+                if matches!(
+                    event,
+                    tauri::RunEvent::Resumed
+                        | tauri::RunEvent::Reopen { .. }
+                        | tauri::RunEvent::WindowEvent {
+                            event: tauri::WindowEvent::Focused(true),
+                            ..
+                        }
+                ) {
+                    crate::overlay::retry_pending_window_overlays();
+                }
+            }
+        })
         .setup(|app, api| {
             #[cfg(mobile)]
             let screen_capture = mobile::init(app, api)?;

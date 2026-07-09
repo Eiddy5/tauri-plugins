@@ -1,5 +1,11 @@
+#[cfg(target_os = "macos")]
+mod macos;
+
 #[cfg(windows)]
 mod windows;
+
+#[cfg(target_os = "macos")]
+pub use macos::retry_pending_window_overlays;
 
 #[cfg(windows)]
 pub use windows::{
@@ -34,12 +40,17 @@ pub struct DefaultShareOverlayFactory;
 
 impl ShareOverlayFactory for DefaultShareOverlayFactory {
     fn create_overlay(&self) -> Arc<dyn ShareOverlay> {
+        #[cfg(target_os = "macos")]
+        {
+            Arc::new(macos::MacOsShareOverlay::default())
+        }
+
         #[cfg(windows)]
         {
             Arc::new(WindowsShareOverlay::default())
         }
 
-        #[cfg(not(windows))]
+        #[cfg(not(any(target_os = "macos", windows)))]
         {
             Arc::new(NoopShareOverlay)
         }
