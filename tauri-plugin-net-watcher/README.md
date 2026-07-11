@@ -1,37 +1,109 @@
 # Tauri Plugin Net Watcher
 
-`tauri-plugin-net-watcher` 是一个用于 Tauri 2 应用的网络状态监测插件。它会采集本机网络接口信息，并可选地探测一个或多个自定义 HTTP 服务目标。
+面向 Tauri 2 桌面应用的设备网络、公网可用性与 HTTP/HTTPS 服务可达性监控插件。
 
-## 功能特性
+插件提供三类相互独立的数据：
 
-- 不配置 `targets` 也能运行，独立输出本地网络接口状态和公网可用状态。
-- Windows 使用 NCSI 作为系统提示，并通过 Microsoft Connect Test 主动探测作为公网可用性的最终验证。
-- macOS 使用 SystemConfiguration reachability 作为系统提示，并通过 Apple captive 检测页主动验证公网与认证门户。
-- 每个自定义 target 独立计算服务可达性、连接质量和核心统计。
-- 多目标使用固定上限为 4 的有界并发探测，避免目标数量线性放大单轮等待时间。
-- 每个 target 独立提供失败率、P95 延迟、抖动和连续失败次数。
-- 分别监听设备/公网更新和单 target 更新事件，前端可按页面区域增量刷新；Windows 和 macOS 网络变化会触发插件立即刷新。
-- 支持手动启动、停止监测，也支持通过配置自动启动。
-- 返回主网络接口、接口类型、IP 地址、DNS 和网关；Windows 通过系统适配器 API 采集 DNS/网关，macOS 按系统可得信息返回。
-- 首个版本支持 Windows 和 macOS；MAC 地址默认不采集。
+- 设备是否存在可用网络接口。
+- 当前设备是否已验证可以访问公网。
+- 每个自定义服务目标是否可达，以及近期连接质量。
+
+## 支持平台
+
+| 平台 | 支持状态 | 系统网络变化监听 | 公网验证 |
+| --- | --- | --- | --- |
+| Windows | ✓ | `NotifyIpInterfaceChange` | NCSI + Microsoft Connect Test |
+| macOS | ✓ | `SCDynamicStore` | `SCNetworkReachability` + Apple captive probe |
+| Linux | × | 不支持 | 不支持 |
+| Android | × | 不支持 | 不支持 |
+| iOS | × | 不支持 | 不支持 |
+
+本插件要求 Rust `1.77.2` 或更高版本。
 
 ## 安装
 
-在 Tauri 应用中安装 Rust 插件和前端 API 包后，在 `src-tauri` 中注册插件，并在前端通过 `tauri-plugin-net-watcher-api` 调用。
+插件由 Rust Core 和 JavaScript Guest bindings 两部分组成。
 
-```ts
-// src-tauri/src/lib.rs
+### 本地源码安装
+
+在 Tauri 应用的 `src-tauri/Cargo.toml` 中添加 Rust 插件：
+
+```toml
+[dependencies]
+tauri-plugin-net-watcher = { path = "../../path/to/tauri-plugin-net-watcher" }
+```
+
+使用你选择的包管理器安装 JavaScript bindings：
+
+```bash
+pnpm add file:../../path/to/tauri-plugin-net-watcher
+# 或
+npm install ../../path/to/tauri-plugin-net-watcher
+# 或
+yarn add file:../../path/to/tauri-plugin-net-watcher
+```
+
+### 包发布后安装
+
+当 Rust crate 和 npm 包发布后，可以使用包名安装：
+
+```bash
+cargo add tauri-plugin-net-watcher
+pnpm add tauri-plugin-net-watcher-api
+```
+
+当前仓库未配置公开 Git 仓库地址，因此本文档不提供 Git dependency 示例。
+
+## 使用
+
+### 注册插件
+
+在 Tauri 应用中注册 Rust 插件：
+
+`src-tauri/src/lib.rs`
+
+```rust
 pub fn run() {
-  tauri::Builder::default()
-    .plugin(tauri_plugin_net_watcher::init())
-    .run(tauri::generate_context!())
-    .expect("error while running tauri application");
+    tauri::Builder::default()
+        .plugin(tauri_plugin_net_watcher::init())
+        .run(tauri::generate_context!())
+        .expect("error while running Tauri application");
 }
 ```
 
-## 配置
+### 配置权限
 
-在 `src-tauri/tauri.conf.json` 的顶层添加 `plugins.net-watcher`：
+Tauri 2 默认通过 Capability 控制插件命令访问。将 `net-watcher:default` 添加到使用插件的 capability：
+
+`src-tauri/capabilities/default.json`
+
+```json
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default desktop capability",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "net-watcher:default"
+  ]
+}
+```
+
+`net-watcher:default` 包含以下权限：
+
+| 权限 | 允许调用的 API |
+| --- | --- |
+| `net-watcher:allow-get-snapshot` | `getSnapshot()` |
+| `net-watcher:allow-start-watching` | `startWatching()` |
+| `net-watcher:allow-stop-watching` | `stopWatching()` |
+| `net-watcher:allow-get-config` | `getConfig()` |
+
+需要最小权限时，可以不使用 `net-watcher:default`，只声明业务实际调用的 `allow-*` 权限。
+
+### 配置插件
+
+插件配置位于 `src-tauri/tauri.conf.json` 的 `plugins.net-watcher`：
 
 ```json
 {
@@ -39,8 +111,14 @@ pub fn run() {
     "net-watcher": {
       "autoStart": false,
       "targets": [
-        { "id": "api", "url": "https://api.example.com/health" },
-        { "id": "cdn", "url": "https://cdn.example.com/ping" }
+        {
+          "id": "api",
+          "url": "https://api.example.com/health"
+        },
+        {
+          "id": "cdn",
+          "url": "https://cdn.example.com/ping"
+        }
       ],
       "intervalMs": 10000,
       "timeoutMs": 3000
@@ -49,21 +127,22 @@ pub fn run() {
 }
 ```
 
-配置项说明：
+| 字段 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `autoStart` | `boolean` | `false` | 插件初始化后是否自动启动监控。 |
+| `targets` | `Array<{ id, url }>` | `[]` | 可选的 HTTP/HTTPS 服务探测目标。每个 `id` 必须唯一。 |
+| `intervalMs` | `number` | `10000` | target 健康状态下的基础探测间隔，范围为 `1000..=3600000`。 |
+| `timeoutMs` | `number` | `3000` | 单次 target 探测超时，范围为 `100..=60000`，且不能大于 `intervalMs`。 |
 
-- `autoStart`：应用启动后是否自动开始监测。
-- `targets`：可选的服务可达性目标数组；配置目标时每个 `id` 必须唯一。
-- `intervalMs`：target 健康状态下的基础探测间隔，单位毫秒，允许范围为 `1000` 到 `3600000`；异常确认、恢复确认和失败退避由插件内部动态调度。
-- `timeoutMs`：单次探测超时时间，单位毫秒，允许范围为 `100` 到 `60000`，且不能大于 `intervalMs`。
+不配置 `targets` 时，设备网络和公网验证仍然运行，只是不探测自定义服务。
 
-未配置 `targets` 或传入空数组时，不会探测任何自定义业务服务。Windows 公网验证会访问 Microsoft Connect Test，macOS 公网验证会访问 Apple captive 检测页；这些请求不是 target，也不参与 target 的统计。旧的单目标 `target` 字段不再接受。
+### JavaScript API
 
-后台 watcher 使用“系统网络事件唤醒 + 独立自适应调度”的混合模型。系统网络变化会在短窗口合并后比较网络指纹；主接口、地址、网关或 DNS 变化时立即废弃旧探测，重置公网和各 target 挡位及质量窗口。公网优先验证并发送网络事件，各 target 最多并发 4 个且完成一个就独立推送一个。健康 target 以 `intervalMs` 为基础周期并加入 ±10% 抖动；失败先按 3 秒快速确认，持续失败后按 10、20、40、60 秒退避，恢复后按 3 秒确认。公网明确不可用时 targets 进入 `suspended`，不累计服务失败样本；公网恢复后立即重新探测。
-
-## 前端用法
+建议先注册事件监听器，再启动 watcher，避免遗漏启动阶段的第一条更新事件：
 
 ```ts
 import {
+  getConfig,
   getSnapshot,
   onNetworkUpdated,
   onTargetUpdated,
@@ -71,59 +150,172 @@ import {
   stopWatching,
 } from 'tauri-plugin-net-watcher-api'
 
-let unlistenNetwork: (() => void) | null = null
-let unlistenTarget: (() => void) | null = null
+const unlistenNetwork = await onNetworkUpdated((event) => {
+  console.log('device:', event.state.overall)
+  console.log('internet:', event.state.internet)
+  console.log('network:', event.network)
+})
 
-export async function startNetWatcher() {
-  unlistenNetwork = await onNetworkUpdated((payload) => {
-    console.log('internet:', payload.state.internet)
-    console.log('network:', payload.network)
-  })
-  unlistenTarget = await onTargetUpdated((payload) => {
-    console.log('target:', payload.target.id, payload.target.state)
-  })
-  await startWatching()
-  return await getSnapshot()
-}
+const unlistenTarget = await onTargetUpdated((event) => {
+  console.log('target:', event.target.id)
+  console.log('reachability:', event.target.state.reachability)
+  console.log('quality:', event.target.state.quality)
+})
 
-export async function stopNetWatcher() {
-  await stopWatching()
-  return await getSnapshot()
-}
+await startWatching()
 
-export async function refreshSnapshot() {
-  return await getSnapshot()
-}
+const config = await getConfig()
+const snapshot = await getSnapshot()
 
-export function cleanupNetWatcherListener() {
-  unlistenNetwork?.()
-  unlistenTarget?.()
-  unlistenNetwork = null
-  unlistenTarget = null
+// 页面或窗口销毁时清理监听器。
+unlistenNetwork()
+unlistenTarget()
+
+// 不再需要后台监控时停止 watcher。
+await stopWatching()
+```
+
+`startWatching()` 支持只对当前监控会话生效的运行时覆盖参数，不会修改 `tauri.conf.json`：
+
+```ts
+await startWatching({
+  targets: [
+    { id: 'api', url: 'https://api.example.com/health' },
+  ],
+  intervalMs: 5000,
+  timeoutMs: 2000,
+})
+```
+
+| API | 返回值 | 说明 |
+| --- | --- | --- |
+| `getConfig()` | `Promise<NetWatcherConfig>` | 获取当前插件基础配置。 |
+| `getSnapshot()` | `Promise<NetWatcherSnapshot>` | 获取当前完整快照。 |
+| `startWatching(options?)` | `Promise<void>` | 启动 watcher，可覆盖当前会话的 targets、间隔和超时。 |
+| `stopWatching()` | `Promise<void>` | 停止 watcher。 |
+| `onNetworkUpdated(handler)` | `Promise<UnlistenFn>` | 监听设备网络和公网语义变化。 |
+| `onTargetUpdated(handler)` | `Promise<UnlistenFn>` | 监听单个 target 的探测结果。 |
+
+## 事件
+
+### `net-watcher://network-updated`
+
+设备接口、主接口、公网状态等数据发生语义变化时发送。仅探测时间或耗时变化不会产生该事件。
+
+```ts
+interface NetworkUpdatedPayload {
+  snapshotId: string
+  timestamp: string
+  platform: string
+  state: SnapshotState
+  network: NetworkSnapshot
 }
 ```
 
-`getSnapshot()` 返回完整 `NetWatcherSnapshot`，用于初始化和诊断。实时推送使用两个精简事件：
+### `net-watcher://target-updated`
 
-- `net-watcher://network-updated`：仅包含 `snapshotId`、`timestamp`、`platform`、`state` 和 `network`，与示例顶部设备/公网区域一致。
-- `net-watcher://target-updated`：仅包含 `snapshotId`、`timestamp` 和一个 `target`，每个 target 独立推送。
+每个 target 实际完成一次探测后独立发送，不等待其他 target。
 
-## 快照字段
+```ts
+interface TargetUpdatedPayload {
+  snapshotId: string
+  timestamp: string
+  target: ReachabilityTargetSnapshot
+}
+```
 
-常用字段包括：
+完整快照只通过 `getSnapshot()` 获取，实时事件不会重复携带整个快照。
 
-- `snapshot.state.overall`：设备网络接口总体状态，不受自定义 targets 成败影响。
-- `snapshot.state.network`：设备网络接口状态。
-- `snapshot.state.internet`：业务可直接使用的公网状态，取值为 `unknown`、`available`、`degraded`、`unavailable` 或 `captivePortal`。
-- `snapshot.state.reason`：当前状态原因。
-- `snapshot.network.internet`：公网判断的详细证据，包括平台系统提示、主动探测、是否已验证、延迟、连续失败次数和原因。
-- `snapshot.reachability.config`：所有目标共用的探测周期、超时和窗口大小。
-- `snapshot.reachability.targets`：相互独立的服务探测实例列表，每个目标包含自己的 `state`、`currentProbe` 和滚动统计。
-- `snapshot.reachability.targets[].currentProbe.http.statusCode`：目标返回的原始 HTTP 状态码；任何合法 HTTP 响应都表示网络可达。
-- `snapshot.changes.changedTargetIds`：本次发生语义变化的目标 ID 列表。
-- `snapshot.network.primaryInterfaceId`：主网络接口 ID。
-- `snapshot.network.interfaces`：网络接口列表。
+## 状态判断
 
-## 平台说明
+业务应按问题读取不同字段，不要使用 target 状态覆盖设备网络状态：
 
-首个版本目标平台为 Windows 和 macOS。Windows 会采集接口类型、IP、DNS 和默认网关，并提供 NCSI + Microsoft Connect Test 公网验证。macOS 会采集接口基础信息、通过 `SCDynamicStore` 监听网络变化，使用 `SCNetworkReachability` 作为系统提示，并通过 `NSURLSession` 请求 Apple captive 检测页完成公网验证和认证门户识别。两端共用网络指纹重置、失败收敛、退避调度和 target 自适应逻辑。MAC 地址默认不采集，相关字段通常返回 `null`。
+| 业务问题 | 推荐字段 | 主要取值 |
+| --- | --- | --- |
+| 设备是否存在可用网络接口 | `snapshot.state.overall` | `unknown`、`offline`、`online` |
+| 本地网络层是否连接 | `snapshot.state.network` | `unknown`、`disconnected`、`connected` |
+| 真实公网是否可用 | `snapshot.state.internet` | `unknown`、`available`、`degraded`、`unavailable`、`captivePortal` |
+| 某个服务是否可达 | `target.state.reachability` | `unknown`、`reachable`、`unreachable` |
+| 某个服务连接质量 | `target.state.quality` | `unknown`、`stable`、`unstable` |
+
+公网的详细判定证据位于 `snapshot.network.internet`：
+
+- `verified`：是否已有主动探测成功证据。
+- `systemHint`：Windows NCSI 或 macOS reachability 提示，只作为辅助证据。
+- `activeProbe`：平台公网主动探测结果和耗时。
+- `captivePortal`：是否识别到认证门户。
+- `consecutiveFailures`：连续公网探测失败次数。
+- `reason`：当前公网状态原因。
+
+每个 `reachability.targets[]` 都是独立实例，包含自己的最近探测、失败率、延迟、P95、抖动和连续失败次数。合法的 HTTP `100..=599` 响应均表示目标网络路径可达；例如 `401`、`404`、`500` 和 `503` 不会被当作网络连接失败。
+
+## 监控行为
+
+- Windows 和 macOS 的系统网络变化会立即唤醒 watcher，并重置公网与 target 探测挡位。
+- 主接口、地址、网关或 DNS 变化后，旧网络环境中的未完成探测结果会被丢弃。
+- 公网正常时最长每 30 秒重新验证一次。
+- 公网失败先按 3 秒快速确认，连续第三次失败后收敛为 `unavailable`，随后按 10、20、40、60 秒退避。
+- 公网明确不可用时 targets 暂停探测，不把设备断网累计为服务故障；公网恢复后立即恢复 target 探测。
+- 健康 target 以 `intervalMs` 为基础周期并加入抖动；每个 target 独立调度，最大并发数为 4。
+
+更完整的数据结构和状态机说明见 [中文设计文档](docs/design.md)。
+
+## 网络请求说明
+
+即使没有配置 `targets`，插件也会发送平台公网验证请求：
+
+| 平台 | 验证地址 | 用途 |
+| --- | --- | --- |
+| Windows | `http://www.msftconnecttest.com/connecttest.txt` | 验证公网并识别认证门户。 |
+| macOS | `http://captive.apple.com/hotspot-detect.html` | 验证公网并识别认证门户。 |
+
+配置 `targets` 后，插件还会按照配置周期访问对应 URL。生产环境应确认这些请求符合应用的隐私声明、企业代理和网络访问策略。
+
+## 错误
+
+JavaScript API 拒绝时返回包含 `code` 和 `message` 的结构化错误：
+
+| 错误码 | 说明 |
+| --- | --- |
+| `invalid_config` | 配置、URL、间隔或超时不合法。 |
+| `already_watching` | watcher 已经启动。 |
+| `not_watching` | watcher 尚未启动。 |
+| `unsupported_platform` | 当前平台不受支持。 |
+| `system_network_unavailable` | 系统网络信息读取失败。 |
+| `internal_error` | 插件内部错误。 |
+
+## 示例
+
+完整 Tauri 示例位于 [`examples/tauri-app`](examples/tauri-app)。
+
+```bash
+cd examples/tauri-app
+pnpm install
+pnpm tauri dev
+```
+
+如果开发端口 `1420` 已被占用，请先停止已有示例进程，或修改示例的 Vite/Tauri 开发端口配置。
+
+## 开发
+
+```bash
+# 构建 JavaScript bindings
+pnpm build
+
+# Rust 格式、静态检查与测试
+cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+
+# 构建示例前端和 Tauri Rust 应用
+pnpm --dir examples/tauri-app build
+cargo check --manifest-path examples/tauri-app/src-tauri/Cargo.toml
+```
+
+## 贡献
+
+提交变更前请确保 Rust、JavaScript bindings 和示例应用均构建通过，并为状态机或调度行为变化补充测试与中文设计文档。
+
+## 许可证
+
+当前仓库尚未在 `Cargo.toml`、`package.json` 或根目录许可证文件中声明许可证。正式发布前应补充明确的开源或商业许可证，并保持 Rust crate、npm 包和仓库声明一致。
