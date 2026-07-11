@@ -54,47 +54,25 @@ fn start_capture_options_use_video_defaults() {
         width: None,
         height: None,
         capture_cursor: None,
-        publisher: None,
     };
 
     assert_eq!(options.effective_fps(), 30);
     assert!(options.effective_capture_cursor());
-    assert_eq!(
-        options.effective_publisher_kind(),
-        PublisherKind::WebRtcLoopback
-    );
+    assert_eq!(options.effective_video_size(), (1280, 720));
 }
 
 #[test]
-fn start_capture_options_accept_agora_publisher_config() {
-    let options: StartCaptureOptions = serde_json::from_value(serde_json::json!({
-        "sourceId": "display:1",
-        "sourceKind": "display",
-        "publisher": {
-            "kind": "agora",
-            "agora": {
-                "appId": "app-id",
-                "channel": "demo-channel",
-                "uid": 42,
-                "token": "token"
-            }
-        }
-    }))
-    .expect("deserialize agora publisher options");
+fn start_capture_options_normalize_video_size_for_h264() {
+    let options = StartCaptureOptions {
+        source_id: "window:abc".to_string(),
+        source_kind: CaptureSourceKind::Window,
+        fps: Some(60),
+        width: Some(853),
+        height: Some(481),
+        capture_cursor: Some(true),
+    };
 
-    assert_eq!(options.effective_publisher_kind(), PublisherKind::Agora);
-    assert_eq!(
-        options.publisher,
-        Some(PublisherOptions {
-            kind: PublisherKind::Agora,
-            agora: Some(AgoraPublisherOptions {
-                app_id: "app-id".to_string(),
-                channel: "demo-channel".to_string(),
-                uid: Some(42),
-                token: Some("token".to_string()),
-            }),
-        })
-    );
+    assert_eq!(options.effective_video_size(), (852, 480));
 }
 
 #[test]

@@ -53,6 +53,30 @@ fn excludes_known_system_ui_by_default() {
             48,
             11,
         ),
+        window(
+            "window:settings-system",
+            "设置",
+            "SystemSettings",
+            1536,
+            1200,
+            13,
+        ),
+        window(
+            "window:settings-host",
+            "设置",
+            "ApplicationFrameHost",
+            1558,
+            1212,
+            14,
+        ),
+        window(
+            "window:text-input",
+            "Windows 输入体验",
+            "TextInputHost",
+            2560,
+            1440,
+            15,
+        ),
         window("window:browser", "Planning", "Browser", 1280, 900, 12),
     ];
 

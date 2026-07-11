@@ -1,0 +1,61 @@
+[package]
+name = "tauri-plugin-net-watcher"
+version = "0.1.0"
+authors = [ "You" ]
+description = ""
+edition = "2021"
+rust-version = "1.77.2"
+exclude = ["/examples", "/dist-js", "/guest-js", "/node_modules"]
+links = "tauri-plugin-net-watcher"
+
+[dependencies]
+tauri = { version = "2.10.0" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3"
+uuid = { version = "1", features = ["v4", "serde"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "sync", "time"] }
+url = "2"
+native-tls = "0.2"
+tokio-native-tls = "0.3"
+get_if_addrs = "0.5"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+  "Foundation",
+  "Networking_Connectivity",
+  "Web_Http",
+  "Web_Http_Filters",
+] }
+windows-sys = { version = "0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_NetworkManagement_Ndis",
+  "Win32_Networking_WinSock",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+core-foundation-sys = "0.8"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+  "NSData",
+  "NSDate",
+  "NSError",
+  "NSString",
+  "NSURL",
+  "NSURLCache",
+  "NSURLRequest",
+  "NSURLResponse",
+  "NSURLSession",
+  "block2",
+  "std",
+] }
+system-configuration = "0.7"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[build-dependencies]
+tauri-plugin = { version = "2.5.3", features = ["build"] }

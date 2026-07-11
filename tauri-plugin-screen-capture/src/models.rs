@@ -89,29 +89,6 @@ impl Default for ListSourcesOptions {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum PublisherKind {
-    WebRtcLoopback,
-    Agora,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgoraPublisherOptions {
-    pub app_id: String,
-    pub channel: String,
-    pub uid: Option<u32>,
-    pub token: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PublisherOptions {
-    pub kind: PublisherKind,
-    pub agora: Option<AgoraPublisherOptions>,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartCaptureOptions {
@@ -121,7 +98,6 @@ pub struct StartCaptureOptions {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub capture_cursor: Option<bool>,
-    pub publisher: Option<PublisherOptions>,
 }
 
 impl StartCaptureOptions {
@@ -133,12 +109,23 @@ impl StartCaptureOptions {
         self.capture_cursor.unwrap_or(true)
     }
 
-    pub fn effective_publisher_kind(&self) -> PublisherKind {
-        self.publisher
-            .as_ref()
-            .map(|publisher| publisher.kind)
-            .unwrap_or(PublisherKind::WebRtcLoopback)
+    pub fn effective_video_size(&self) -> (u32, u32) {
+        (
+            even_video_dimension(self.width.unwrap_or(1280)),
+            even_video_dimension(self.height.unwrap_or(720)),
+        )
     }
+
+    pub fn with_effective_video_size(mut self) -> Self {
+        let (width, height) = self.effective_video_size();
+        self.width = Some(width);
+        self.height = Some(height);
+        self
+    }
+}
+
+fn even_video_dimension(value: u32) -> u32 {
+    value.max(2) & !1
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -208,7 +195,6 @@ pub enum CaptureErrorCode {
     SourceUnavailable,
     CaptureStartFailed,
     CaptureRuntimeFailed,
-    PublisherUnsupported,
     #[serde(rename = "webrtcNegotiationFailed")]
     WebRtcNegotiationFailed,
     #[serde(rename = "webrtcTrackFailed")]

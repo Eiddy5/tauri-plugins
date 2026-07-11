@@ -6,9 +6,13 @@ mod macos;
 mod windows;
 
 use async_trait::async_trait;
+use tokio::sync::watch;
 
 use crate::{
-    models::{CaptureSource, ListSourcesOptions, PermissionStatus, StartCaptureOptions},
+    models::{
+        CaptureErrorPayload, CaptureSource, ListSourcesOptions, PermissionStatus,
+        StartCaptureOptions,
+    },
     pipeline::frame::VideoFrame,
     Result,
 };
@@ -41,4 +45,8 @@ pub trait RunningCapture: Send + Sync {
     async fn pause(&self) -> Result<()>;
     async fn resume(&self) -> Result<()>;
     async fn stop(&self) -> Result<()>;
+
+    fn finish_receiver(&self) -> Option<watch::Receiver<Option<CaptureErrorPayload>>> {
+        None
+    }
 }

@@ -4,6 +4,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use tokio::sync::watch;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -11,14 +12,13 @@ use crate::{
     capture::{CaptureBackend, RunningCapture},
     error::Error,
     models::{
-        Capabilities, CaptureErrorCode, CaptureSession, CaptureSource, CaptureStats, CaptureStatus,
-        ListSourcesOptions, PermissionStatus, PublisherKind, StartCaptureOptions, WebRtcAnswer,
-        WebRtcIceCandidate, WebRtcOffer,
+        Capabilities, CaptureErrorCode, CaptureErrorPayload, CaptureSession, CaptureSource,
+        CaptureStats, CaptureStatus, ListSourcesOptions, PermissionStatus, StartCaptureOptions,
+        WebRtcAnswer, WebRtcIceCandidate, WebRtcOffer,
     },
+    overlay::{DefaultShareOverlayFactory, OverlayTarget, ShareOverlay, ShareOverlayFactory},
     pipeline::CapturePipeline,
-    publisher::{
-        AgoraPublisher, CapturePublisher, CapturePublisherFactory, PublisherBundle, WebRtcPublisher,
-    },
+    publisher::{CapturePublisher, WebRtcPublisher},
     webrtc::signaling::WebRtcSignalingState,
     Result,
 };
@@ -28,13 +28,24 @@ struct SessionRecord {
     publisher: Arc<dyn CapturePublisher>,
     pipeline: Arc<CapturePipeline>,
     running_capture: Arc<dyn RunningCapture>,
-    webrtc_signaling: Option<Arc<WebRtcSignalingState>>,
+    overlay: Arc<dyn ShareOverlay>,
+    webrtc_signaling: Arc<WebRtcSignalingState>,
 }
 
 pub struct ScreenCaptureState {
     backend: Arc<dyn CaptureBackend>,
-    publisher_factory: Arc<dyn CapturePublisherFactory>,
-    sessions: Mutex<HashMap<String, SessionRecord>>,
+    overlay_factory: Arc<dyn ShareOverlayFactory>,
+    sessions: Arc<Mutex<HashMap<String, SessionRecord>>>,
+}
+
+struct SharedShareOverlayFactory {
+    overlay: Arc<dyn ShareOverlay>,
+}
+
+impl ShareOverlayFactory for SharedShareOverlayFactory {
+    fn create_overlay(&self) -> Arc<dyn ShareOverlay> {
+        Arc::clone(&self.overlay)
+    }
 }
 
 impl Default for ScreenCaptureState {
@@ -52,28 +63,27 @@ impl Default for ScreenCaptureState {
 
 impl ScreenCaptureState {
     pub fn with_backend(backend: Arc<dyn CaptureBackend>) -> Self {
-        Self::with_backend_and_publisher_factory(backend, Arc::new(DefaultPublisherFactory))
+        Self::with_backend_and_overlay_factory(backend, Arc::new(DefaultShareOverlayFactory))
     }
 
-    pub fn with_publisher_factory(publisher_factory: Arc<dyn CapturePublisherFactory>) -> Self {
-        #[cfg(target_os = "macos")]
-        let backend: Arc<dyn CaptureBackend> = Arc::new(crate::capture::MacOsCaptureBackend);
-        #[cfg(target_os = "windows")]
-        let backend: Arc<dyn CaptureBackend> = Arc::new(crate::capture::WindowsCaptureBackend);
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        let backend: Arc<dyn CaptureBackend> = Arc::new(crate::capture::DummyCaptureBackend);
-
-        Self::with_backend_and_publisher_factory(backend, publisher_factory)
-    }
-
-    pub fn with_backend_and_publisher_factory(
+    pub fn with_backend_and_overlay(
         backend: Arc<dyn CaptureBackend>,
-        publisher_factory: Arc<dyn CapturePublisherFactory>,
+        overlay: Arc<dyn ShareOverlay>,
+    ) -> Self {
+        Self::with_backend_and_overlay_factory(
+            backend,
+            Arc::new(SharedShareOverlayFactory { overlay }),
+        )
+    }
+
+    pub fn with_backend_and_overlay_factory(
+        backend: Arc<dyn CaptureBackend>,
+        overlay_factory: Arc<dyn ShareOverlayFactory>,
     ) -> Self {
         Self {
             backend,
-            publisher_factory,
-            sessions: Mutex::new(HashMap::new()),
+            overlay_factory,
+            sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -101,9 +111,11 @@ impl ScreenCaptureState {
     }
 
     pub async fn start_capture(&self, options: StartCaptureOptions) -> Result<CaptureSession> {
-        let bundle = self.publisher_factory.create(&options).await?;
-        let publisher = bundle.publisher;
-        let webrtc_signaling = bundle.webrtc_signaling;
+        let options = options.with_effective_video_size();
+        let signaling = WebRtcSignalingState::new().await?;
+        let publisher = WebRtcPublisher::new(signaling);
+        let webrtc_signaling = publisher.signaling();
+        let publisher: Arc<dyn CapturePublisher> = Arc::new(publisher);
         let pipeline = Arc::new(CapturePipeline::new(Arc::clone(&publisher)));
 
         let running_capture = match self
@@ -118,8 +130,22 @@ impl ScreenCaptureState {
             }
         };
         let running_capture: Arc<dyn RunningCapture> = running_capture.into();
+        let finish_receiver = running_capture.finish_receiver();
 
         if let Err(error) = publisher.start(options.clone()).await {
+            let _ = running_capture.stop().await;
+            let _ = publisher.stop().await;
+            return Err(error);
+        }
+
+        let overlay = self.overlay_factory.create_overlay();
+        if let Err(error) = overlay
+            .start(OverlayTarget {
+                source_id: options.source_id.clone(),
+                source_kind: options.source_kind,
+            })
+            .await
+        {
             let _ = running_capture.stop().await;
             let _ = publisher.stop().await;
             return Err(error);
@@ -141,15 +167,24 @@ impl ScreenCaptureState {
                 publisher,
                 pipeline,
                 running_capture,
+                overlay,
                 webrtc_signaling,
             },
         );
+
+        if let Some(finish_receiver) = finish_receiver {
+            spawn_capture_finish_monitor(
+                Arc::clone(&self.sessions),
+                session.session_id.clone(),
+                finish_receiver,
+            );
+        }
 
         Ok(session)
     }
 
     pub async fn pause_capture(&self, session_id: &str) -> Result<()> {
-        let (publisher, running_capture) = {
+        let (publisher, running_capture, overlay) = {
             let sessions = self.sessions.lock().await;
             sessions
                 .get(session_id)
@@ -157,6 +192,7 @@ impl ScreenCaptureState {
                     (
                         Arc::clone(&record.publisher),
                         Arc::clone(&record.running_capture),
+                        Arc::clone(&record.overlay),
                     )
                 })
                 .ok_or_else(invalid_session_error)?
@@ -164,6 +200,9 @@ impl ScreenCaptureState {
 
         running_capture.pause().await?;
         publisher.pause().await?;
+        if let Err(error) = overlay.hide().await {
+            eprintln!("[screen-capture] failed to hide share overlay: {error}");
+        }
 
         let mut sessions = self.sessions.lock().await;
         let record = sessions
@@ -174,7 +213,7 @@ impl ScreenCaptureState {
     }
 
     pub async fn resume_capture(&self, session_id: &str) -> Result<()> {
-        let (publisher, running_capture) = {
+        let (publisher, running_capture, overlay) = {
             let sessions = self.sessions.lock().await;
             sessions
                 .get(session_id)
@@ -182,6 +221,7 @@ impl ScreenCaptureState {
                     (
                         Arc::clone(&record.publisher),
                         Arc::clone(&record.running_capture),
+                        Arc::clone(&record.overlay),
                     )
                 })
                 .ok_or_else(invalid_session_error)?
@@ -189,6 +229,9 @@ impl ScreenCaptureState {
 
         running_capture.resume().await?;
         publisher.resume().await?;
+        if let Err(error) = overlay.show().await {
+            eprintln!("[screen-capture] failed to show share overlay: {error}");
+        }
 
         let mut sessions = self.sessions.lock().await;
         let record = sessions
@@ -199,7 +242,7 @@ impl ScreenCaptureState {
     }
 
     pub async fn stop_capture(&self, session_id: &str) -> Result<()> {
-        let (publisher, running_capture) = {
+        let (publisher, running_capture, overlay) = {
             let sessions = self.sessions.lock().await;
             sessions
                 .get(session_id)
@@ -207,6 +250,7 @@ impl ScreenCaptureState {
                     (
                         Arc::clone(&record.publisher),
                         Arc::clone(&record.running_capture),
+                        Arc::clone(&record.overlay),
                     )
                 })
                 .ok_or_else(invalid_session_error)?
@@ -214,6 +258,9 @@ impl ScreenCaptureState {
 
         running_capture.stop().await?;
         publisher.stop().await?;
+        if let Err(error) = overlay.stop().await {
+            eprintln!("[screen-capture] failed to stop share overlay: {error}");
+        }
         self.sessions
             .lock()
             .await
@@ -286,46 +333,7 @@ impl ScreenCaptureState {
     async fn webrtc_signaling(&self, session_id: &str) -> Result<Arc<WebRtcSignalingState>> {
         let sessions = self.sessions.lock().await;
         let record = sessions.get(session_id).ok_or_else(invalid_session_error)?;
-        record.webrtc_signaling.as_ref().cloned().ok_or_else(|| {
-            Error::new(
-                CaptureErrorCode::WebRtcNegotiationFailed,
-                "capture session was not created with a WebRTC publisher",
-                true,
-            )
-        })
-    }
-}
-
-struct DefaultPublisherFactory;
-
-#[async_trait::async_trait]
-impl CapturePublisherFactory for DefaultPublisherFactory {
-    async fn create(&self, options: &StartCaptureOptions) -> Result<PublisherBundle> {
-        match options.effective_publisher_kind() {
-            PublisherKind::WebRtcLoopback => {
-                let signaling = WebRtcSignalingState::new().await?;
-                let publisher = WebRtcPublisher::new(signaling);
-                let webrtc_signaling = publisher.signaling();
-                Ok(PublisherBundle::new(
-                    Arc::new(publisher),
-                    Some(webrtc_signaling),
-                ))
-            }
-            PublisherKind::Agora => {
-                let agora = options
-                    .publisher
-                    .as_ref()
-                    .and_then(|publisher| publisher.agora.as_ref())
-                    .ok_or_else(|| {
-                        Error::new(
-                            CaptureErrorCode::PublisherUnsupported,
-                            "Agora publisher requires appId and channel options",
-                            true,
-                        )
-                    })?;
-                Err(AgoraPublisher::sdk_unavailable_error(agora))
-            }
-        }
+        Ok(Arc::clone(&record.webrtc_signaling))
     }
 }
 
@@ -342,4 +350,50 @@ fn invalid_session_error() -> Error {
         "capture session was not found",
         true,
     )
+}
+
+fn spawn_capture_finish_monitor(
+    sessions: Arc<Mutex<HashMap<String, SessionRecord>>>,
+    session_id: String,
+    finish_receiver: watch::Receiver<Option<CaptureErrorPayload>>,
+) {
+    tokio::spawn(async move {
+        let finish = wait_for_capture_finish(finish_receiver).await;
+        let record = sessions.lock().await.remove(&session_id);
+
+        if let Some(record) = record {
+            if let Some(payload) = finish {
+                eprintln!(
+                    "[screen-capture] capture session {} finished: {}",
+                    session_id, payload.message
+                );
+            }
+
+            if let Err(error) = record.running_capture.stop().await {
+                eprintln!("[screen-capture] failed to stop finished capture source: {error}");
+            }
+            if let Err(error) = record.publisher.stop().await {
+                eprintln!(
+                    "[screen-capture] failed to stop publisher for finished capture: {error}"
+                );
+            }
+            if let Err(error) = record.overlay.stop().await {
+                eprintln!("[screen-capture] failed to stop overlay for finished capture: {error}");
+            }
+        }
+    });
+}
+
+async fn wait_for_capture_finish(
+    mut finish_receiver: watch::Receiver<Option<CaptureErrorPayload>>,
+) -> Option<CaptureErrorPayload> {
+    loop {
+        if let Some(payload) = finish_receiver.borrow().clone() {
+            return Some(payload);
+        }
+
+        if finish_receiver.changed().await.is_err() {
+            return None;
+        }
+    }
 }

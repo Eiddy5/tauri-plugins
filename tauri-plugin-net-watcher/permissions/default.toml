@@ -1,0 +1,8 @@
+[default]
+description = "Default permissions for the plugin"
+permissions = [
+  "allow-get-snapshot",
+  "allow-start-watching",
+  "allow-stop-watching",
+  "allow-get-config",
+]
