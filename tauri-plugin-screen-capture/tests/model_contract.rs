@@ -54,6 +54,7 @@ fn start_capture_options_use_video_defaults() {
         width: None,
         height: None,
         capture_cursor: None,
+        publisher: None,
     };
 
     assert_eq!(options.effective_fps(), 30);
@@ -70,6 +71,7 @@ fn start_capture_options_normalize_video_size_for_h264() {
         width: Some(853),
         height: Some(481),
         capture_cursor: Some(true),
+        publisher: None,
     };
 
     assert_eq!(options.effective_video_size(), (852, 480));

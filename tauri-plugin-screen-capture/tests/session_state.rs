@@ -239,6 +239,7 @@ fn start_options() -> StartCaptureOptions {
         width: Some(1280),
         height: Some(720),
         capture_cursor: Some(true),
+        publisher: None,
     }
 }
 
@@ -555,6 +556,7 @@ async fn state_normalizes_capture_size_before_starting_backend() {
             width: Some(853),
             height: Some(481),
             capture_cursor: Some(true),
+            publisher: None,
         })
         .await
         .expect("start");

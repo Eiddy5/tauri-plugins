@@ -1,7 +1,7 @@
 {
-  "productName": "tauri-app",
+  "productName": "Screen Capture Performance Lab",
   "version": "0.1.0",
-  "identifier": "com.tauri.dev",
+  "identifier": "com.example.screen-capture-performance",
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
@@ -18,7 +18,7 @@
         "fullscreen": false,
         "height": 600,
         "resizable": true,
-        "title": "tauri-app",
+        "title": "Screen Capture Performance Lab",
         "width": 800
       }
     ]

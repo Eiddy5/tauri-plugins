@@ -219,6 +219,19 @@ use windows::Win32::UI::WindowsAndMessaging::{
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+    use windows::{
+        core::PCWSTR,
+        Win32::{
+            Foundation::{HWND, RECT},
+            UI::WindowsAndMessaging::{
+                CreateWindowExW, DestroyWindow, GetWindow, GetWindowRect, IsWindowVisible,
+                SetWindowPos, ShowWindow, GW_HWNDPREV, HMENU, HWND_TOP, SWP_NOACTIVATE,
+                SWP_SHOWWINDOW, SW_MINIMIZE, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+            },
+        },
+    };
+
+    use super::util::wide;
 
     trait AmbiguousIfSend<A> {
         fn assert_not_send() {}
@@ -258,6 +271,109 @@ mod tests {
             OverlayFocus::OwnerOnce(0x2a)
         );
         assert_eq!(OverlayFocus::none(), OverlayFocus::None);
+    }
+
+    #[test]
+    #[ignore = "requires an interactive Windows desktop"]
+    fn owned_overlay_tracks_real_window_geometry_and_z_order() {
+        let class_name = wide("STATIC");
+        let owner_title = wide("screen-capture-overlay-owner-test");
+        let cover_title = wide("screen-capture-overlay-cover-test");
+        let owner = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                PCWSTR(class_name.as_ptr()),
+                PCWSTR(owner_title.as_ptr()),
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                100,
+                120,
+                640,
+                480,
+                None,
+                Some(HMENU::default()),
+                None,
+                None,
+            )
+        }
+        .expect("create real overlay owner window");
+        let cover = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                PCWSTR(class_name.as_ptr()),
+                PCWSTR(cover_title.as_ptr()),
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                80,
+                100,
+                680,
+                520,
+                None,
+                Some(HMENU::default()),
+                None,
+                None,
+            )
+        }
+        .expect("create real occluding window");
+        let overlay = OverlayWindow::new(0x22C55E, OverlayPlacement::for_window(owner.0 as usize))
+            .expect("create owned overlay");
+        overlay.position(96, 116, 648, 4).expect("position overlay");
+        overlay.show();
+
+        let mut rect = RECT::default();
+        unsafe { GetWindowRect(overlay.hwnd(), &mut rect) }.expect("read overlay bounds");
+        assert_eq!(
+            (rect.left, rect.top, rect.right, rect.bottom),
+            (96, 116, 744, 120)
+        );
+
+        unsafe {
+            SetWindowPos(
+                owner,
+                Some(HWND_TOP),
+                100,
+                120,
+                640,
+                480,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            )
+            .expect("raise owner group");
+            SetWindowPos(
+                cover,
+                Some(HWND_TOP),
+                80,
+                100,
+                680,
+                520,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            )
+            .expect("raise occluding window");
+        }
+        assert!(window_is_above(cover, overlay.hwnd()));
+
+        unsafe {
+            let _ = ShowWindow(owner, SW_MINIMIZE);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!unsafe { IsWindowVisible(overlay.hwnd()).as_bool() });
+
+        drop(overlay);
+        unsafe {
+            let _ = DestroyWindow(cover);
+            let _ = DestroyWindow(owner);
+        }
+    }
+
+    fn window_is_above(expected_above: HWND, lower: HWND) -> bool {
+        let mut current = lower;
+        for _ in 0..512 {
+            let Ok(next) = (unsafe { GetWindow(current, GW_HWNDPREV) }) else {
+                return false;
+            };
+            current = next;
+            if current == expected_above {
+                return true;
+            }
+        }
+        false
     }
 
     #[test]

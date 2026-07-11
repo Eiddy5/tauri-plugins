@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::{collections::VecDeque, time::Instant};
 use tokio::sync::Mutex;
 
 use crate::{
@@ -26,6 +27,7 @@ struct WebRtcPublisherState {
     lifecycle: WebRtcPublisherLifecycle,
     stats: CaptureStats,
     last_keyframe_request_seen: u64,
+    published_at: VecDeque<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -70,6 +72,7 @@ impl CapturePublisher for WebRtcPublisher {
             ..CaptureStats::default()
         };
         state.last_keyframe_request_seen = self.signaling.pending_keyframe_requests();
+        state.published_at.clear();
         drop(state);
 
         if let Some(frame) = self.pending_frame.lock().await.take() {
@@ -102,6 +105,7 @@ impl CapturePublisher for WebRtcPublisher {
                 self.h264_sender.send_sample(sample).await?;
                 let mut state = self.state.lock().await;
                 state.stats.frames_published += 1;
+                record_published_frame(&mut state, Instant::now());
                 if state.stats.frames_published == 1 || state.stats.frames_published % 30 == 0 {
                     eprintln!(
                         "[screen-capture] WebRTC published frame count={}",
@@ -132,6 +136,8 @@ impl CapturePublisher for WebRtcPublisher {
         let mut state = self.state.lock().await;
         state.lifecycle = WebRtcPublisherLifecycle::Paused;
         state.stats.started = false;
+        state.stats.fps = 0.0;
+        state.published_at.clear();
         Ok(())
     }
 
@@ -154,8 +160,26 @@ impl CapturePublisher for WebRtcPublisher {
     }
 
     async fn stats(&self) -> Result<CaptureStats> {
-        Ok(self.state.lock().await.stats.clone())
+        let mut state = self.state.lock().await;
+        refresh_published_fps(&mut state, Instant::now());
+        Ok(state.stats.clone())
     }
+}
+
+fn record_published_frame(state: &mut WebRtcPublisherState, now: Instant) {
+    state.published_at.push_back(now);
+    refresh_published_fps(state, now);
+}
+
+fn refresh_published_fps(state: &mut WebRtcPublisherState, now: Instant) {
+    while state
+        .published_at
+        .front()
+        .is_some_and(|timestamp| now.duration_since(*timestamp).as_secs_f64() > 1.0)
+    {
+        state.published_at.pop_front();
+    }
+    state.stats.fps = state.published_at.len() as f64;
 }
 
 impl WebRtcPublisher {

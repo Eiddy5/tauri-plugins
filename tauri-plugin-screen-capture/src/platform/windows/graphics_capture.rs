@@ -9,7 +9,14 @@ use std::{
 };
 
 use async_trait::async_trait;
-use tokio::{sync::watch, task::JoinHandle};
+use fast_image_resize::{
+    images::{Image, ImageRef},
+    FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer,
+};
+use tokio::{
+    sync::{mpsc, watch},
+    task::JoinHandle,
+};
 use windows::Win32::{
     Foundation::HWND,
     Graphics::Gdi::{
@@ -53,8 +60,6 @@ const WINDOW_THUMBNAIL_WGC_FALLBACK_LIMIT: usize = 3;
 
 static WINDOW_THUMBNAIL_CACHE: OnceLock<Mutex<WindowThumbnailCache>> = OnceLock::new();
 
-type SharedFrameSlot = Arc<Mutex<Option<Result<VideoFrame>>>>;
-
 pub fn list_sources(options: ListSourcesOptions) -> Result<Vec<CaptureSource>> {
     let mut sources = Vec::new();
 
@@ -81,34 +86,21 @@ pub fn start_capture(
     options: StartCaptureOptions,
     consumer: Box<dyn FrameConsumer>,
 ) -> Result<Box<dyn RunningCapture>> {
-    let fps = options.effective_fps();
     let paused = Arc::new(AtomicBool::new(false));
-    let frame_slot = Arc::new(Mutex::new(None));
+    let (frame_sender, mut frame_receiver) = mpsc::channel(1);
     let (finish_sender, _) = watch::channel(None);
-    let control = start_windows_capture(&options, Arc::clone(&paused), Arc::clone(&frame_slot))?;
-    let frame_interval = Duration::from_secs_f64(1.0 / f64::from(fps));
-    let task_finish_sender = finish_sender.clone();
+    let control = start_windows_capture(
+        &options,
+        Arc::clone(&paused),
+        frame_sender,
+        finish_sender.clone(),
+    )?;
 
     let task = tokio::spawn(async move {
-        let mut tick = tokio::time::interval(frame_interval);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-        loop {
-            tick.tick().await;
-            let next_frame = frame_slot.lock().ok().and_then(|mut slot| slot.take());
-            match next_frame {
-                Some(Ok(mut frame)) => {
-                    frame.timestamp_ns = now_ns();
-                    if let Err(error) = consumer.push_frame(frame).await {
-                        eprintln!("[screen-capture] Windows frame publish failed: {error:?}");
-                    }
-                }
-                Some(Err(error)) => {
-                    eprintln!("[screen-capture] Windows frame capture failed: {error:?}");
-                    let _ = task_finish_sender.send(Some(error.payload()));
-                    break;
-                }
-                None => {}
+        while let Some(mut frame) = frame_receiver.recv().await {
+            frame.timestamp_ns = now_ns();
+            if let Err(error) = consumer.push_frame(frame).await {
+                eprintln!("[screen-capture] Windows frame publish failed: {error:?}");
             }
         }
     });
@@ -156,7 +148,6 @@ impl RunningCapture for WindowsRunningCapture {
 impl WindowsRunningCapture {
     fn stop_capture(&self) -> Result<()> {
         self.paused.store(true, Ordering::SeqCst);
-        self.task.abort();
 
         let control = self
             .control
@@ -166,6 +157,7 @@ impl WindowsRunningCapture {
         if let Some(control) = control {
             control.stop().map_err(capture_control_error)?;
         }
+        self.task.abort();
 
         Ok(())
     }
@@ -174,24 +166,26 @@ impl WindowsRunningCapture {
 impl Drop for WindowsRunningCapture {
     fn drop(&mut self) {
         self.paused.store(true, Ordering::SeqCst);
-        self.task.abort();
 
         if let Ok(mut control) = self.control.lock() {
             if let Some(control) = control.take() {
                 let _ = control.stop();
             }
         }
+        self.task.abort();
     }
 }
 
 struct WindowsCaptureHandler {
-    frame_slot: SharedFrameSlot,
+    frame_sender: mpsc::Sender<VideoFrame>,
+    finish_sender: watch::Sender<Option<crate::models::CaptureErrorPayload>>,
     paused: Arc<AtomicBool>,
     output_size: Option<(u32, u32)>,
 }
 
 struct WindowsCaptureFlags {
-    frame_slot: SharedFrameSlot,
+    frame_sender: mpsc::Sender<VideoFrame>,
+    finish_sender: watch::Sender<Option<crate::models::CaptureErrorPayload>>,
     paused: Arc<AtomicBool>,
     output_size: Option<(u32, u32)>,
 }
@@ -202,7 +196,8 @@ impl GraphicsCaptureApiHandler for WindowsCaptureHandler {
 
     fn new(ctx: Context<Self::Flags>) -> std::result::Result<Self, Self::Error> {
         Ok(Self {
-            frame_slot: ctx.flags.frame_slot,
+            frame_sender: ctx.flags.frame_sender,
+            finish_sender: ctx.flags.finish_sender,
             paused: ctx.flags.paused,
             output_size: ctx.flags.output_size,
         })
@@ -217,31 +212,32 @@ impl GraphicsCaptureApiHandler for WindowsCaptureHandler {
             return Ok(());
         }
 
-        if self
-            .frame_slot
-            .lock()
-            .is_ok_and(|slot| slot.as_ref().map(|frame| frame.is_ok()).unwrap_or(false))
-        {
+        if self.frame_sender.capacity() == 0 {
             return Ok(());
         }
 
-        let video_frame = frame_to_video_frame(frame, self.output_size);
-        if let Ok(mut slot) = self.frame_slot.lock() {
-            if slot.is_none() {
-                *slot = Some(video_frame);
+        match frame_to_video_frame(frame, self.output_size) {
+            Ok(video_frame) => match self.frame_sender.try_send(video_frame) {
+                Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    return Err("Windows capture frame consumer stopped".to_string());
+                }
+            },
+            Err(error) => {
+                let _ = self.finish_sender.send(Some(error.payload()));
+                return Err(error.to_string());
             }
         }
         Ok(())
     }
 
     fn on_closed(&mut self) -> std::result::Result<(), Self::Error> {
-        if let Ok(mut slot) = self.frame_slot.lock() {
-            *slot = Some(Err(Error::new(
-                CaptureErrorCode::SourceUnavailable,
-                "Windows capture source was closed",
-                true,
-            )));
-        }
+        let error = Error::new(
+            CaptureErrorCode::SourceUnavailable,
+            "Windows capture source was closed",
+            true,
+        );
+        let _ = self.finish_sender.send(Some(error.payload()));
         Ok(())
     }
 }
@@ -344,10 +340,12 @@ impl GraphicsCaptureApiHandler for ThumbnailCaptureHandler {
 fn start_windows_capture(
     options: &StartCaptureOptions,
     paused: Arc<AtomicBool>,
-    frame_slot: SharedFrameSlot,
+    frame_sender: mpsc::Sender<VideoFrame>,
+    finish_sender: watch::Sender<Option<crate::models::CaptureErrorPayload>>,
 ) -> Result<WindowsCaptureControl> {
     let flags = WindowsCaptureFlags {
-        frame_slot,
+        frame_sender,
+        finish_sender,
         paused,
         output_size: requested_output_size(options),
     };
@@ -391,11 +389,8 @@ fn frame_to_video_frame(frame: &mut Frame, output_size: Option<(u32, u32)>) -> R
     let data = buffer.as_nopadding_buffer(&mut packed);
     let (width, height, data) = if let Some((target_width, target_height)) = output_size {
         if target_width != width || target_height != height {
-            (
-                target_width,
-                target_height,
-                resize_bgra_nearest(data, width, height, target_width, target_height),
-            )
+            let resized = resize_bgra_hamming(data, width, height, target_width, target_height)?;
+            (target_width, target_height, resized)
         } else {
             (width, height, data.to_vec())
         }
@@ -985,25 +980,24 @@ fn even_dimension(value: u32) -> u32 {
     value.max(2) & !1
 }
 
-fn resize_bgra_nearest(
+fn resize_bgra_hamming(
     input: &[u8],
     source_width: u32,
     source_height: u32,
     target_width: u32,
     target_height: u32,
-) -> Vec<u8> {
-    let mut output = vec![0u8; target_width as usize * target_height as usize * 4];
-    for y in 0..target_height {
-        let source_y = y.saturating_mul(source_height) / target_height;
-        for x in 0..target_width {
-            let source_x = x.saturating_mul(source_width) / target_width;
-            let source_offset = (source_y as usize * source_width as usize + source_x as usize) * 4;
-            let target_offset = (y as usize * target_width as usize + x as usize) * 4;
-            output[target_offset..target_offset + 4]
-                .copy_from_slice(&input[source_offset..source_offset + 4]);
-        }
-    }
-    output
+) -> Result<Vec<u8>> {
+    let source = ImageRef::new(source_width, source_height, input, PixelType::U8x4)
+        .map_err(runtime_error)?;
+    let mut destination = Image::new(target_width, target_height, PixelType::U8x4);
+    let mut resizer = Resizer::new();
+    let options = ResizeOptions::new()
+        .resize_alg(ResizeAlg::Convolution(FilterType::Hamming))
+        .use_alpha(false);
+    resizer
+        .resize(&source, &mut destination, &options)
+        .map_err(runtime_error)?;
+    Ok(destination.into_vec())
 }
 
 fn dxgi_to_rgba(data: &[u8], format: DxgiDuplicationFormat) -> Option<Vec<u8>> {
@@ -1135,6 +1129,26 @@ mod tests {
             capture_draw_border_settings(),
             DrawBorderSettings::WithoutBorder
         );
+    }
+
+    #[test]
+    fn hamming_downscale_antialiases_high_frequency_screen_edges() {
+        let mut input = Vec::new();
+        for _ in 0..2 {
+            for value in [0, 255, 0, 255] {
+                input.extend_from_slice(&[value, value, value, 255]);
+            }
+        }
+
+        let output = resize_bgra_hamming(&input, 4, 2, 2, 2).expect("resize BGRA test pattern");
+
+        assert_eq!(output.len(), 2 * 2 * 4);
+        assert!(output.chunks_exact(4).all(|pixel| {
+            (1..=254).contains(&pixel[0])
+                && pixel[0] == pixel[1]
+                && pixel[1] == pixel[2]
+                && pixel[3] == 255
+        }));
     }
 
     #[test]

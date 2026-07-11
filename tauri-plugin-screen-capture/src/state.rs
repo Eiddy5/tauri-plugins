@@ -13,12 +13,14 @@ use crate::{
     error::Error,
     models::{
         Capabilities, CaptureErrorCode, CaptureErrorPayload, CaptureSession, CaptureSource,
-        CaptureStats, CaptureStatus, ListSourcesOptions, PermissionStatus, StartCaptureOptions,
-        WebRtcAnswer, WebRtcIceCandidate, WebRtcOffer,
+        CaptureStats, CaptureStatus, ListSourcesOptions, PermissionStatus, PublisherKind,
+        StartCaptureOptions, WebRtcAnswer, WebRtcIceCandidate, WebRtcOffer,
     },
     overlay::{DefaultShareOverlayFactory, OverlayTarget, ShareOverlay, ShareOverlayFactory},
     pipeline::CapturePipeline,
-    publisher::{CapturePublisher, WebRtcPublisher},
+    publisher::{
+        AgoraPublisher, CapturePublisher, CapturePublisherFactory, PublisherBundle, WebRtcPublisher,
+    },
     webrtc::signaling::WebRtcSignalingState,
     Result,
 };
@@ -29,12 +31,13 @@ struct SessionRecord {
     pipeline: Arc<CapturePipeline>,
     running_capture: Arc<dyn RunningCapture>,
     overlay: Arc<dyn ShareOverlay>,
-    webrtc_signaling: Arc<WebRtcSignalingState>,
+    webrtc_signaling: Option<Arc<WebRtcSignalingState>>,
 }
 
 pub struct ScreenCaptureState {
     backend: Arc<dyn CaptureBackend>,
     overlay_factory: Arc<dyn ShareOverlayFactory>,
+    publisher_factory: Arc<dyn CapturePublisherFactory>,
     sessions: Arc<Mutex<HashMap<String, SessionRecord>>>,
 }
 
@@ -50,29 +53,35 @@ impl ShareOverlayFactory for SharedShareOverlayFactory {
 
 impl Default for ScreenCaptureState {
     fn default() -> Self {
-        #[cfg(target_os = "macos")]
-        let backend: Arc<dyn CaptureBackend> = Arc::new(crate::capture::MacOsCaptureBackend);
-        #[cfg(target_os = "windows")]
-        let backend: Arc<dyn CaptureBackend> = Arc::new(crate::capture::WindowsCaptureBackend);
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        let backend: Arc<dyn CaptureBackend> = Arc::new(crate::capture::DummyCaptureBackend);
-
-        Self::with_backend(backend)
+        Self::with_backend(default_backend())
     }
 }
 
 impl ScreenCaptureState {
     pub fn with_backend(backend: Arc<dyn CaptureBackend>) -> Self {
-        Self::with_backend_and_overlay_factory(backend, Arc::new(DefaultShareOverlayFactory))
+        Self::with_backend_overlay_and_publisher_factory(
+            backend,
+            Arc::new(DefaultShareOverlayFactory),
+            Arc::new(DefaultPublisherFactory),
+        )
+    }
+
+    pub fn with_publisher_factory(publisher_factory: Arc<dyn CapturePublisherFactory>) -> Self {
+        Self::with_backend_overlay_and_publisher_factory(
+            default_backend(),
+            Arc::new(DefaultShareOverlayFactory),
+            publisher_factory,
+        )
     }
 
     pub fn with_backend_and_overlay(
         backend: Arc<dyn CaptureBackend>,
         overlay: Arc<dyn ShareOverlay>,
     ) -> Self {
-        Self::with_backend_and_overlay_factory(
+        Self::with_backend_overlay_and_publisher_factory(
             backend,
             Arc::new(SharedShareOverlayFactory { overlay }),
+            Arc::new(DefaultPublisherFactory),
         )
     }
 
@@ -80,9 +89,22 @@ impl ScreenCaptureState {
         backend: Arc<dyn CaptureBackend>,
         overlay_factory: Arc<dyn ShareOverlayFactory>,
     ) -> Self {
+        Self::with_backend_overlay_and_publisher_factory(
+            backend,
+            overlay_factory,
+            Arc::new(DefaultPublisherFactory),
+        )
+    }
+
+    fn with_backend_overlay_and_publisher_factory(
+        backend: Arc<dyn CaptureBackend>,
+        overlay_factory: Arc<dyn ShareOverlayFactory>,
+        publisher_factory: Arc<dyn CapturePublisherFactory>,
+    ) -> Self {
         Self {
             backend,
             overlay_factory,
+            publisher_factory,
             sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -112,10 +134,9 @@ impl ScreenCaptureState {
 
     pub async fn start_capture(&self, options: StartCaptureOptions) -> Result<CaptureSession> {
         let options = options.with_effective_video_size();
-        let signaling = WebRtcSignalingState::new().await?;
-        let publisher = WebRtcPublisher::new(signaling);
-        let webrtc_signaling = publisher.signaling();
-        let publisher: Arc<dyn CapturePublisher> = Arc::new(publisher);
+        let bundle = self.publisher_factory.create(&options).await?;
+        let publisher = bundle.publisher;
+        let webrtc_signaling = bundle.webrtc_signaling;
         let pipeline = Arc::new(CapturePipeline::new(Arc::clone(&publisher)));
 
         let running_capture = match self
@@ -291,6 +312,10 @@ impl ScreenCaptureState {
         let publisher_stats = publisher.stats().await?;
         stats.frames_published = stats.frames_published.max(publisher_stats.frames_published);
         stats.frames_dropped = stats.frames_dropped.max(publisher_stats.frames_dropped);
+        if publisher_stats.frames_published > 0 {
+            stats.fps = publisher_stats.fps;
+        }
+        stats.bitrate_kbps = stats.bitrate_kbps.max(publisher_stats.bitrate_kbps);
         stats.started = stats.started || publisher_stats.started;
         Ok(stats)
     }
@@ -333,7 +358,56 @@ impl ScreenCaptureState {
     async fn webrtc_signaling(&self, session_id: &str) -> Result<Arc<WebRtcSignalingState>> {
         let sessions = self.sessions.lock().await;
         let record = sessions.get(session_id).ok_or_else(invalid_session_error)?;
-        Ok(Arc::clone(&record.webrtc_signaling))
+        record.webrtc_signaling.as_ref().cloned().ok_or_else(|| {
+            Error::new(
+                CaptureErrorCode::WebRtcNegotiationFailed,
+                "capture session was not created with a WebRTC publisher",
+                true,
+            )
+        })
+    }
+}
+
+fn default_backend() -> Arc<dyn CaptureBackend> {
+    #[cfg(target_os = "macos")]
+    let backend: Arc<dyn CaptureBackend> = Arc::new(crate::capture::MacOsCaptureBackend);
+    #[cfg(target_os = "windows")]
+    let backend: Arc<dyn CaptureBackend> = Arc::new(crate::capture::WindowsCaptureBackend);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let backend: Arc<dyn CaptureBackend> = Arc::new(crate::capture::DummyCaptureBackend);
+    backend
+}
+
+struct DefaultPublisherFactory;
+
+#[async_trait::async_trait]
+impl CapturePublisherFactory for DefaultPublisherFactory {
+    async fn create(&self, options: &StartCaptureOptions) -> Result<PublisherBundle> {
+        match options.effective_publisher_kind() {
+            PublisherKind::WebRtcLoopback => {
+                let signaling = WebRtcSignalingState::new().await?;
+                let publisher = WebRtcPublisher::new(signaling);
+                let webrtc_signaling = publisher.signaling();
+                Ok(PublisherBundle::new(
+                    Arc::new(publisher),
+                    Some(webrtc_signaling),
+                ))
+            }
+            PublisherKind::Agora => {
+                let agora = options
+                    .publisher
+                    .as_ref()
+                    .and_then(|publisher| publisher.agora.as_ref())
+                    .ok_or_else(|| {
+                        Error::new(
+                            CaptureErrorCode::PublisherUnsupported,
+                            "Agora publisher requires appId and channel options",
+                            true,
+                        )
+                    })?;
+                Err(AgoraPublisher::sdk_unavailable_error(agora))
+            }
+        }
     }
 }
 

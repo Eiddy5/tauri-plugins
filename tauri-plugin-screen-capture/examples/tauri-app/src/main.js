@@ -114,6 +114,7 @@ app.innerHTML = `
         <span data-captured>Captured 0</span>
         <span data-published>Published 0</span>
         <span data-dropped>Dropped 0</span>
+        <span data-fps>FPS 0.0</span>
         <span data-streaming>Stopped</span>
         <span data-agora-status>Agora off</span>
       </div>
@@ -146,6 +147,7 @@ const elements = {
   captured: app.querySelector("[data-captured]"),
   published: app.querySelector("[data-published]"),
   dropped: app.querySelector("[data-dropped]"),
+  fps: app.querySelector("[data-fps]"),
   streaming: app.querySelector("[data-streaming]"),
   agoraStatus: app.querySelector("[data-agora-status]"),
   error: app.querySelector("[data-error]"),
@@ -460,6 +462,7 @@ function renderStats() {
   elements.captured.textContent = `Captured ${state.stats?.framesCaptured ?? 0}`
   elements.published.textContent = `Published ${state.stats?.framesPublished ?? 0}`
   elements.dropped.textContent = `Dropped ${state.stats?.framesDropped ?? 0}`
+  elements.fps.textContent = `FPS ${(state.stats?.fps ?? 0).toFixed(1)}`
   elements.streaming.textContent = state.stats?.started ? "Streaming" : "Stopped"
   elements.agoraStatus.textContent = state.agoraPublication
     ? `Agora ${state.agoraPublication.channel} / ${state.agoraPublication.uid}`

@@ -8,7 +8,7 @@ use std::{
 
 use openh264::{
     encoder::{Encoder, EncoderConfig, RateControlMode},
-    formats::{BgraSliceU8, YUVBuffer},
+    formats::YUVBuffer,
     Timestamp,
 };
 
@@ -20,6 +20,7 @@ use crate::{
     webrtc::track::EncodedVideoSample,
     Result,
 };
+use yuvutils_rs::{bgra_to_yuv420, YuvRange, YuvStandardMatrix};
 
 const MAX_PENDING_H264_BYTES: usize = 8 * 1024 * 1024;
 
@@ -339,8 +340,28 @@ impl SoftwareH264Encoder {
             ));
         }
 
-        let source = BgraSliceU8::new(&frame.data, (frame.width as usize, frame.height as usize));
-        let yuv = YUVBuffer::from_rgb_source(source);
+        let width = frame.width as usize;
+        let height = frame.height as usize;
+        let y_len = width * height;
+        let uv_len = y_len / 4;
+        let mut yuv_data = vec![0u8; y_len + uv_len * 2];
+        let (y_plane, uv_planes) = yuv_data.split_at_mut(y_len);
+        let (u_plane, v_plane) = uv_planes.split_at_mut(uv_len);
+        bgra_to_yuv420(
+            y_plane,
+            frame.width,
+            u_plane,
+            frame.width / 2,
+            v_plane,
+            frame.width / 2,
+            &frame.data,
+            frame.width * 4,
+            frame.width,
+            frame.height,
+            YuvRange::TV,
+            YuvStandardMatrix::Bt709,
+        );
+        let yuv = YUVBuffer::from_vec(yuv_data, width, height);
         let bitstream = self
             .encoder
             .encode_at(&yuv, Timestamp::from_millis(frame.timestamp_ns / 1_000_000))
@@ -678,9 +699,9 @@ fn recommended_bitrate(width: u32, height: u32, fps: u32) -> u32 {
     let fps = u64::from(fps.max(1));
     let bits = pixels
         .saturating_mul(fps)
-        .saturating_mul(32)
+        .saturating_mul(8)
         .saturating_div(100);
-    u32::try_from(bits.clamp(8_000_000, 48_000_000)).unwrap_or(24_000_000)
+    u32::try_from(bits.clamp(6_000_000, 24_000_000)).unwrap_or(12_000_000)
 }
 
 fn encoder_error(error: impl std::fmt::Display) -> Error {

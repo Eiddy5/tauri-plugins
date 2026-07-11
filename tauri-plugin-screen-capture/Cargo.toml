@@ -33,7 +33,9 @@ apple-cf = { version = "0.2", features = ["cm", "cv"] }
 screencapturekit = { version = "=3.0.0", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
+fast_image_resize = { version = "=5.1.2", features = ["only_u8x4"] }
 openh264 = "0.6.5"
+yuvutils-rs = "=0.3.2"
 windows-capture = "2.0.0"
 windows = { version = "0.62", features = [
   "Graphics_Capture",

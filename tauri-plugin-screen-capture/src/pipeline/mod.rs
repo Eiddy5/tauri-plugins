@@ -5,6 +5,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+use std::time::Instant;
 
 use async_trait::async_trait;
 use tokio::{
@@ -25,6 +26,7 @@ pub struct CapturePipeline {
     notify: Arc<Notify>,
     stopped: Arc<AtomicBool>,
     worker: JoinHandle<()>,
+    started_at: Mutex<Option<Instant>>,
 }
 
 impl CapturePipeline {
@@ -47,11 +49,19 @@ impl CapturePipeline {
             notify,
             stopped,
             worker,
+            started_at: Mutex::new(None),
         }
     }
 
     pub async fn stats(&self) -> CaptureStats {
-        self.stats.lock().await.clone()
+        let mut stats = self.stats.lock().await.clone();
+        if let Some(started_at) = *self.started_at.lock().await {
+            let elapsed = started_at.elapsed().as_secs_f64();
+            if elapsed > 0.0 {
+                stats.fps = stats.frames_captured as f64 / elapsed;
+            }
+        }
+        stats
     }
 
     pub async fn replay_latest_frame(&self) -> Result<()> {
@@ -74,6 +84,11 @@ impl Drop for CapturePipeline {
 #[async_trait]
 impl FrameConsumer for CapturePipeline {
     async fn push_frame(&self, frame: VideoFrame) -> Result<()> {
+        let mut started_at = self.started_at.lock().await;
+        if started_at.is_none() {
+            *started_at = Some(Instant::now());
+        }
+        drop(started_at);
         {
             let mut stats = self.stats.lock().await;
             stats.frames_captured += 1;

@@ -35,6 +35,11 @@ pub(crate) struct OverlayWindow {
 }
 
 impl OverlayWindow {
+    #[cfg(test)]
+    pub(crate) const fn hwnd(&self) -> HWND {
+        self.hwnd
+    }
+
     pub(crate) fn new(color: u32, placement: OverlayPlacement) -> Result<Self> {
         register_window_class(color)?;
 
