@@ -202,15 +202,7 @@ mod probe {
 
         phases.http_ms = Some(elapsed_ms(http_started));
 
-        let status_code = parse_status_code(&buffer)?;
-        if (200..400).contains(&status_code) {
-            Ok(status_code)
-        } else {
-            Err((
-                "http_status_error",
-                format!("unexpected HTTP status {status_code}"),
-            ))
-        }
+        parse_status_code(&buffer)
     }
 
     fn request_target(url: &Url) -> String {
@@ -259,14 +251,36 @@ mod probe {
             .lines()
             .next()
             .ok_or_else(|| ("http_failed", "empty HTTP response".to_string()))?;
-        let status = status_line
-            .split_whitespace()
-            .nth(1)
-            .ok_or_else(|| ("http_failed", "missing HTTP status code".to_string()))?;
+        let mut fields = status_line.split_whitespace();
+        let version = fields
+            .next()
+            .ok_or_else(|| ("http_failed", "missing HTTP version".to_string()))?;
+        if version != "HTTP/1.0" && version != "HTTP/1.1" {
+            return Err((
+                "http_failed",
+                format!("unsupported HTTP response version: {version}"),
+            ));
+        }
 
-        status
+        let status = fields
+            .next()
+            .ok_or_else(|| ("http_failed", "missing HTTP status code".to_string()))?;
+        if status.len() != 3 || !status.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(("http_failed", format!("invalid HTTP status code: {status}")));
+        }
+
+        let status_code = status
             .parse::<u16>()
-            .map_err(|error| ("http_failed", format!("invalid HTTP status code: {error}")))
+            .map_err(|error| ("http_failed", format!("invalid HTTP status code: {error}")))?;
+
+        if !(100..=599).contains(&status_code) {
+            return Err((
+                "http_failed",
+                format!("HTTP status code is out of range: {status_code}"),
+            ));
+        }
+
+        Ok(status_code)
     }
 
     fn elapsed_ms(started: Instant) -> u64 {
@@ -302,6 +316,44 @@ mod probe {
             assert_eq!(result.status, ProbeStatus::Failed);
             assert!(result.duration_ms <= 1_000);
             assert!(result.error.is_some());
+        }
+
+        #[tokio::test]
+        async fn http_error_response_still_means_target_is_reachable() {
+            let (mut client, mut server) = tokio::io::duplex(1_024);
+            let server_task = tokio::spawn(async move {
+                let mut request = [0_u8; 512];
+                let read = server.read(&mut request).await.unwrap();
+                assert!(read > 0);
+                server
+                    .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+                    .await
+                    .unwrap();
+            });
+            let url = Url::parse("http://example.com/health").unwrap();
+            let mut phases = ProbePhases::default();
+
+            let status_code = send_head_and_read_status(&mut client, &url, &mut phases)
+                .await
+                .unwrap();
+            server_task.await.unwrap();
+
+            assert_eq!(status_code, 503);
+            assert!(phases.http_ms.is_some());
+        }
+
+        #[test]
+        fn rejects_http_status_outside_protocol_range() {
+            let error = parse_status_code(b"HTTP/1.1 700 Invalid\r\n\r\n").unwrap_err();
+
+            assert_eq!(error.0, "http_failed");
+        }
+
+        #[test]
+        fn rejects_non_http_status_line() {
+            let error = parse_status_code(b"BOGUS 200 OK\r\n\r\n").unwrap_err();
+
+            assert_eq!(error.0, "http_failed");
         }
 
         #[test]
@@ -557,73 +609,81 @@ mod stats {
 
 mod state {
     use crate::models::{
-        NetworkLayerState, OverallState, QualityLayerState, QualitySummary, SnapshotState,
+        InternetStatus, NetworkLayerState, OverallState, ProbeResult, ProbeStatus, QualitySummary,
+        ReachabilityStatus, ReachabilityTargetState, SnapshotState, TargetQualityState,
     };
 
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub(crate) struct StateConfig {
         pub(crate) degraded_failure_rate: f64,
         pub(crate) degraded_p95_latency_ms: u64,
-        pub(crate) offline_consecutive_failures: usize,
     }
 
-    pub(crate) fn evaluate_state(
-        has_available_interface: bool,
-        summary: &QualitySummary,
-        config: &StateConfig,
-    ) -> SnapshotState {
-        let config = normalize_config(config);
-
-        if !has_available_interface {
-            return SnapshotState {
+    pub(crate) fn evaluate_network_state(has_available_interface: Option<bool>) -> SnapshotState {
+        match has_available_interface {
+            None => SnapshotState {
+                overall: OverallState::Unknown,
+                network: NetworkLayerState::Unknown,
+                internet: InternetStatus::Unknown,
+                reason: "network_state_unknown".to_string(),
+            },
+            Some(false) => SnapshotState {
                 overall: OverallState::Offline,
                 network: NetworkLayerState::Disconnected,
-                quality: QualityLayerState::Unknown,
-                score: 0,
+                internet: InternetStatus::Unavailable,
                 reason: "no_available_interface".to_string(),
-            };
-        }
-
-        if summary.sample_count == 0 {
-            return SnapshotState {
-                overall: OverallState::Unknown,
+            },
+            Some(true) => SnapshotState {
+                overall: OverallState::Online,
                 network: NetworkLayerState::Connected,
-                quality: QualityLayerState::Unknown,
-                score: 0,
+                internet: InternetStatus::Unknown,
+                reason: "network_interface_available".to_string(),
+            },
+        }
+    }
+
+    pub(crate) fn evaluate_target_state(
+        current_probe: Option<&ProbeResult>,
+        summary: &QualitySummary,
+        config: &StateConfig,
+    ) -> ReachabilityTargetState {
+        let config = normalize_config(config);
+
+        let Some(current_probe) = current_probe else {
+            return ReachabilityTargetState {
+                reachability: ReachabilityStatus::Unknown,
+                quality: TargetQualityState::Unknown,
                 reason: "insufficient_data".to_string(),
             };
-        }
+        };
 
-        if summary.consecutive_failures >= config.offline_consecutive_failures {
-            return SnapshotState {
-                overall: OverallState::LocalOnly,
-                network: NetworkLayerState::Connected,
-                quality: QualityLayerState::Unreachable,
-                score: 10,
-                reason: "target_unreachable".to_string(),
+        if current_probe.status == ProbeStatus::Failed {
+            return ReachabilityTargetState {
+                reachability: ReachabilityStatus::Unreachable,
+                quality: TargetQualityState::Unstable,
+                reason: current_probe
+                    .error
+                    .as_ref()
+                    .map(|error| error.code.clone())
+                    .unwrap_or_else(|| "target_unreachable".to_string()),
             };
         }
 
-        let score = calculate_score(summary);
-        let is_degraded = summary.failure_rate >= config.degraded_failure_rate
+        let is_unstable = summary.failure_rate >= config.degraded_failure_rate
             || summary.latency_ms.p95 >= config.degraded_p95_latency_ms
             || summary.jitter_ms >= 300;
 
-        if is_degraded {
-            SnapshotState {
-                overall: OverallState::Degraded,
-                network: NetworkLayerState::Connected,
-                quality: QualityLayerState::Unstable,
-                score,
+        if is_unstable {
+            ReachabilityTargetState {
+                reachability: ReachabilityStatus::Reachable,
+                quality: TargetQualityState::Unstable,
                 reason: "high_latency_or_recent_failures".to_string(),
             }
         } else {
-            SnapshotState {
-                overall: OverallState::Online,
-                network: NetworkLayerState::Connected,
-                quality: QualityLayerState::Stable,
-                score,
-                reason: "network_stable".to_string(),
+            ReachabilityTargetState {
+                reachability: ReachabilityStatus::Reachable,
+                quality: TargetQualityState::Stable,
+                reason: "target_stable".to_string(),
             }
         }
     }
@@ -640,18 +700,7 @@ mod state {
             } else {
                 config.degraded_p95_latency_ms
             },
-            offline_consecutive_failures: config.offline_consecutive_failures.max(1),
         }
-    }
-
-    fn calculate_score(summary: &QualitySummary) -> u8 {
-        let failure_penalty = (summary.failure_rate.clamp(0.0, 1.0) * 60.0).round() as i32;
-        let latency_penalty = (summary.latency_ms.p95 / 100).min(30) as i32;
-        let jitter_penalty = (summary.jitter_ms / 25).min(20) as i32;
-        let consecutive_penalty = summary.consecutive_failures.saturating_mul(10).min(30) as i32;
-
-        (100 - failure_penalty - latency_penalty - jitter_penalty - consecutive_penalty)
-            .clamp(0, 100) as u8
     }
 
     #[cfg(test)]
@@ -663,13 +712,39 @@ mod state {
             StateConfig {
                 degraded_failure_rate: 0.15,
                 degraded_p95_latency_ms: 800,
-                offline_consecutive_failures: 3,
+            }
+        }
+
+        fn probe(status: ProbeStatus, duration_ms: u64, reason: Option<&str>) -> ProbeResult {
+            let now = chrono::Utc::now();
+
+            ProbeResult {
+                id: "probe_test".to_string(),
+                status,
+                started_at: now,
+                ended_at: now,
+                duration_ms,
+                phases: ProbePhases::default(),
+                http: None,
+                error: reason.map(|reason| ProbeError {
+                    code: reason.to_string(),
+                    message: reason.to_string(),
+                }),
             }
         }
 
         #[test]
+        fn network_state_does_not_require_targets() {
+            let state = evaluate_network_state(Some(true));
+
+            assert_eq!(state.overall, OverallState::Online);
+            assert_eq!(state.network, NetworkLayerState::Connected);
+            assert_eq!(state.reason, "network_interface_available");
+        }
+
+        #[test]
         fn no_interface_is_offline() {
-            let state = evaluate_state(false, &QualitySummary::default(), &config());
+            let state = evaluate_network_state(Some(false));
 
             assert_eq!(state.overall, OverallState::Offline);
             assert_eq!(state.network, NetworkLayerState::Disconnected);
@@ -677,23 +752,45 @@ mod state {
         }
 
         #[test]
-        fn consecutive_failures_are_local_only() {
-            let summary = QualitySummary {
-                sample_count: 3,
-                failure_count: 3,
-                failure_rate: 1.0,
-                consecutive_failures: 3,
-                ..Default::default()
-            };
+        fn unavailable_network_state_is_unknown() {
+            let state = evaluate_network_state(None);
 
-            let state = evaluate_state(true, &summary, &config());
-
-            assert_eq!(state.overall, OverallState::LocalOnly);
-            assert_eq!(state.quality, QualityLayerState::Unreachable);
+            assert_eq!(state.overall, OverallState::Unknown);
+            assert_eq!(state.network, NetworkLayerState::Unknown);
         }
 
         #[test]
-        fn high_latency_is_degraded() {
+        fn target_without_probe_is_unknown() {
+            let state = evaluate_target_state(None, &QualitySummary::default(), &config());
+
+            assert_eq!(state.reachability, ReachabilityStatus::Unknown);
+            assert_eq!(state.quality, TargetQualityState::Unknown);
+        }
+
+        #[test]
+        fn failed_probe_only_marks_its_target_unreachable() {
+            let probe = probe(ProbeStatus::Failed, 100, Some("tcp_failed"));
+            let state = evaluate_target_state(Some(&probe), &QualitySummary::default(), &config());
+
+            assert_eq!(state.reachability, ReachabilityStatus::Unreachable);
+            assert_eq!(state.quality, TargetQualityState::Unstable);
+            assert_eq!(state.reason, "tcp_failed");
+        }
+
+        #[test]
+        fn failed_target_does_not_change_device_network_state() {
+            let network_state = evaluate_network_state(Some(true));
+            let probe = probe(ProbeStatus::Failed, 100, Some("tcp_failed"));
+            let target_state =
+                evaluate_target_state(Some(&probe), &QualitySummary::default(), &config());
+
+            assert_eq!(network_state.overall, OverallState::Online);
+            assert_eq!(network_state.network, NetworkLayerState::Connected);
+            assert_eq!(target_state.reachability, ReachabilityStatus::Unreachable);
+        }
+
+        #[test]
+        fn high_latency_makes_only_target_quality_unstable() {
             let summary = QualitySummary {
                 sample_count: 20,
                 success_count: 20,
@@ -705,15 +802,16 @@ mod state {
                 },
                 ..Default::default()
             };
+            let probe = probe(ProbeStatus::Success, 900, None);
 
-            let state = evaluate_state(true, &summary, &config());
+            let state = evaluate_target_state(Some(&probe), &summary, &config());
 
-            assert_eq!(state.overall, OverallState::Degraded);
-            assert_eq!(state.quality, QualityLayerState::Unstable);
+            assert_eq!(state.reachability, ReachabilityStatus::Reachable);
+            assert_eq!(state.quality, TargetQualityState::Unstable);
         }
 
         #[test]
-        fn stable_summary_is_online() {
+        fn stable_target_is_reachable_and_stable() {
             let summary = QualitySummary {
                 sample_count: 20,
                 success_count: 20,
@@ -726,34 +824,13 @@ mod state {
                 jitter_ms: 20,
                 ..Default::default()
             };
+            let probe = probe(ProbeStatus::Success, 100, None);
 
-            let state = evaluate_state(true, &summary, &config());
+            let state = evaluate_target_state(Some(&probe), &summary, &config());
 
-            assert_eq!(state.overall, OverallState::Online);
-            assert_eq!(state.quality, QualityLayerState::Stable);
-            assert!(state.score > 80);
-        }
-
-        #[test]
-        fn extreme_consecutive_failures_do_not_overflow_score() {
-            let summary = QualitySummary {
-                sample_count: 20,
-                failure_count: 20,
-                failure_rate: 1.0,
-                latency_ms: LatencySummary {
-                    avg: u64::MAX,
-                    min: u64::MAX,
-                    max: u64::MAX,
-                    p95: u64::MAX,
-                },
-                jitter_ms: u64::MAX,
-                consecutive_failures: usize::MAX,
-                ..Default::default()
-            };
-
-            let score = calculate_score(&summary);
-
-            assert_eq!(score, 0);
+            assert_eq!(state.reachability, ReachabilityStatus::Reachable);
+            assert_eq!(state.quality, TargetQualityState::Stable);
+            assert_eq!(state.reason, "target_stable");
         }
 
         #[test]
@@ -773,17 +850,17 @@ mod state {
             let config = StateConfig {
                 degraded_failure_rate: 0.0,
                 degraded_p95_latency_ms: 0,
-                offline_consecutive_failures: 0,
             };
+            let probe = probe(ProbeStatus::Success, 100, None);
 
-            let state = evaluate_state(true, &summary, &config);
+            let state = evaluate_target_state(Some(&probe), &summary, &config);
 
-            assert_eq!(state.overall, OverallState::Online);
-            assert_eq!(state.quality, QualityLayerState::Stable);
+            assert_eq!(state.reachability, ReachabilityStatus::Reachable);
+            assert_eq!(state.quality, TargetQualityState::Stable);
         }
     }
 }
 
 pub(crate) use probe::HttpProber;
-pub(crate) use state::{evaluate_state, StateConfig};
+pub(crate) use state::{evaluate_network_state, evaluate_target_state, StateConfig};
 pub(crate) use stats::RollingWindow;

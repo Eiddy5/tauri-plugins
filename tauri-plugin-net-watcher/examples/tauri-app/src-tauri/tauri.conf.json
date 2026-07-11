@@ -37,7 +37,10 @@
   "plugins": {
     "net-watcher": {
       "autoStart": false,
-      "target": "https://www.baidu.com",
+      "targets": [
+        { "id": "baidu", "url": "https://www.baidu.com" },
+        {"id": "bing", "url": "https://www.bing.com/"}
+      ],
       "intervalMs": 10000,
       "timeoutMs": 3000
     }

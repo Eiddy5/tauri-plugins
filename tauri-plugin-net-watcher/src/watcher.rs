@@ -1,8 +1,10 @@
 use std::{
+    future::Future,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
+use futures_util::{stream, StreamExt};
 use tauri::{
     async_runtime::{self, JoinHandle, RwLock},
     AppHandle, Emitter, Runtime,
@@ -10,16 +12,23 @@ use tauri::{
 use tokio::sync::mpsc;
 
 use crate::{
+    internet::InternetMonitor,
     network::{has_available_interface, read_network_snapshot},
-    quality::{evaluate_state, HttpProber, RollingWindow, StateConfig},
+    quality::{
+        evaluate_network_state, evaluate_target_state, HttpProber, RollingWindow, StateConfig,
+    },
+    schedule::TargetSchedule,
     snapshot::{build_snapshot, SnapshotBuildInput},
-    Error, NetWatcherConfig, NetWatcherSnapshot, NetworkSnapshot, ProbeStatus, ProbeTarget,
-    ProbeTargetType, QualityConfigSnapshot, ReachabilityStatus, ReachabilityTargetSnapshot, Result,
-    StartWatchingOptions,
+    Error, NetWatcherConfig, NetWatcherSnapshot, NetworkSnapshot, NetworkUpdatedPayload,
+    ProbeResult, ProbeTarget, ProbeTargetType, ReachabilityConfigSnapshot, ReachabilityStatus,
+    ReachabilityTargetSnapshot, ReachabilityTargetState, Result, StartWatchingOptions,
+    TargetQualityState, TargetUpdatedPayload,
 };
 
-const SNAPSHOT_EVENT: &str = "net-watcher://snapshot-updated";
+const NETWORK_UPDATED_EVENT: &str = "net-watcher://network-updated";
+const TARGET_UPDATED_EVENT: &str = "net-watcher://target-updated";
 const SYSTEM_EVENT_DEBOUNCE: Duration = Duration::from_millis(500);
+const MAX_CONCURRENT_PROBES: usize = 4;
 
 /// Access to the net-watcher APIs.
 pub struct NetWatcher<R: Runtime> {
@@ -52,6 +61,22 @@ struct TargetProbeState {
     id: String,
     target: ProbeTarget,
     window: RollingWindow,
+    schedule: TargetSchedule,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct NetworkFingerprint {
+    primary_interface_id: Option<String>,
+    interfaces: Vec<crate::NetworkInterface>,
+}
+
+impl NetworkFingerprint {
+    fn from_snapshot(snapshot: &NetworkSnapshot) -> Self {
+        Self {
+            primary_interface_id: snapshot.primary_interface_id.clone(),
+            interfaces: snapshot.interfaces.clone(),
+        }
+    }
 }
 
 impl<R> NetWatcher<R>
@@ -168,13 +193,8 @@ async fn run_loop<R>(
 ) where
     R: Runtime,
 {
-    let target_configs = config.effective_targets();
-    let mut aggregate_window = RollingWindow::new(
-        config
-            .window_size()
-            .saturating_mul(target_configs.len())
-            .max(1),
-    );
+    let started_at = Instant::now();
+    let target_configs = config.targets.clone();
     let mut targets = target_configs
         .into_iter()
         .map(|target| TargetProbeState {
@@ -184,80 +204,298 @@ async fn run_loop<R>(
                 url: target.url,
             },
             window: RollingWindow::new(config.window_size()),
+            schedule: TargetSchedule::new(started_at),
         })
         .collect::<Vec<_>>();
     let prober = HttpProber::new(config.timeout_ms);
     let state_config = StateConfig {
         degraded_failure_rate: config.degraded_failure_rate(),
         degraded_p95_latency_ms: config.degraded_p95_latency_ms(),
-        offline_consecutive_failures: config.offline_consecutive_failures(),
     };
-    let quality_config = QualityConfigSnapshot {
+    let reachability_config = ReachabilityConfigSnapshot {
         interval_ms: config.interval_ms,
         window_size: config.window_size(),
         timeout_ms: config.timeout_ms,
     };
+    let mut internet_monitor = InternetMonitor::new();
+    let mut force_internet_check = true;
+    let target_probe_interval = Duration::from_millis(config.interval_ms);
+    let mut force_target_probe = true;
+    let mut network_fingerprint = None;
 
-    loop {
-        let (network, network_error) = match read_network_snapshot(config.include_mac_address()) {
-            Ok(network) => (network, None),
-            Err(error) => (NetworkSnapshot::default(), Some(error)),
+    'watcher: loop {
+        let (mut network, mut state, interface_available) =
+            match read_network_snapshot(config.include_mac_address()) {
+                Ok(network) => {
+                    let interface_available = has_available_interface(&network);
+                    let state = evaluate_network_state(Some(interface_available));
+                    (network, state, Some(interface_available))
+                }
+                Err(error) => {
+                    let mut state = evaluate_network_state(None);
+                    state.reason = format!("network_snapshot_failed:{}", error.code());
+                    (NetworkSnapshot::default(), state, None)
+                }
+            };
+
+        let next_fingerprint = NetworkFingerprint::from_snapshot(&network);
+        let network_path_changed = network_fingerprint.as_ref() != Some(&next_fingerprint);
+        if network_path_changed {
+            network_fingerprint = Some(next_fingerprint);
+            internet_monitor.reset_for_network_change();
+            let now = Instant::now();
+            for target in &mut targets {
+                target.window = RollingWindow::new(config.window_size());
+                target.schedule.reset(now);
+            }
+            force_internet_check = true;
+            force_target_probe = true;
+        }
+
+        let internet_refresh = internet_monitor.refresh(interface_available, force_internet_check);
+        let internet = match run_interruptible(internet_refresh, &mut signal_rx).await {
+            Ok(internet) => internet,
+            Err(WatcherWake::SystemNetworkChanged) => {
+                force_internet_check = true;
+                force_target_probe = true;
+                continue 'watcher;
+            }
+            Err(WatcherWake::Stop) => break,
+            Err(WatcherWake::Interval) => unreachable!("signal wait cannot return interval"),
         };
+        force_internet_check = false;
+        state.internet = internet.status.clone();
+        let targets_suspended = interface_available != Some(true)
+            || internet.status == crate::InternetStatus::Unavailable;
+        network.internet = internet;
 
-        for target in &mut targets {
-            let probe = prober.probe(&target.target).await;
-            target.window.push(probe.clone());
-            aggregate_window.push(probe);
+        let mut suspended_target_ids = Vec::new();
+        if targets_suspended {
+            for target in &mut targets {
+                if !target.schedule.is_suspended() {
+                    target.schedule.suspend();
+                    suspended_target_ids.push(target.id.clone());
+                }
+            }
+        } else {
+            let now = Instant::now();
+            for target in &mut targets {
+                if target.schedule.is_suspended() {
+                    target.schedule.reset(now);
+                    force_target_probe = true;
+                }
+            }
         }
 
-        let summary = aggregate_window.summary();
         let previous = snapshot.read().await.clone();
-        let mut state = evaluate_state(has_available_interface(&network), &summary, &state_config);
-        if let Some(error) = network_error {
-            state.reason = format!("network_snapshot_failed:{}", error.code());
-        }
-
-        let next = build_snapshot(
+        let network_next = build_snapshot(
             &previous,
             SnapshotBuildInput {
-                network,
-                state,
-                quality_config: quality_config.clone(),
-                reachability_targets: targets.iter().map(reachability_target_snapshot).collect(),
-                summary,
+                network: network.clone(),
+                state: state.clone(),
+                reachability_config: reachability_config.clone(),
+                reachability_targets: target_snapshots(&targets, &state_config),
             },
         );
-
-        let should_emit = next.changes.has_changes;
-        *snapshot.write().await = next.clone();
-        if should_emit {
-            let _ = app.emit(SNAPSHOT_EVENT, next);
+        let network_changed = network_next.changes.changed_fields.iter().any(|field| {
+            field == "network" || field.starts_with("network.") || field.starts_with("state.")
+        });
+        *snapshot.write().await = network_next.clone();
+        if network_changed {
+            let _ = app.emit(
+                NETWORK_UPDATED_EVENT,
+                NetworkUpdatedPayload::from_snapshot(&network_next),
+            );
         }
 
-        match wait_for_next_wake(Duration::from_millis(config.interval_ms), &mut signal_rx).await {
-            WatcherWake::Interval | WatcherWake::SystemNetworkChanged => {}
+        for target_id in suspended_target_ids {
+            if let Some(target) = network_next
+                .reachability
+                .targets
+                .iter()
+                .find(|target| target.id == target_id)
+            {
+                let _ = app.emit(
+                    TARGET_UPDATED_EVENT,
+                    TargetUpdatedPayload::from_snapshot(&network_next, target),
+                );
+            }
+        }
+
+        let now = Instant::now();
+        let due_target_indexes = if targets_suspended {
+            Vec::new()
+        } else {
+            targets
+                .iter()
+                .enumerate()
+                .filter(|(_, target)| force_target_probe || target.schedule.is_due(now))
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>()
+        };
+        force_target_probe = false;
+
+        if !due_target_indexes.is_empty() {
+            let target_descriptors = due_target_indexes
+                .iter()
+                .map(|index| (*index, targets[*index].target.clone()))
+                .collect::<Vec<_>>();
+            let probe_stream = probe_target_stream(&prober, target_descriptors);
+            tokio::pin!(probe_stream);
+
+            loop {
+                let next_probe = tokio::select! {
+                    biased;
+                    signal = signal_rx.recv() => match signal {
+                        Some(WatcherSignal::SystemNetworkChanged) => {
+                            match coalesce_system_network_events(
+                                SYSTEM_EVENT_DEBOUNCE,
+                                &mut signal_rx,
+                            ).await {
+                                WatcherWake::SystemNetworkChanged => {
+                                    force_internet_check = true;
+                                    force_target_probe = true;
+                                    continue 'watcher;
+                                }
+                                WatcherWake::Stop => break 'watcher,
+                                WatcherWake::Interval => {
+                                    unreachable!("debounce cannot return interval")
+                                }
+                            }
+                        }
+                        Some(WatcherSignal::Stop) | None => break 'watcher,
+                    },
+                    probe = probe_stream.next() => probe,
+                };
+
+                let Some((index, probe)) = next_probe else {
+                    break;
+                };
+                let target = &mut targets[index];
+                let probe_status = probe.status.clone();
+                target.window.push(probe);
+                let summary = target.window.summary();
+                let target_state =
+                    evaluate_target_state(target.window.latest().as_ref(), &summary, &state_config);
+                target.schedule.record_result(
+                    &target.id,
+                    probe_status,
+                    target_state.quality,
+                    target_probe_interval,
+                    Instant::now(),
+                );
+
+                let previous = snapshot.read().await.clone();
+                let target_next = build_snapshot(
+                    &previous,
+                    SnapshotBuildInput {
+                        network: network.clone(),
+                        state: state.clone(),
+                        reachability_config: reachability_config.clone(),
+                        reachability_targets: target_snapshots(&targets, &state_config),
+                    },
+                );
+                *snapshot.write().await = target_next.clone();
+                let target = &target_next.reachability.targets[index];
+                let _ = app.emit(
+                    TARGET_UPDATED_EVENT,
+                    TargetUpdatedPayload::from_snapshot(&target_next, target),
+                );
+            }
+        }
+
+        let now = Instant::now();
+        let target_check_in = targets
+            .iter()
+            .filter_map(|target| target.schedule.next_check_in(now))
+            .min()
+            .unwrap_or(Duration::MAX);
+        let next_check_in =
+            target_check_in.min(internet_monitor.next_check_in(interface_available));
+
+        match wait_for_next_wake(next_check_in, &mut signal_rx).await {
+            WatcherWake::Interval => {}
+            WatcherWake::SystemNetworkChanged => {
+                force_internet_check = true;
+                force_target_probe = true;
+            }
             WatcherWake::Stop => break,
         }
     }
 }
 
-fn reachability_target_snapshot(target: &TargetProbeState) -> ReachabilityTargetSnapshot {
+fn probe_target_stream(
+    prober: &HttpProber,
+    targets: Vec<(usize, ProbeTarget)>,
+) -> impl futures_util::Stream<Item = (usize, ProbeResult)> + '_ {
+    stream::iter(targets)
+        .map(move |(index, target)| async move { (index, prober.probe(&target).await) })
+        .buffer_unordered(MAX_CONCURRENT_PROBES)
+}
+
+fn target_snapshots(
+    targets: &[TargetProbeState],
+    state_config: &StateConfig,
+) -> Vec<ReachabilityTargetSnapshot> {
+    targets
+        .iter()
+        .map(|target| reachability_target_snapshot(target, target.window.summary(), state_config))
+        .collect()
+}
+
+fn reachability_target_snapshot(
+    target: &TargetProbeState,
+    summary: crate::QualitySummary,
+    state_config: &StateConfig,
+) -> ReachabilityTargetSnapshot {
     let current_probe = target.window.latest();
+    let state = if target.schedule.is_suspended() {
+        ReachabilityTargetState {
+            reachability: ReachabilityStatus::Unknown,
+            quality: TargetQualityState::Unknown,
+            reason: "probe_suspended_network_unavailable".to_string(),
+        }
+    } else {
+        evaluate_target_state(current_probe.as_ref(), &summary, state_config)
+    };
 
     ReachabilityTargetSnapshot {
         id: target.id.clone(),
-        status: reachability_status(current_probe.as_ref()),
+        state,
         target: target.target.clone(),
         current_probe,
-        summary: target.window.summary(),
+        summary,
     }
 }
 
-fn reachability_status(probe: Option<&crate::ProbeResult>) -> ReachabilityStatus {
-    match probe.map(|probe| &probe.status) {
-        Some(ProbeStatus::Success) => ReachabilityStatus::Reachable,
-        Some(ProbeStatus::Failed) => ReachabilityStatus::Unreachable,
-        None => ReachabilityStatus::Unknown,
+async fn run_interruptible<F, T>(
+    future: F,
+    signal_rx: &mut mpsc::UnboundedReceiver<WatcherSignal>,
+) -> std::result::Result<T, WatcherWake>
+where
+    F: Future<Output = T>,
+{
+    run_interruptible_with_debounce(future, signal_rx, SYSTEM_EVENT_DEBOUNCE).await
+}
+
+async fn run_interruptible_with_debounce<F, T>(
+    future: F,
+    signal_rx: &mut mpsc::UnboundedReceiver<WatcherSignal>,
+    debounce: Duration,
+) -> std::result::Result<T, WatcherWake>
+where
+    F: Future<Output = T>,
+{
+    tokio::pin!(future);
+    tokio::select! {
+        biased;
+        signal = signal_rx.recv() => match signal {
+            Some(WatcherSignal::SystemNetworkChanged) => {
+                Err(coalesce_system_network_events(debounce, signal_rx).await)
+            }
+            Some(WatcherSignal::Stop) | None => Err(WatcherWake::Stop),
+        },
+        output = &mut future => Ok(output),
     }
 }
 
@@ -561,6 +799,105 @@ mod windows_events {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ProbeStatus;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+
+    #[tokio::test]
+    async fn probes_targets_concurrently_up_to_internal_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut streams = Vec::new();
+            for _ in 0..MAX_CONCURRENT_PROBES {
+                streams.push(listener.accept().await.unwrap().0);
+            }
+
+            for mut stream in streams {
+                let mut request = [0_u8; 512];
+                let read = stream.read(&mut request).await.unwrap();
+                assert!(read > 0);
+                stream
+                    .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                    .await
+                    .unwrap();
+            }
+        });
+        let targets = (0..MAX_CONCURRENT_PROBES)
+            .map(|index| ProbeTarget {
+                target_type: ProbeTargetType::Http,
+                url: format!("http://{address}/{index}"),
+            })
+            .enumerate()
+            .collect::<Vec<_>>();
+
+        let probes = probe_target_stream(&HttpProber::new(2_000), targets)
+            .collect::<Vec<_>>()
+            .await;
+        server.await.unwrap();
+
+        assert_eq!(probes.len(), MAX_CONCURRENT_PROBES);
+        assert!(probes
+            .iter()
+            .all(|(_, probe)| probe.status == ProbeStatus::Success));
+    }
+
+    #[tokio::test]
+    async fn network_change_interrupts_and_discards_in_flight_operation() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(WatcherSignal::SystemNetworkChanged).unwrap();
+
+        let result = run_interruptible_with_debounce(
+            std::future::pending::<()>(),
+            &mut rx,
+            Duration::from_millis(1),
+        )
+        .await;
+
+        assert_eq!(result, Err(WatcherWake::SystemNetworkChanged));
+    }
+
+    #[test]
+    fn network_fingerprint_ignores_internet_probe_evidence() {
+        let mut first = NetworkSnapshot::default();
+        first.internet.status = crate::InternetStatus::Available;
+        let mut second = first.clone();
+        second.internet.status = crate::InternetStatus::Unavailable;
+
+        assert!(
+            NetworkFingerprint::from_snapshot(&first) == NetworkFingerprint::from_snapshot(&second)
+        );
+    }
+
+    #[test]
+    fn suspended_target_reports_unknown_without_service_failure_sample() {
+        let now = Instant::now();
+        let mut schedule = TargetSchedule::new(now);
+        schedule.suspend();
+        let target = TargetProbeState {
+            id: "api".to_string(),
+            target: ProbeTarget {
+                target_type: ProbeTargetType::Http,
+                url: "https://api.example.com/health".to_string(),
+            },
+            window: RollingWindow::new(20),
+            schedule,
+        };
+        let state_config = StateConfig {
+            degraded_failure_rate: 0.15,
+            degraded_p95_latency_ms: 800,
+        };
+
+        let snapshot =
+            reachability_target_snapshot(&target, target.window.summary(), &state_config);
+
+        assert_eq!(snapshot.state.reachability, ReachabilityStatus::Unknown);
+        assert_eq!(snapshot.state.quality, TargetQualityState::Unknown);
+        assert_eq!(snapshot.state.reason, "probe_suspended_network_unavailable");
+        assert_eq!(snapshot.summary.sample_count, 0);
+    }
 
     #[tokio::test]
     async fn wait_for_next_wake_returns_system_network_change_before_interval() {

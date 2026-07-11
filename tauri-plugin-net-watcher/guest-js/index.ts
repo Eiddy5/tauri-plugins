@@ -2,10 +2,9 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 
-export type OverallState = 'unknown' | 'offline' | 'localOnly' | 'degraded' | 'online'
+export type OverallState = 'unknown' | 'offline' | 'online'
 
 export interface StartWatchingOptions {
-  target?: string
   targets?: ReachabilityTargetConfig[]
   intervalMs?: number
   timeoutMs?: number
@@ -13,8 +12,7 @@ export interface StartWatchingOptions {
 
 export interface NetWatcherConfig {
   autoStart: boolean
-  target: string
-  targets?: ReachabilityTargetConfig[]
+  targets: ReachabilityTargetConfig[]
   intervalMs: number
   timeoutMs: number
 }
@@ -29,8 +27,21 @@ export interface NetWatcherSnapshot {
   state: SnapshotState
   network: NetworkSnapshot
   reachability: ReachabilitySnapshot
-  quality: QualitySnapshot
   changes: SnapshotChanges
+}
+
+export interface NetworkUpdatedPayload {
+  snapshotId: string
+  timestamp: string
+  platform: string
+  state: SnapshotState
+  network: NetworkSnapshot
+}
+
+export interface TargetUpdatedPayload {
+  snapshotId: string
+  timestamp: string
+  target: ReachabilityTargetSnapshot
 }
 
 export interface SnapshotMeta {
@@ -43,19 +54,58 @@ export interface SnapshotMeta {
 export interface SnapshotState {
   overall: OverallState
   network: NetworkLayerState
-  quality: QualityLayerState
-  score: number
+  internet: InternetStatus
   reason: string
 }
 
 export type NetworkLayerState = 'unknown' | 'disconnected' | 'connected'
 
-export type QualityLayerState = 'unknown' | 'unreachable' | 'unstable' | 'stable'
-
 export interface NetworkSnapshot {
   primaryInterfaceId: string | null
   interfaces: NetworkInterface[]
+  internet: InternetSnapshot
 }
+
+export interface InternetSnapshot {
+  status: InternetStatus
+  verified: boolean
+  systemHint: InternetSystemHint
+  activeProbe: InternetProbeResult | null
+  captivePortal: boolean
+  checkedAt: string | null
+  consecutiveFailures: number
+  reason: string
+}
+
+export type InternetStatus =
+  | 'unknown'
+  | 'available'
+  | 'degraded'
+  | 'unavailable'
+  | 'captivePortal'
+
+export interface InternetSystemHint {
+  source: InternetHintSource
+  level: InternetHintLevel
+}
+
+export type InternetHintSource = 'windowsNcsi' | 'macosReachability' | 'unavailable'
+
+export type InternetHintLevel =
+  | 'unknown'
+  | 'none'
+  | 'localAccess'
+  | 'constrainedInternetAccess'
+  | 'internetAccess'
+
+export interface InternetProbeResult {
+  status: InternetProbeStatus
+  durationMs: number
+  httpStatus: number | null
+  error: ProbeError | null
+}
+
+export type InternetProbeStatus = 'success' | 'failed' | 'unexpectedResponse'
 
 export interface NetworkInterface {
   id: string
@@ -79,26 +129,30 @@ export interface InterfaceAddresses {
   mac: string | null
 }
 
-export interface QualitySnapshot {
-  config: QualityConfigSnapshot
-  summary: QualitySummary
-}
-
 export interface ReachabilitySnapshot {
+  config: ReachabilityConfigSnapshot
   targets: ReachabilityTargetSnapshot[]
 }
 
 export interface ReachabilityTargetSnapshot {
   id: string
-  status: ReachabilityStatus
+  state: ReachabilityTargetState
   target: ProbeTarget
   currentProbe: ProbeResult | null
   summary: QualitySummary
 }
 
+export interface ReachabilityTargetState {
+  reachability: ReachabilityStatus
+  quality: TargetQualityState
+  reason: string
+}
+
 export type ReachabilityStatus = 'unknown' | 'reachable' | 'unreachable'
 
-export interface QualityConfigSnapshot {
+export type TargetQualityState = 'unknown' | 'unstable' | 'stable'
+
+export interface ReachabilityConfigSnapshot {
   intervalMs: number
   windowSize: number
   timeoutMs: number
@@ -165,9 +219,11 @@ export interface SnapshotChanges {
   previousOverall: OverallState | null
   currentOverall: OverallState
   changedFields: string[]
+  changedTargetIds: string[]
 }
 
-export const SNAPSHOT_EVENT = 'net-watcher://snapshot-updated'
+export const NETWORK_UPDATED_EVENT = 'net-watcher://network-updated'
+export const TARGET_UPDATED_EVENT = 'net-watcher://target-updated'
 
 export async function getSnapshot(): Promise<NetWatcherSnapshot> {
   return await invoke<NetWatcherSnapshot>('plugin:net-watcher|get_snapshot')
@@ -185,8 +241,18 @@ export async function getConfig(): Promise<NetWatcherConfig> {
   return await invoke<NetWatcherConfig>('plugin:net-watcher|get_config')
 }
 
-export async function onSnapshotUpdated(
-  handler: (snapshot: NetWatcherSnapshot) => void,
+export async function onNetworkUpdated(
+  handler: (payload: NetworkUpdatedPayload) => void,
 ): Promise<UnlistenFn> {
-  return await listen<NetWatcherSnapshot>(SNAPSHOT_EVENT, (event) => handler(event.payload))
+  return await listen<NetworkUpdatedPayload>(NETWORK_UPDATED_EVENT, (event) => {
+    handler(event.payload)
+  })
+}
+
+export async function onTargetUpdated(
+  handler: (payload: TargetUpdatedPayload) => void,
+): Promise<UnlistenFn> {
+  return await listen<TargetUpdatedPayload>(TARGET_UPDATED_EVENT, (event) => {
+    handler(event.payload)
+  })
 }

@@ -13,9 +13,11 @@ mod mobile;
 
 mod commands;
 mod error;
+mod internet;
 mod models;
 mod network;
 mod quality;
+mod schedule;
 mod snapshot;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod watcher;

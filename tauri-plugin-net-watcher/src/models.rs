@@ -9,8 +9,6 @@ use crate::NetWatcherConfig;
 pub enum OverallState {
     Unknown,
     Offline,
-    LocalOnly,
-    Degraded,
     Online,
 }
 
@@ -24,9 +22,8 @@ pub enum NetworkLayerState {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub enum QualityLayerState {
+pub enum TargetQualityState {
     Unknown,
-    Unreachable,
     Unstable,
     Stable,
 }
@@ -38,8 +35,50 @@ pub struct NetWatcherSnapshot {
     pub state: SnapshotState,
     pub network: NetworkSnapshot,
     pub reachability: ReachabilitySnapshot,
-    pub quality: QualitySnapshot,
     pub changes: SnapshotChanges,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkUpdatedPayload {
+    pub snapshot_id: String,
+    pub timestamp: DateTime<Utc>,
+    pub platform: String,
+    pub state: SnapshotState,
+    pub network: NetworkSnapshot,
+}
+
+impl NetworkUpdatedPayload {
+    pub(crate) fn from_snapshot(snapshot: &NetWatcherSnapshot) -> Self {
+        Self {
+            snapshot_id: snapshot.meta.snapshot_id.clone(),
+            timestamp: snapshot.meta.timestamp,
+            platform: snapshot.meta.platform.clone(),
+            state: snapshot.state.clone(),
+            network: snapshot.network.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TargetUpdatedPayload {
+    pub snapshot_id: String,
+    pub timestamp: DateTime<Utc>,
+    pub target: ReachabilityTargetSnapshot,
+}
+
+impl TargetUpdatedPayload {
+    pub(crate) fn from_snapshot(
+        snapshot: &NetWatcherSnapshot,
+        target: &ReachabilityTargetSnapshot,
+    ) -> Self {
+        Self {
+            snapshot_id: snapshot.meta.snapshot_id.clone(),
+            timestamp: snapshot.meta.timestamp,
+            target: target.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -56,8 +95,7 @@ pub struct SnapshotMeta {
 pub struct SnapshotState {
     pub overall: OverallState,
     pub network: NetworkLayerState,
-    pub quality: QualityLayerState,
-    pub score: u8,
+    pub internet: InternetStatus,
     pub reason: String,
 }
 
@@ -66,6 +104,96 @@ pub struct SnapshotState {
 pub struct NetworkSnapshot {
     pub primary_interface_id: Option<String>,
     pub interfaces: Vec<NetworkInterface>,
+    pub internet: InternetSnapshot,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InternetSnapshot {
+    pub status: InternetStatus,
+    pub verified: bool,
+    pub system_hint: InternetSystemHint,
+    pub active_probe: Option<InternetProbeResult>,
+    pub captive_portal: bool,
+    pub checked_at: Option<DateTime<Utc>>,
+    pub consecutive_failures: usize,
+    pub reason: String,
+}
+
+impl Default for InternetSnapshot {
+    fn default() -> Self {
+        Self {
+            status: InternetStatus::Unknown,
+            verified: false,
+            system_hint: InternetSystemHint::default(),
+            active_probe: None,
+            captive_portal: false,
+            checked_at: None,
+            consecutive_failures: 0,
+            reason: "internet_state_unknown".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum InternetStatus {
+    Unknown,
+    Available,
+    Degraded,
+    Unavailable,
+    CaptivePortal,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InternetSystemHint {
+    pub source: InternetHintSource,
+    pub level: InternetHintLevel,
+}
+
+impl Default for InternetSystemHint {
+    fn default() -> Self {
+        Self {
+            source: InternetHintSource::Unavailable,
+            level: InternetHintLevel::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum InternetHintSource {
+    WindowsNcsi,
+    MacosReachability,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum InternetHintLevel {
+    Unknown,
+    None,
+    LocalAccess,
+    ConstrainedInternetAccess,
+    InternetAccess,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InternetProbeResult {
+    pub status: InternetProbeStatus,
+    pub duration_ms: u64,
+    pub http_status: Option<u16>,
+    pub error: Option<ProbeError>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum InternetProbeStatus {
+    Success,
+    Failed,
+    UnexpectedResponse,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -110,14 +238,8 @@ pub struct InterfaceAddresses {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub struct QualitySnapshot {
-    pub config: QualityConfigSnapshot,
-    pub summary: QualitySummary,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
 pub struct ReachabilitySnapshot {
+    pub config: ReachabilityConfigSnapshot,
     pub targets: Vec<ReachabilityTargetSnapshot>,
 }
 
@@ -125,10 +247,18 @@ pub struct ReachabilitySnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct ReachabilityTargetSnapshot {
     pub id: String,
-    pub status: ReachabilityStatus,
+    pub state: ReachabilityTargetState,
     pub target: ProbeTarget,
     pub current_probe: Option<ProbeResult>,
     pub summary: QualitySummary,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReachabilityTargetState {
+    pub reachability: ReachabilityStatus,
+    pub quality: TargetQualityState,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -141,7 +271,7 @@ pub enum ReachabilityStatus {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct QualityConfigSnapshot {
+pub struct ReachabilityConfigSnapshot {
     pub interval_ms: u64,
     pub window_size: usize,
     pub timeout_ms: u64,
@@ -234,6 +364,7 @@ pub struct SnapshotChanges {
     pub previous_overall: Option<OverallState>,
     pub current_overall: OverallState,
     pub changed_fields: Vec<String>,
+    pub changed_target_ids: Vec<String>,
 }
 
 impl NetWatcherSnapshot {
@@ -254,18 +385,27 @@ impl NetWatcherSnapshot {
             state: SnapshotState {
                 overall: overall.clone(),
                 network: NetworkLayerState::Unknown,
-                quality: QualityLayerState::Unknown,
-                score: 0,
-                reason: "insufficient_data".to_string(),
+                internet: InternetStatus::Unknown,
+                reason: "network_state_unknown".to_string(),
             },
             network: NetworkSnapshot::default(),
             reachability: ReachabilitySnapshot {
+                config: ReachabilityConfigSnapshot {
+                    interval_ms: config.interval_ms,
+                    window_size: config.window_size(),
+                    timeout_ms: config.timeout_ms,
+                },
                 targets: config
-                    .effective_targets()
+                    .targets
+                    .clone()
                     .into_iter()
                     .map(|target| ReachabilityTargetSnapshot {
                         id: target.id,
-                        status: ReachabilityStatus::Unknown,
+                        state: ReachabilityTargetState {
+                            reachability: ReachabilityStatus::Unknown,
+                            quality: TargetQualityState::Unknown,
+                            reason: "insufficient_data".to_string(),
+                        },
                         target: ProbeTarget {
                             target_type: ProbeTargetType::Http,
                             url: target.url,
@@ -275,19 +415,12 @@ impl NetWatcherSnapshot {
                     })
                     .collect(),
             },
-            quality: QualitySnapshot {
-                config: QualityConfigSnapshot {
-                    interval_ms: config.interval_ms,
-                    window_size: config.window_size(),
-                    timeout_ms: config.timeout_ms,
-                },
-                summary: QualitySummary::default(),
-            },
             changes: SnapshotChanges {
                 has_changes: false,
                 previous_overall: None,
                 current_overall: overall,
                 changed_fields: Vec::new(),
+                changed_target_ids: Vec::new(),
             },
         }
     }
@@ -304,21 +437,22 @@ mod tests {
 
         assert_eq!(value["state"]["overall"], "unknown");
         assert_eq!(value["state"]["network"], "unknown");
-        assert_eq!(value["state"]["quality"], "unknown");
-        assert_eq!(value["reachability"]["targets"][0]["id"], "default");
-        assert_eq!(
-            value["reachability"]["targets"][0]["target"]["url"],
-            "https://www.apple.com/library/test/success.html"
-        );
-        assert_eq!(value["quality"]["summary"]["sampleCount"], 0);
-        assert!(value["quality"].get("target").is_none());
-        assert!(value["quality"].get("currentProbe").is_none());
+        assert_eq!(value["state"]["internet"], "unknown");
+        assert_eq!(value["network"]["internet"]["status"], "unknown");
+        assert!(value["state"].get("quality").is_none());
+        assert!(value["state"].get("score").is_none());
+        assert_eq!(value["reachability"]["targets"], serde_json::json!([]));
+        assert_eq!(value["reachability"]["config"]["intervalMs"], 10_000);
+        assert!(value.get("quality").is_none());
     }
 
     #[test]
     fn initial_snapshot_reflects_config() {
         let config = crate::NetWatcherConfig {
-            target: "https://example.com/health".to_string(),
+            targets: vec![crate::ReachabilityTargetConfig {
+                id: "api".to_string(),
+                url: "https://example.com/health".to_string(),
+            }],
             interval_ms: 5_000,
             timeout_ms: 1_500,
             ..Default::default()
@@ -326,14 +460,14 @@ mod tests {
 
         let snapshot = NetWatcherSnapshot::initial_with_config("0.1.0", &config);
 
-        assert_eq!(snapshot.reachability.targets[0].id, "default");
+        assert_eq!(snapshot.reachability.targets[0].id, "api");
         assert_eq!(
             snapshot.reachability.targets[0].target.url,
             "https://example.com/health"
         );
-        assert_eq!(snapshot.quality.config.interval_ms, 5_000);
-        assert_eq!(snapshot.quality.config.timeout_ms, 1_500);
-        assert_eq!(snapshot.quality.config.window_size, 20);
+        assert_eq!(snapshot.reachability.config.interval_ms, 5_000);
+        assert_eq!(snapshot.reachability.config.timeout_ms, 1_500);
+        assert_eq!(snapshot.reachability.config.window_size, 20);
     }
 
     #[test]
@@ -365,6 +499,51 @@ mod tests {
             snapshot.reachability.targets[1].target.url,
             "https://cdn.example.com/ping"
         );
-        assert_eq!(snapshot.quality.summary.sample_count, 0);
+        assert_eq!(snapshot.reachability.targets[0].summary.sample_count, 0);
+        assert_eq!(snapshot.reachability.targets[1].summary.sample_count, 0);
+    }
+
+    #[test]
+    fn network_update_payload_contains_only_network_panel_data() {
+        let snapshot = NetWatcherSnapshot::initial("0.1.0");
+        let value = serde_json::to_value(NetworkUpdatedPayload::from_snapshot(&snapshot)).unwrap();
+
+        assert!(value.get("snapshotId").is_some());
+        assert!(value.get("timestamp").is_some());
+        assert!(value.get("platform").is_some());
+        assert!(value.get("state").is_some());
+        assert!(value.get("network").is_some());
+        assert!(value.get("meta").is_none());
+        assert!(value.get("reachability").is_none());
+        assert!(value.get("changes").is_none());
+    }
+
+    #[test]
+    fn target_update_payload_contains_one_target_only() {
+        let config = crate::NetWatcherConfig {
+            targets: vec![
+                crate::ReachabilityTargetConfig {
+                    id: "api".to_string(),
+                    url: "https://api.example.com/health".to_string(),
+                },
+                crate::ReachabilityTargetConfig {
+                    id: "cdn".to_string(),
+                    url: "https://cdn.example.com/ping".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        let snapshot = NetWatcherSnapshot::initial_with_config("0.1.0", &config);
+        let value = serde_json::to_value(TargetUpdatedPayload::from_snapshot(
+            &snapshot,
+            &snapshot.reachability.targets[0],
+        ))
+        .unwrap();
+
+        assert_eq!(value["target"]["id"], "api");
+        assert!(value.get("network").is_none());
+        assert!(value.get("state").is_none());
+        assert!(value.get("reachability").is_none());
+        assert!(value["target"].get("targets").is_none());
     }
 }

@@ -31,9 +31,9 @@
 
 ## 核心约束
 
-- `tauri.conf.json` 中只接受 `autoStart`、`target`、`intervalMs`、`timeoutMs`。
+- `tauri.conf.json` 中只接受 `autoStart`、`targets`、`intervalMs`、`timeoutMs`。
 - 内部阈值不通过配置文件或 `get_config` 暴露。
-- `start_watching` 只能覆盖本次会话的 `target`、`intervalMs`、`timeoutMs`。
+- `start_watching` 只能覆盖本次会话的 `targets`、`intervalMs`、`timeoutMs`。
 - 重复启动返回 `already_watching`。
 - 未启动时停止返回 `not_watching`。
 - 停止 watcher 时发送停止信号并等待后台任务退出。
@@ -59,4 +59,3 @@ corepack pnpm tauri build --debug
 ```
 
 示例应用的 Tauri bundle identifier 不能保持默认 `com.tauri.dev`，否则 Tauri 会拒绝构建。
-

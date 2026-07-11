@@ -9,6 +9,8 @@ use crate::{
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct PlatformInterfaceDetails {
     interface_type: Option<InterfaceType>,
+    operational_status: Option<InterfaceStatus>,
+    display_name: Option<String>,
     gateway: Option<String>,
     dns_servers: Vec<String>,
     mac: Option<String>,
@@ -43,6 +45,7 @@ pub fn read_network_snapshot(include_mac_address: bool) -> crate::Result<Network
     Ok(NetworkSnapshot {
         primary_interface_id,
         interfaces,
+        internet: Default::default(),
     })
 }
 
@@ -66,16 +69,19 @@ fn build_interfaces_from_entries_with_platform_details(
                     .cloned()
                     .unwrap_or_default();
                 let interface_type = resolve_interface_type(&name, &details);
-                let status = if interface_type == InterfaceType::Loopback {
-                    InterfaceStatus::Down
-                } else {
-                    InterfaceStatus::Up
-                };
+                let status = details.operational_status.clone().unwrap_or_else(|| {
+                    if interface_type == InterfaceType::Loopback {
+                        InterfaceStatus::Down
+                    } else {
+                        InterfaceStatus::Up
+                    }
+                });
+                let display_name = details.display_name.clone().unwrap_or_else(|| name.clone());
 
                 NetworkInterface {
                     id: sanitize_id(&name),
                     name: name.clone(),
-                    display_name: name,
+                    display_name,
                     interface_type,
                     status,
                     is_primary: false,
@@ -343,6 +349,14 @@ impl PlatformInterfaceDetails {
             self.interface_type = other.interface_type;
         }
 
+        if other.operational_status.is_some() {
+            self.operational_status = other.operational_status;
+        }
+
+        if other.display_name.is_some() {
+            self.display_name = other.display_name;
+        }
+
         if other.gateway.is_some() {
             self.gateway = other.gateway;
         }
@@ -419,6 +433,12 @@ fn read_windows_adapter_details() -> crate::Result<BTreeMap<String, PlatformInte
 
         let mut entry = PlatformInterfaceDetails {
             interface_type: Some(interface_type),
+            operational_status: Some(if adapter_ref.OperStatus == IfOperStatusUp {
+                InterfaceStatus::Up
+            } else {
+                InterfaceStatus::Down
+            }),
+            display_name: friendly_name.clone(),
             gateway,
             dns_servers,
             mac: None,
@@ -646,7 +666,7 @@ fn can_be_primary(interface: &NetworkInterface) -> bool {
         && !interface.addresses.ipv4.is_empty()
 }
 
-fn primary_priority(interface: &NetworkInterface) -> (u8, u8) {
+fn primary_priority(interface: &NetworkInterface) -> (u8, u8, u8) {
     (
         if has_non_link_local_ipv4(interface) {
             0
@@ -659,6 +679,7 @@ fn primary_priority(interface: &NetworkInterface) -> (u8, u8) {
             InterfaceType::Unknown => 2,
             InterfaceType::Loopback => 3,
         },
+        if interface.gateway.is_some() { 0 } else { 1 },
     )
 }
 
@@ -997,6 +1018,52 @@ mod tests {
                 .map(|interface| interface.name.as_str()),
             Some("WLAN")
         );
+    }
+
+    #[test]
+    fn disconnected_wifi_with_stale_address_is_not_selected_over_connected_ethernet() {
+        let mut interface_details = BTreeMap::new();
+        interface_details.insert(
+            "adapter-a".to_string(),
+            PlatformInterfaceDetails {
+                interface_type: Some(InterfaceType::Wifi),
+                operational_status: Some(InterfaceStatus::Down),
+                ..Default::default()
+            },
+        );
+        interface_details.insert(
+            "adapter-b".to_string(),
+            PlatformInterfaceDetails {
+                interface_type: Some(InterfaceType::Ethernet),
+                operational_status: Some(InterfaceStatus::Up),
+                gateway: Some("192.168.1.1".to_string()),
+                ..Default::default()
+            },
+        );
+        let mut interfaces = build_interfaces_from_entries_with_platform_details(
+            vec![
+                (
+                    "adapter-a".to_string(),
+                    IpAddr::V4(Ipv4Addr::new(192, 168, 0, 20)),
+                ),
+                (
+                    "adapter-b".to_string(),
+                    IpAddr::V4(Ipv4Addr::new(192, 168, 1, 20)),
+                ),
+            ],
+            &interface_details,
+        );
+
+        mark_primary(&mut interfaces);
+
+        assert_eq!(
+            interfaces
+                .iter()
+                .find(|interface| interface.is_primary)
+                .map(|interface| interface.name.as_str()),
+            Some("adapter-b")
+        );
+        assert_eq!(interfaces[0].status, InterfaceStatus::Down);
     }
 
     #[test]

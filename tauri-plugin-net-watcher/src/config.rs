@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use url::Url;
 
-const DEFAULT_TARGET: &str = "https://www.apple.com/library/test/success.html";
 const MIN_INTERVAL_MS: u64 = 1_000;
 const MAX_INTERVAL_MS: u64 = 3_600_000;
 const MIN_TIMEOUT_MS: u64 = 100;
@@ -13,9 +12,7 @@ const MAX_TIMEOUT_MS: u64 = 60_000;
 pub struct NetWatcherConfig {
     #[serde(default)]
     pub auto_start: bool,
-    #[serde(default = "default_target")]
-    pub target: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub targets: Vec<ReachabilityTargetConfig>,
     #[serde(default = "default_interval_ms")]
     pub interval_ms: u64,
@@ -31,9 +28,8 @@ pub struct ReachabilityTargetConfig {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StartWatchingOptions {
-    pub target: Option<String>,
     pub targets: Option<Vec<ReachabilityTargetConfig>>,
     pub interval_ms: Option<u64>,
     pub timeout_ms: Option<u64>,
@@ -43,7 +39,6 @@ impl Default for NetWatcherConfig {
     fn default() -> Self {
         Self {
             auto_start: false,
-            target: default_target(),
             targets: Vec::new(),
             interval_ms: default_interval_ms(),
             timeout_ms: default_timeout_ms(),
@@ -53,10 +48,6 @@ impl Default for NetWatcherConfig {
 
 impl NetWatcherConfig {
     pub fn with_runtime_options(mut self, options: StartWatchingOptions) -> Self {
-        if let Some(target) = options.target {
-            self.target = target;
-        }
-
         if let Some(targets) = options.targets {
             self.targets = targets;
         }
@@ -73,8 +64,6 @@ impl NetWatcherConfig {
     }
 
     pub fn validate(&self) -> crate::Result<()> {
-        validate_target_url(&self.target)?;
-
         let mut target_ids = BTreeSet::new();
         for target in &self.targets {
             if target.id.trim().is_empty() {
@@ -114,17 +103,6 @@ impl NetWatcherConfig {
         Ok(())
     }
 
-    pub(crate) fn effective_targets(&self) -> Vec<ReachabilityTargetConfig> {
-        if self.targets.is_empty() {
-            vec![ReachabilityTargetConfig {
-                id: "default".to_string(),
-                url: self.target.clone(),
-            }]
-        } else {
-            self.targets.clone()
-        }
-    }
-
     pub(crate) fn window_size(&self) -> usize {
         default_window_size()
     }
@@ -137,17 +115,9 @@ impl NetWatcherConfig {
         default_degraded_p95_latency_ms()
     }
 
-    pub(crate) fn offline_consecutive_failures(&self) -> usize {
-        default_offline_consecutive_failures()
-    }
-
     pub(crate) fn include_mac_address(&self) -> bool {
         false
     }
-}
-
-fn default_target() -> String {
-    DEFAULT_TARGET.to_string()
 }
 
 fn validate_target_url(value: &str) -> crate::Result<()> {
@@ -190,10 +160,6 @@ fn default_degraded_p95_latency_ms() -> u64 {
     800
 }
 
-fn default_offline_consecutive_failures() -> usize {
-    3
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,10 +170,7 @@ mod tests {
         let config = NetWatcherConfig::default();
 
         assert!(!config.auto_start);
-        assert_eq!(
-            config.target,
-            "https://www.apple.com/library/test/success.html"
-        );
+        assert!(config.targets.is_empty());
         assert_eq!(config.interval_ms, 10_000);
         assert_eq!(config.timeout_ms, 3_000);
     }
@@ -220,7 +183,7 @@ mod tests {
             value,
             json!({
                 "autoStart": false,
-                "target": "https://www.apple.com/library/test/success.html",
+                "targets": [],
                 "intervalMs": 10000,
                 "timeoutMs": 3000
             })
@@ -230,7 +193,7 @@ mod tests {
     #[test]
     fn internal_fields_are_rejected_from_public_config() {
         let value = json!({
-            "target": "https://example.com/health",
+            "targets": [{ "id": "api", "url": "https://example.com/health" }],
             "windowSize": 3
         });
 
@@ -240,52 +203,49 @@ mod tests {
     }
 
     #[test]
+    fn legacy_target_field_is_rejected() {
+        let config_error = serde_json::from_value::<NetWatcherConfig>(json!({
+            "target": "https://example.com/health"
+        }))
+        .unwrap_err();
+        let options_error = serde_json::from_value::<StartWatchingOptions>(json!({
+            "target": "https://example.com/health"
+        }))
+        .unwrap_err();
+
+        assert!(config_error.to_string().contains("unknown field"));
+        assert!(options_error.to_string().contains("unknown field"));
+    }
+
+    #[test]
     fn runtime_options_override_session_values_only() {
         let base = NetWatcherConfig::default();
         let options = StartWatchingOptions {
-            target: Some("https://api.example.com/health".to_string()),
-            targets: None,
+            targets: Some(vec![ReachabilityTargetConfig {
+                id: "api".to_string(),
+                url: "https://api.example.com/health".to_string(),
+            }]),
             interval_ms: Some(5_000),
             timeout_ms: Some(1_500),
         };
 
         let merged = base.with_runtime_options(options);
 
-        assert_eq!(merged.target, "https://api.example.com/health");
+        assert_eq!(merged.targets.len(), 1);
+        assert_eq!(merged.targets[0].id, "api");
+        assert_eq!(merged.targets[0].url, "https://api.example.com/health");
         assert_eq!(merged.interval_ms, 5_000);
         assert_eq!(merged.timeout_ms, 1_500);
     }
 
     #[test]
-    fn effective_targets_use_legacy_target_when_targets_are_empty() {
+    fn accepts_empty_targets() {
         let config = NetWatcherConfig {
-            target: "https://api.example.com/health".to_string(),
+            targets: Vec::new(),
             ..Default::default()
         };
 
-        let targets = config.effective_targets();
-
-        assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].id, "default");
-        assert_eq!(targets[0].url, "https://api.example.com/health");
-    }
-
-    #[test]
-    fn effective_targets_prefer_explicit_targets() {
-        let config = NetWatcherConfig {
-            target: "https://legacy.example.com/health".to_string(),
-            targets: vec![ReachabilityTargetConfig {
-                id: "api".to_string(),
-                url: "https://api.example.com/health".to_string(),
-            }],
-            ..Default::default()
-        };
-
-        let targets = config.effective_targets();
-
-        assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].id, "api");
-        assert_eq!(targets[0].url, "https://api.example.com/health");
+        config.validate().unwrap();
     }
 
     #[test]
@@ -310,8 +270,10 @@ mod tests {
     #[test]
     fn invalid_runtime_values_are_rejected() {
         let options = StartWatchingOptions {
-            target: Some("file:///tmp/health".to_string()),
-            targets: None,
+            targets: Some(vec![ReachabilityTargetConfig {
+                id: "api".to_string(),
+                url: "file:///tmp/health".to_string(),
+            }]),
             interval_ms: Some(0),
             timeout_ms: Some(0),
         };
@@ -327,7 +289,10 @@ mod tests {
     #[test]
     fn rejects_malformed_target_url() {
         let config = NetWatcherConfig {
-            target: "https://".to_string(),
+            targets: vec![ReachabilityTargetConfig {
+                id: "api".to_string(),
+                url: "https://".to_string(),
+            }],
             ..Default::default()
         };
 
@@ -382,7 +347,6 @@ mod tests {
         assert_eq!(config.window_size(), 20);
         assert_eq!(config.degraded_failure_rate(), 0.15);
         assert_eq!(config.degraded_p95_latency_ms(), 800);
-        assert_eq!(config.offline_consecutive_failures(), 3);
         assert!(!config.include_mac_address());
     }
 }

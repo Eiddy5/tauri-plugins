@@ -1,17 +1,15 @@
 use chrono::Utc;
 
 use crate::{
-    NetWatcherSnapshot, NetworkSnapshot, ProbeResult, QualityConfigSnapshot, QualitySnapshot,
-    QualitySummary, ReachabilitySnapshot, ReachabilityTargetSnapshot, SnapshotChanges,
-    SnapshotMeta, SnapshotState,
+    NetWatcherSnapshot, NetworkSnapshot, ProbeResult, ReachabilityConfigSnapshot,
+    ReachabilitySnapshot, ReachabilityTargetSnapshot, SnapshotChanges, SnapshotMeta, SnapshotState,
 };
 
 pub(crate) struct SnapshotBuildInput {
     pub(crate) network: NetworkSnapshot,
     pub(crate) state: SnapshotState,
-    pub(crate) quality_config: QualityConfigSnapshot,
+    pub(crate) reachability_config: ReachabilityConfigSnapshot,
     pub(crate) reachability_targets: Vec<ReachabilityTargetSnapshot>,
-    pub(crate) summary: QualitySummary,
 }
 
 pub(crate) fn build_snapshot(
@@ -29,25 +27,26 @@ pub(crate) fn build_snapshot(
         state: input.state,
         network: input.network,
         reachability: ReachabilitySnapshot {
+            config: input.reachability_config,
             targets: input.reachability_targets,
-        },
-        quality: QualitySnapshot {
-            config: input.quality_config,
-            summary: input.summary,
         },
         changes: SnapshotChanges {
             has_changes: false,
             previous_overall: Some(previous.state.overall.clone()),
             current_overall,
             changed_fields: Vec::new(),
+            changed_target_ids: Vec::new(),
         },
     };
+    let changed_target_ids =
+        changed_target_ids(&previous.reachability.targets, &next.reachability.targets);
     let changed_fields = changed_fields(previous, &next);
 
     NetWatcherSnapshot {
         changes: SnapshotChanges {
             has_changes: !changed_fields.is_empty(),
             changed_fields,
+            changed_target_ids,
             ..next.changes
         },
         ..next
@@ -57,31 +56,31 @@ pub(crate) fn build_snapshot(
 fn changed_fields(previous: &NetWatcherSnapshot, next: &NetWatcherSnapshot) -> Vec<String> {
     let mut fields = Vec::new();
 
-    if previous.network != next.network {
+    if previous.network.primary_interface_id != next.network.primary_interface_id
+        || previous.network.interfaces != next.network.interfaces
+    {
         fields.push("network".to_string());
     }
 
-    if previous.quality.config.interval_ms != next.quality.config.interval_ms {
-        fields.push("quality.config.intervalMs".to_string());
+    if internet_changed(&previous.network.internet, &next.network.internet) {
+        fields.push("network.internet".to_string());
     }
 
-    if previous.quality.config.window_size != next.quality.config.window_size {
-        fields.push("quality.config.windowSize".to_string());
+    if previous.reachability.config.interval_ms != next.reachability.config.interval_ms {
+        fields.push("reachability.config.intervalMs".to_string());
     }
 
-    if previous.quality.config.timeout_ms != next.quality.config.timeout_ms {
-        fields.push("quality.config.timeoutMs".to_string());
+    if previous.reachability.config.window_size != next.reachability.config.window_size {
+        fields.push("reachability.config.windowSize".to_string());
     }
 
-    if reachability_targets_changed(&previous.reachability.targets, &next.reachability.targets) {
+    if previous.reachability.config.timeout_ms != next.reachability.config.timeout_ms {
+        fields.push("reachability.config.timeoutMs".to_string());
+    }
+
+    if !changed_target_ids(&previous.reachability.targets, &next.reachability.targets).is_empty() {
         fields.push("reachability.targets".to_string());
     }
-
-    changed_summary_fields(
-        &previous.quality.summary,
-        &next.quality.summary,
-        &mut fields,
-    );
 
     if previous.state.overall != next.state.overall {
         fields.push("state.overall".to_string());
@@ -91,12 +90,8 @@ fn changed_fields(previous: &NetWatcherSnapshot, next: &NetWatcherSnapshot) -> V
         fields.push("state.network".to_string());
     }
 
-    if previous.state.quality != next.state.quality {
-        fields.push("state.quality".to_string());
-    }
-
-    if previous.state.score != next.state.score {
-        fields.push("state.score".to_string());
+    if previous.state.internet != next.state.internet {
+        fields.push("state.internet".to_string());
     }
 
     if previous.state.reason != next.state.reason {
@@ -104,6 +99,23 @@ fn changed_fields(previous: &NetWatcherSnapshot, next: &NetWatcherSnapshot) -> V
     }
 
     fields
+}
+
+fn internet_changed(previous: &crate::InternetSnapshot, next: &crate::InternetSnapshot) -> bool {
+    previous.status != next.status
+        || previous.verified != next.verified
+        || previous.system_hint != next.system_hint
+        || previous
+            .active_probe
+            .as_ref()
+            .map(|probe| (&probe.status, probe.http_status, &probe.error))
+            != next
+                .active_probe
+                .as_ref()
+                .map(|probe| (&probe.status, probe.http_status, &probe.error))
+        || previous.captive_portal != next.captive_portal
+        || previous.consecutive_failures != next.consecutive_failures
+        || previous.reason != next.reason
 }
 
 fn probe_changed(previous: &Option<ProbeResult>, next: &Option<ProbeResult>) -> bool {
@@ -118,90 +130,74 @@ fn probe_changed(previous: &Option<ProbeResult>, next: &Option<ProbeResult>) -> 
     }
 }
 
-fn reachability_targets_changed(
+fn changed_target_ids(
     previous: &[ReachabilityTargetSnapshot],
     next: &[ReachabilityTargetSnapshot],
-) -> bool {
-    if previous.len() != next.len() {
-        return true;
-    }
+) -> Vec<String> {
+    let mut changed = next
+        .iter()
+        .filter(|next_target| {
+            match previous
+                .iter()
+                .find(|previous_target| previous_target.id == next_target.id)
+            {
+                Some(previous_target) => target_changed(previous_target, next_target),
+                None => true,
+            }
+        })
+        .map(|target| target.id.clone())
+        .collect::<Vec<_>>();
 
-    previous.iter().zip(next).any(|(previous, next)| {
-        previous.id != next.id
-            || previous.status != next.status
-            || previous.target != next.target
-            || probe_changed(&previous.current_probe, &next.current_probe)
-            || previous.summary.sample_count != next.summary.sample_count
-            || previous.summary.success_count != next.summary.success_count
-            || previous.summary.failure_count != next.summary.failure_count
-            || previous.summary.failure_rate != next.summary.failure_rate
-            || previous.summary.latency_ms != next.summary.latency_ms
-            || previous.summary.jitter_ms != next.summary.jitter_ms
-            || previous.summary.consecutive_failures != next.summary.consecutive_failures
-            || previous.summary.last_failure_reason != next.summary.last_failure_reason
-    })
+    changed.extend(
+        previous
+            .iter()
+            .filter(|previous_target| {
+                !next
+                    .iter()
+                    .any(|next_target| next_target.id == previous_target.id)
+            })
+            .map(|target| target.id.clone()),
+    );
+
+    changed
 }
 
-fn changed_summary_fields(
-    previous: &QualitySummary,
-    next: &QualitySummary,
-    fields: &mut Vec<String>,
-) {
-    if previous.sample_count != next.sample_count {
-        fields.push("quality.summary.sampleCount".to_string());
-    }
-
-    if previous.success_count != next.success_count {
-        fields.push("quality.summary.successCount".to_string());
-    }
-
-    if previous.failure_count != next.failure_count {
-        fields.push("quality.summary.failureCount".to_string());
-    }
-
-    if previous.failure_rate != next.failure_rate {
-        fields.push("quality.summary.failureRate".to_string());
-    }
-
-    if previous.latency_ms.avg != next.latency_ms.avg {
-        fields.push("quality.summary.latencyMs.avg".to_string());
-    }
-
-    if previous.latency_ms.min != next.latency_ms.min {
-        fields.push("quality.summary.latencyMs.min".to_string());
-    }
-
-    if previous.latency_ms.max != next.latency_ms.max {
-        fields.push("quality.summary.latencyMs.max".to_string());
-    }
-
-    if previous.latency_ms.p95 != next.latency_ms.p95 {
-        fields.push("quality.summary.latencyMs.p95".to_string());
-    }
-
-    if previous.jitter_ms != next.jitter_ms {
-        fields.push("quality.summary.jitterMs".to_string());
-    }
-
-    if previous.consecutive_failures != next.consecutive_failures {
-        fields.push("quality.summary.consecutiveFailures".to_string());
-    }
-
-    if previous.last_failure_reason != next.last_failure_reason {
-        fields.push("quality.summary.lastFailureReason".to_string());
-    }
+fn target_changed(
+    previous: &ReachabilityTargetSnapshot,
+    next: &ReachabilityTargetSnapshot,
+) -> bool {
+    previous.id != next.id
+        || previous.state != next.state
+        || previous.target != next.target
+        || probe_changed(&previous.current_probe, &next.current_probe)
+        || previous.summary.sample_count != next.summary.sample_count
+        || previous.summary.success_count != next.summary.success_count
+        || previous.summary.failure_count != next.summary.failure_count
+        || previous.summary.failure_rate != next.summary.failure_rate
+        || previous.summary.latency_ms != next.summary.latency_ms
+        || previous.summary.jitter_ms != next.summary.jitter_ms
+        || previous.summary.consecutive_failures != next.summary.consecutive_failures
+        || previous.summary.last_failure_reason != next.summary.last_failure_reason
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        LatencySummary, NetWatcherConfig, OverallState, ProbePhases, ProbeStatus, QualitySummary,
+        NetWatcherConfig, OverallState, ProbePhases, ProbeStatus, QualitySummary,
         ReachabilityStatus,
     };
 
     fn snapshot() -> NetWatcherSnapshot {
-        NetWatcherSnapshot::initial_with_config("0.1.0", &NetWatcherConfig::default())
+        let config = NetWatcherConfig {
+            targets: vec![crate::ReachabilityTargetConfig {
+                id: "api".to_string(),
+                url: "https://api.example.com/health".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        NetWatcherSnapshot::initial_with_config("0.1.0", &config)
     }
 
     fn probe(id: &str) -> ProbeResult {
@@ -226,17 +222,21 @@ mod tests {
     }
 
     #[test]
-    fn changed_fields_reports_quality_config_and_reachability_target() {
+    fn changed_fields_reports_reachability_config_and_target() {
         let mut next = snapshot();
-        next.quality.config.interval_ms += 1;
+        next.reachability.config.interval_ms += 1;
         next.reachability.targets[0].target.url = "https://example.com/health".to_string();
         next.reachability.targets[0].current_probe = Some(probe("probe_1"));
-        next.reachability.targets[0].status = ReachabilityStatus::Reachable;
+        next.reachability.targets[0].state.reachability = ReachabilityStatus::Reachable;
 
         let fields = fields_for(&next);
 
-        assert!(fields.contains(&"quality.config.intervalMs".to_string()));
+        assert!(fields.contains(&"reachability.config.intervalMs".to_string()));
         assert!(fields.contains(&"reachability.targets".to_string()));
+        assert_eq!(
+            changed_target_ids(&snapshot().reachability.targets, &next.reachability.targets),
+            vec!["api"]
+        );
     }
 
     #[test]
@@ -270,62 +270,34 @@ mod tests {
     }
 
     #[test]
-    fn changed_fields_reports_quality_summary_subfields() {
+    fn target_summary_changes_are_reported_as_target_changes() {
         let mut next = snapshot();
-        next.quality.summary = QualitySummary {
+        next.reachability.targets[0].summary = QualitySummary {
             sample_count: 1,
             success_count: 1,
-            failure_count: 1,
-            failure_rate: 0.5,
-            latency_ms: LatencySummary {
-                avg: 10,
-                min: 5,
-                max: 20,
-                p95: 18,
-            },
-            jitter_ms: 3,
-            consecutive_failures: 2,
             last_success_at: Some(Utc::now()),
-            last_failure_at: Some(Utc::now()),
-            last_failure_reason: Some("http_timeout".to_string()),
+            ..Default::default()
         };
 
         let fields = fields_for(&next);
 
-        for expected in [
-            "quality.summary.sampleCount",
-            "quality.summary.successCount",
-            "quality.summary.failureCount",
-            "quality.summary.failureRate",
-            "quality.summary.latencyMs.avg",
-            "quality.summary.latencyMs.min",
-            "quality.summary.latencyMs.max",
-            "quality.summary.latencyMs.p95",
-            "quality.summary.jitterMs",
-            "quality.summary.consecutiveFailures",
-            "quality.summary.lastFailureReason",
-        ] {
-            assert!(fields.contains(&expected.to_string()), "missing {expected}");
-        }
-
-        assert!(!fields.contains(&"quality.summary".to_string()));
+        assert_eq!(fields, vec!["reachability.targets"]);
     }
 
     #[test]
     fn changed_fields_ignores_summary_timestamp_churn() {
         let mut previous = snapshot();
-        previous.quality.summary = QualitySummary {
+        previous.reachability.targets[0].summary = QualitySummary {
             sample_count: 2,
             success_count: 2,
             last_success_at: Some(Utc::now()),
             ..Default::default()
         };
         let mut next = previous.clone();
-        next.quality.summary.last_success_at = Some(Utc::now());
+        next.reachability.targets[0].summary.last_success_at = Some(Utc::now());
 
         let fields = changed_fields(&previous, &next);
 
-        assert!(!fields.contains(&"quality.summary.lastSuccessAt".to_string()));
         assert!(fields.is_empty());
     }
 
@@ -333,13 +305,50 @@ mod tests {
     fn changed_fields_keeps_state_field_precision() {
         let mut next = snapshot();
         next.state.overall = OverallState::Online;
-        next.state.score = 99;
-        next.state.reason = "network_stable".to_string();
+        next.state.reason = "network_interface_available".to_string();
 
         let fields = fields_for(&next);
 
         assert!(fields.contains(&"state.overall".to_string()));
-        assert!(fields.contains(&"state.score".to_string()));
         assert!(fields.contains(&"state.reason".to_string()));
+    }
+
+    #[test]
+    fn internet_status_change_is_reported_precisely() {
+        let mut next = snapshot();
+        next.network.internet.status = crate::InternetStatus::Available;
+        next.network.internet.verified = true;
+        next.network.internet.reason = "internet_probe_succeeded".to_string();
+        next.state.internet = crate::InternetStatus::Available;
+
+        let fields = fields_for(&next);
+
+        assert!(fields.contains(&"network.internet".to_string()));
+        assert!(fields.contains(&"state.internet".to_string()));
+        assert!(!fields.contains(&"network".to_string()));
+    }
+
+    #[test]
+    fn internet_probe_timing_churn_does_not_emit_change() {
+        let mut previous = snapshot();
+        previous.network.internet.checked_at = Some(Utc::now());
+        previous.network.internet.active_probe = Some(crate::InternetProbeResult {
+            status: crate::InternetProbeStatus::Success,
+            duration_ms: 40,
+            http_status: Some(200),
+            error: None,
+        });
+        let mut next = previous.clone();
+        next.network.internet.checked_at = Some(Utc::now());
+        next.network
+            .internet
+            .active_probe
+            .as_mut()
+            .unwrap()
+            .duration_ms = 80;
+
+        let fields = changed_fields(&previous, &next);
+
+        assert!(fields.is_empty());
     }
 }
