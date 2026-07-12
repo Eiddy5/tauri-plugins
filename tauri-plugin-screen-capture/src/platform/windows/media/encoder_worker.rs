@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    future::Future,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc, Arc, Condvar, Mutex,
@@ -512,10 +513,7 @@ fn run_transport(
             continue;
         }
         let is_idr = sample.is_h264_idr();
-        match runtime.block_on(tokio::time::timeout(
-            SEND_TIMEOUT,
-            sender.send_sample(sample),
-        )) {
+        match block_on_transport_timeout(&runtime, SEND_TIMEOUT, sender.send_sample(sample)) {
             Ok(Ok(())) => {
                 if is_idr {
                     waiting_for_idr = false;
@@ -539,6 +537,17 @@ fn run_transport(
             }
         }
     }
+}
+
+fn block_on_transport_timeout<F, T>(
+    runtime: &tokio::runtime::Handle,
+    timeout: Duration,
+    future: F,
+) -> std::result::Result<T, tokio::time::error::Elapsed>
+where
+    F: Future<Output = T>,
+{
+    runtime.block_on(async move { tokio::time::timeout(timeout, future).await })
 }
 
 fn should_drop_until_idr(
@@ -581,7 +590,9 @@ fn worker_start_error(error: impl std::fmt::Display) -> crate::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{should_drop_until_idr, EncoderInput, LatestSlot, OrderedSlot};
+    use super::{
+        block_on_transport_timeout, should_drop_until_idr, EncoderInput, LatestSlot, OrderedSlot,
+    };
     use crate::webrtc::track::EncodedVideoSample;
     use crate::{pipeline::frame::VideoFrame, PixelFormat};
     use std::{
@@ -668,5 +679,20 @@ mod tests {
             timestamp_ns: 2,
         };
         assert!(!should_drop_until_idr(true, &idr, &force_keyframe));
+    }
+
+    #[test]
+    fn transport_timeout_enters_runtime_before_constructing_timer() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("test runtime");
+        let handle = runtime.handle().clone();
+        let result = thread::spawn(move || {
+            block_on_transport_timeout(&handle, Duration::from_millis(50), async { 7 })
+        })
+        .join();
+
+        assert_eq!(result.expect("transport thread must not panic"), Ok(7));
     }
 }

@@ -30,6 +30,8 @@
 7. WebRTC 单次 sample 写入限制为 2 秒；超时或发送失败后丢弃该样本并立即请求 IDR，保证 stop 有界。
 8. transport 进入等待 IDR 状态，丢弃失败时已经预编码排队的旧 P 帧；检测到 Annex-B NAL type 5 且成功发送后才恢复普通有序发送，避免旧参考 epoch 在新 IDR 前泄漏给接收端。
 
+transport timeout 必须在 Tokio runtime 内部构造；对应实现修复与回归证据单独记录在 `2026-07-13-windows-transport-tokio-runtime-context-fix-adopted.md`。
+
 ## 验证数据
 
 同一台 Windows 机器、1920×1080@60 目标、Display 1、同一 Notepad 14 次大文本/小文本交替：
