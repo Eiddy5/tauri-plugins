@@ -23,7 +23,7 @@
 
 1. RTCP reader 解析 `ReceiverEstimatedMaximumBitrate`，用“是否已收到 + 最新值”把 REMB 传给 Windows 编码 worker；尚无反馈使用初始最大码率，显式 0 bps 必须进入最低码率，二者不能混用。
 2. 编码目标采用 `min(maxBitrate, REMB × 85%)`，保留 15% transport/RTCP/突发余量。
-3. 最低码率为 `max(maxBitrate / 8, 300 kbps)`；当前 1080p60 最大 8 Mbps，因此最低 1 Mbps。该下限避免静态画面估算偏低时把运动文字压到不可辨认。
+3. 初始最低码率曾为 `maxBitrate / 8`（1080p60 为 1 Mbps），实机发现窗口或文字变化后只能逐步补回细节。屏幕共享质量下限现采用 `max(maxBitrate / 2, 1 Mbps)`；当前 1080p60 最大 8 Mbps，因此最低 4 Mbps。网络低于该质量预算时应进入后续分辨率/帧率自适应，而不是继续把 1080p60 压到文字不可读。
 4. 码率变化不足 10% 时不重复调用驱动，减少 codec property 抖动。
 5. Media Foundation MFT 在设置媒体类型前尝试启用 `CODECAPI_AVLowLatencyMode`、`CODECAPI_AVEncCommonRealTime` 和 `LowDelayVBR`。
 6. 运行中通过 `CODECAPI_AVEncCommonMeanBitRate` 更新硬件编码目标；驱动拒绝某个目标时记录一次错误、停止对同一值逐帧重试，并让 `bitrateKbps=0` 表明未应用。OpenH264 fallback 保持原配置，不伪装成已应用。

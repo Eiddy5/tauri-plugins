@@ -463,7 +463,7 @@ function renderStats() {
   elements.captured.textContent = `Captured ${stats.framesCaptured ?? 0} @ ${(stats.captureFps ?? 0).toFixed(1)}`
   elements.published.textContent = `Published ${stats.framesPublished ?? 0} @ ${(stats.publishFps ?? 0).toFixed(1)}`
   elements.dropped.textContent = `Dropped ${stats.framesDropped ?? 0} C/P/E ${stats.framesCaptureDropped ?? 0}/${stats.framesPipelineDropped ?? 0}/${stats.framesEncoderDropped ?? 0}`
-  elements.fps.textContent = `FPS ${(stats.fps ?? 0).toFixed(1)} readback ${stats.framesCpuReadback ?? 0} ${stats.encoderBackend ?? "no-encoder"}`
+  elements.fps.textContent = `FPS ${(stats.fps ?? 0).toFixed(1)} ${(stats.bitrateKbps ?? 0)}kbps readback ${stats.framesCpuReadback ?? 0} ${stats.encoderBackend ?? "no-encoder"}`
   elements.streaming.textContent = state.stats?.started ? "Streaming" : "Stopped"
   elements.agoraStatus.textContent = state.agoraPublication
     ? `Agora ${state.agoraPublication.channel} / ${state.agoraPublication.uid}`

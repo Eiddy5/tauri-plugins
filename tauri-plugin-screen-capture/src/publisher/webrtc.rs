@@ -239,6 +239,7 @@ impl CapturePublisher for WebRtcPublisher {
             state.stats.frames_dropped = worker.frames_dropped;
             state.stats.frames_encoder_dropped = worker.frames_encoder_dropped;
             state.stats.frames_cpu_readback = worker.frames_cpu_readback;
+            state.stats.bitrate_kbps = worker.bitrate_kbps;
             state.stats.fps = worker.fps;
             state.stats.publish_fps = worker.publish_fps;
             state.stats.encoder_backend = worker.encoder_backend;

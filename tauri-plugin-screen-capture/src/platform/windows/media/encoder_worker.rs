@@ -31,9 +31,49 @@ pub(crate) struct WindowsEncoderWorker {
     transport_thread: Mutex<Option<JoinHandle<()>>>,
 }
 
+#[derive(Clone)]
 enum EncoderInput {
     Cpu(VideoFrame),
     Gpu(WindowsGpuSurface),
+}
+
+impl EncoderInput {
+    fn timestamp_ns(&self) -> u64 {
+        match self {
+            Self::Cpu(frame) => frame.timestamp_ns,
+            Self::Gpu(surface) => surface.timestamp_ns(),
+        }
+    }
+
+    fn with_timestamp(&self, timestamp_ns: u64) -> Self {
+        match self {
+            Self::Cpu(frame) => {
+                let mut repeated = frame.clone();
+                repeated.timestamp_ns = timestamp_ns;
+                Self::Cpu(repeated)
+            }
+            Self::Gpu(surface) => Self::Gpu(surface.with_timestamp(timestamp_ns)),
+        }
+    }
+}
+
+const SCENE_REFRESH_IDLE_TICKS: u32 = 6;
+
+#[derive(Default)]
+struct FrameCadence {
+    repeated_ticks: u32,
+}
+
+impl FrameCadence {
+    fn on_repeat_tick(&mut self) {
+        self.repeated_ticks = self.repeated_ticks.saturating_add(1);
+    }
+
+    fn on_captured_frame(&mut self) -> bool {
+        let refresh = self.repeated_ticks >= SCENE_REFRESH_IDLE_TICKS;
+        self.repeated_ticks = 0;
+        refresh
+    }
 }
 
 impl WindowsEncoderWorker {
@@ -209,6 +249,12 @@ struct LatestState<T> {
     stopped: bool,
 }
 
+enum SlotWait<T> {
+    Value(T),
+    Timeout,
+    Stopped,
+}
+
 impl<T> Default for LatestSlot<T> {
     fn default() -> Self {
         Self {
@@ -232,12 +278,22 @@ impl<T> LatestSlot<T> {
         replaced
     }
 
-    fn wait_next(&self) -> Option<T> {
+    fn wait_next_timeout(&self, timeout: Duration) -> SlotWait<T> {
         let mut state = self.state.lock().expect("latest slot lock");
-        while state.value.is_none() && !state.stopped {
-            state = self.changed.wait(state).expect("latest slot wait");
+        if state.value.is_none() && !state.stopped {
+            let (next, _) = self
+                .changed
+                .wait_timeout(state, timeout)
+                .expect("latest slot timed wait");
+            state = next;
         }
-        state.value.take()
+        if let Some(value) = state.value.take() {
+            SlotWait::Value(value)
+        } else if state.stopped {
+            SlotWait::Stopped
+        } else {
+            SlotWait::Timeout
+        }
     }
 
     fn stop(&self) {
@@ -364,7 +420,34 @@ fn run_encoder(
     let mut gpu_failed = false;
     let mut applied_bitrate_bps = 0;
     let mut rejected_bitrate_bps = None;
-    while let Some(frame) = frame_slot.wait_next() {
+    let frame_period = Duration::from_secs_f64(1.0 / f64::from(fps.max(1)));
+    let frame_duration_ns = 1_000_000_000u64 / u64::from(fps.max(1));
+    let mut cadence = FrameCadence::default();
+    let mut last_frame = None;
+    let mut repeated_timestamp_ns = 0u64;
+    let mut next_repeat_at = Instant::now() + frame_period;
+    loop {
+        let wait_for = next_repeat_at.saturating_duration_since(Instant::now());
+        let (frame, repeated) = match frame_slot.wait_next_timeout(wait_for) {
+            SlotWait::Value(frame) => {
+                if cadence.on_captured_frame() {
+                    force_keyframe.store(true, Ordering::Release);
+                }
+                repeated_timestamp_ns = frame.timestamp_ns();
+                last_frame = Some(frame.clone());
+                next_repeat_at = Instant::now() + frame_period;
+                (frame, false)
+            }
+            SlotWait::Timeout => {
+                let Some(frame) = last_frame.as_ref() else {
+                    continue;
+                };
+                cadence.on_repeat_tick();
+                repeated_timestamp_ns = repeated_timestamp_ns.saturating_add(frame_duration_ns);
+                (frame.with_timestamp(repeated_timestamp_ns), true)
+            }
+            SlotWait::Stopped => break,
+        };
         let requested_bitrate_bps = target_bitrate_bps.load(Ordering::Relaxed);
         if requested_bitrate_bps > 0
             && bitrate_change_is_material(applied_bitrate_bps, requested_bitrate_bps)
@@ -399,12 +482,19 @@ fn run_encoder(
                 Err(error) => {
                     telemetry.dropped.fetch_add(1, Ordering::Relaxed);
                     eprintln!("[screen-capture] Windows CPU fallback encoder failed: {error}");
+                    if repeated {
+                        next_repeat_at =
+                            next_repeat_deadline(next_repeat_at, Instant::now(), frame_period);
+                    }
                     continue;
                 }
             }
         }
         if force_keyframe.swap(false, Ordering::AcqRel) && encoder.force_keyframe().is_err() {
             telemetry.dropped.fetch_add(1, Ordering::Relaxed);
+            if repeated {
+                next_repeat_at = next_repeat_deadline(next_repeat_at, Instant::now(), frame_period);
+            }
             continue;
         }
         let result = match &frame {
@@ -434,6 +524,18 @@ fn run_encoder(
                 eprintln!("[screen-capture] Windows H264 encode failed: {error}");
             }
         }
+        if repeated {
+            next_repeat_at = next_repeat_deadline(next_repeat_at, Instant::now(), frame_period);
+        }
+    }
+}
+
+fn next_repeat_deadline(previous: Instant, now: Instant, period: Duration) -> Instant {
+    let scheduled = previous + period;
+    if scheduled > now {
+        scheduled
+    } else {
+        now + period
     }
 }
 
@@ -450,7 +552,7 @@ fn target_bitrate_from_remb(maximum_bitrate_bps: u64, estimated_bitrate_bps: Opt
     let Some(estimated_bitrate_bps) = estimated_bitrate_bps else {
         return maximum_bitrate_bps;
     };
-    let minimum_bitrate_bps = (maximum_bitrate_bps / 8).max(300_000);
+    let minimum_bitrate_bps = (maximum_bitrate_bps / 2).max(1_000_000);
     estimated_bitrate_bps
         .saturating_mul(85)
         .div_ceil(100)
@@ -592,6 +694,7 @@ fn worker_start_error(error: impl std::fmt::Display) -> crate::Error {
 mod tests {
     use super::{
         block_on_transport_timeout, should_drop_until_idr, EncoderInput, LatestSlot, OrderedSlot,
+        SlotWait,
     };
     use crate::webrtc::track::EncodedVideoSample;
     use crate::{pipeline::frame::VideoFrame, PixelFormat};
@@ -599,7 +702,7 @@ mod tests {
         sync::atomic::{AtomicBool, Ordering},
         sync::Arc,
         thread,
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     fn frame(timestamp_ns: u64) -> VideoFrame {
@@ -617,7 +720,9 @@ mod tests {
         let slot = LatestSlot::default();
         assert!(!slot.replace(EncoderInput::Cpu(frame(1))));
         assert!(slot.replace(EncoderInput::Cpu(frame(2))));
-        let EncoderInput::Cpu(frame) = slot.wait_next().expect("latest frame") else {
+        let SlotWait::Value(EncoderInput::Cpu(frame)) =
+            slot.wait_next_timeout(Duration::from_millis(5))
+        else {
             panic!("expected CPU frame");
         };
         assert_eq!(frame.timestamp_ns, 2);
@@ -646,7 +751,7 @@ mod tests {
         assert_eq!(super::target_bitrate_from_remb(8_000_000, None), 8_000_000);
         assert_eq!(
             super::target_bitrate_from_remb(8_000_000, Some(0)),
-            1_000_000
+            4_000_000
         );
         assert_eq!(
             super::target_bitrate_from_remb(8_000_000, Some(4_800_000)),
@@ -658,7 +763,7 @@ mod tests {
         );
         assert_eq!(
             super::target_bitrate_from_remb(8_000_000, Some(138_000)),
-            1_000_000
+            4_000_000
         );
     }
 
@@ -694,5 +799,43 @@ mod tests {
         .join();
 
         assert_eq!(result.expect("transport thread must not panic"), Ok(7));
+    }
+
+    #[test]
+    fn first_captured_frame_after_idle_requests_scene_refresh() {
+        let mut cadence = super::FrameCadence::default();
+        for _ in 0..6 {
+            cadence.on_repeat_tick();
+        }
+        assert!(cadence.on_captured_frame());
+        assert!(!cadence.on_captured_frame());
+    }
+
+    #[test]
+    fn latest_slot_timeout_keeps_slot_running_for_frame_repeats() {
+        let slot = LatestSlot::<u64>::default();
+        assert!(matches!(
+            slot.wait_next_timeout(Duration::from_millis(5)),
+            SlotWait::Timeout
+        ));
+        assert!(!slot.replace(9));
+        assert!(matches!(
+            slot.wait_next_timeout(Duration::from_millis(5)),
+            SlotWait::Value(9)
+        ));
+    }
+
+    #[test]
+    fn repeat_deadline_accounts_for_encoding_time_without_bursting() {
+        let now = Instant::now();
+        let period = Duration::from_millis(16);
+        assert_eq!(
+            super::next_repeat_deadline(now + period, now + Duration::from_millis(21), period),
+            now + Duration::from_millis(32)
+        );
+        assert_eq!(
+            super::next_repeat_deadline(now + period, now + Duration::from_millis(36), period),
+            now + Duration::from_millis(52)
+        );
     }
 }
