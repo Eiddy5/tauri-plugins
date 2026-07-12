@@ -182,6 +182,8 @@ pub struct CaptureStats {
     pub frames_pipeline_dropped: u64,
     #[serde(default)]
     pub frames_encoder_dropped: u64,
+    #[serde(default)]
+    pub frames_cpu_readback: u64,
     pub fps: f64,
     #[serde(default)]
     pub capture_fps: f64,
@@ -202,6 +204,7 @@ impl Default for CaptureStats {
             frames_capture_dropped: 0,
             frames_pipeline_dropped: 0,
             frames_encoder_dropped: 0,
+            frames_cpu_readback: 0,
             fps: 0.0,
             capture_fps: 0.0,
             publish_fps: 0.0,

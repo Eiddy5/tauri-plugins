@@ -18,10 +18,10 @@
 
 ## 已采纳方案
 
-1. 捕获/管线只把最新 `VideoFrame` 放入容量一 latest slot。
-2. 专用编码线程拥有 H264 encoder，编码后把最新 `EncodedVideoSample` 放入第二个容量一 slot。
-3. 专用传输线程独立等待 WebRTC `send_sample`；slot 被替换、编码失败和发送失败都计入 encoder-stage drop。
-4. 停止顺序固定为：停止 frame slot → join 编码线程 → 停止 sample slot → join 传输线程。
+1. 捕获/管线只把最新原始帧放入容量一 latest slot；背压时只允许在编码前替换旧原始帧。
+2. 专用编码线程拥有 H264 encoder；编码后的 `EncodedVideoSample` 进入容量一、有序、阻塞式 handoff，禁止覆盖已经编码的样本。
+3. 专用传输线程独立等待 WebRTC `send_sample`。传输变慢时编码线程在 handoff 边界等待，捕获侧 latest slot 继续淘汰尚未编码的旧原始帧，因此不会累积延迟，也不会破坏 H264 参考链。
+4. 停止顺序固定为：停止 frame slot → 停止 sample handoff 并唤醒两端 → join 编码线程 → join 传输线程。
 5. 任一线程创建/初始化失败时停止已创建的 slot/thread，避免泄漏后台线程。
 
 ## 参考
@@ -33,9 +33,10 @@
 ## 验证
 
 - latest slot 单元测试验证新帧替换旧帧。
+- ordered handoff 单元测试验证编码样本在背压下保持顺序且不会被覆盖。
 - worker 初始化失败路径保证已启动 transport 正常停止。
 - Windows 示例运行时通过 `framesEncoderDropped`、`publishFps` 和 `encoderBackend` 暴露行为。
 
 ## 已知边界
 
-WebRTC 端到端流畅度仍受接收端渲染、网络和系统桌面 dirty-frame 产生速率影响；本文只采纳阶段隔离和丢旧帧策略，不把一次机器实测峰值当作所有环境的 60 FPS 保证。
+WebRTC 端到端流畅度仍受接收端渲染、网络和系统桌面 dirty-frame 产生速率影响。`latest-frame` 只适用于进入编码器之前的独立原始帧；编码后的 H264 P 帧存在参考依赖，不能使用同一覆盖策略。

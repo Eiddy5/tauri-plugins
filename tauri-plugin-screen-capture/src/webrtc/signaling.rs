@@ -2,7 +2,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     time::Duration,
@@ -12,6 +12,7 @@ use interceptor::registry::Registry;
 use tokio::sync::watch;
 use webrtc::rtcp::payload_feedbacks::{
     full_intra_request::FullIntraRequest, picture_loss_indication::PictureLossIndication,
+    receiver_estimated_maximum_bitrate::ReceiverEstimatedMaximumBitrate,
 };
 use webrtc::{
     api::{
@@ -47,6 +48,8 @@ pub struct WebRtcSignalingState {
     video_track: Arc<TrackLocalStaticSample>,
     connected_rx: watch::Receiver<bool>,
     keyframe_requests: Arc<AtomicU64>,
+    estimated_bitrate_bps: Arc<AtomicU64>,
+    received_bitrate_estimate: Arc<AtomicBool>,
 }
 
 impl WebRtcSignalingState {
@@ -79,6 +82,10 @@ impl WebRtcSignalingState {
         ));
         let keyframe_requests = Arc::new(AtomicU64::new(0));
         let rtcp_keyframe_requests = Arc::clone(&keyframe_requests);
+        let estimated_bitrate_bps = Arc::new(AtomicU64::new(0));
+        let rtcp_estimated_bitrate_bps = Arc::clone(&estimated_bitrate_bps);
+        let received_bitrate_estimate = Arc::new(AtomicBool::new(false));
+        let rtcp_received_bitrate_estimate = Arc::clone(&received_bitrate_estimate);
         let rtp_sender = peer_connection
             .add_track(Arc::clone(&video_track) as Arc<dyn TrackLocal + Send + Sync>)
             .await
@@ -87,6 +94,14 @@ impl WebRtcSignalingState {
             while let Ok((packets, _)) = rtp_sender.read_rtcp().await {
                 for packet in packets {
                     eprintln!("[screen-capture] WebRTC RTCP packet received: {packet:?}");
+                    if let Some(remb) = packet
+                        .as_any()
+                        .downcast_ref::<ReceiverEstimatedMaximumBitrate>()
+                    {
+                        rtcp_estimated_bitrate_bps
+                            .store(remb.bitrate.max(0.0) as u64, Ordering::Relaxed);
+                        rtcp_received_bitrate_estimate.store(true, Ordering::Release);
+                    }
                     if packet
                         .as_any()
                         .downcast_ref::<PictureLossIndication>()
@@ -115,11 +130,19 @@ impl WebRtcSignalingState {
             video_track,
             connected_rx,
             keyframe_requests,
+            estimated_bitrate_bps,
+            received_bitrate_estimate,
         })
     }
 
     pub fn video_track(&self) -> Arc<TrackLocalStaticSample> {
         Arc::clone(&self.video_track)
+    }
+
+    pub fn estimated_bitrate_bps(&self) -> Option<u64> {
+        self.received_bitrate_estimate
+            .load(Ordering::Acquire)
+            .then(|| self.estimated_bitrate_bps.load(Ordering::Relaxed))
     }
 
     pub async fn create_offer(&self) -> Result<WebRtcOffer> {

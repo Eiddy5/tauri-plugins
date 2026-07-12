@@ -121,6 +121,7 @@ fn capture_stats_deserializes_legacy_payload_with_zeroed_stage_metrics() {
     assert_eq!(stats.frames_capture_dropped, 0);
     assert_eq!(stats.frames_pipeline_dropped, 0);
     assert_eq!(stats.frames_encoder_dropped, 0);
+    assert_eq!(stats.frames_cpu_readback, 0);
     assert_eq!(stats.capture_fps, 0.0);
     assert_eq!(stats.publish_fps, 0.0);
     assert_eq!(stats.encoder_backend, None);

@@ -52,7 +52,10 @@ use crate::{
         StartCaptureOptions,
     },
     pipeline::frame::VideoFrame,
-    platform::windows::media::gpu_processor::D3D11BgraScaler,
+    platform::windows::media::{
+        gpu_processor::{D3D11BgraScaler, D3D11Nv12Processor},
+        WindowsGpuSurface,
+    },
     sources::thumbnails::encode_png_base64,
     sources::{filter_sources, SourceFilterOptions},
     Result,
@@ -91,6 +94,7 @@ pub fn start_capture(
     options: StartCaptureOptions,
     consumer: Box<dyn FrameConsumer>,
 ) -> Result<Box<dyn RunningCapture>> {
+    let gpu_surfaces_requested = consumer.supports_gpu_surfaces();
     let paused = Arc::new(AtomicBool::new(false));
     let telemetry = Arc::new(CaptureIngressTelemetry::default());
     let (frame_sender, mut frame_receiver) = mpsc::channel(1);
@@ -101,12 +105,19 @@ pub fn start_capture(
         frame_sender,
         finish_sender.clone(),
         Arc::clone(&telemetry),
+        gpu_surfaces_requested,
     )?;
 
     let task = tokio::spawn(async move {
-        while let Some(mut frame) = frame_receiver.recv().await {
-            frame.timestamp_ns = now_ns();
-            if let Err(error) = consumer.push_frame(frame).await {
+        while let Some(frame) = frame_receiver.recv().await {
+            let result = match frame {
+                CapturedFrame::Cpu(mut frame) => {
+                    frame.timestamp_ns = now_ns();
+                    consumer.push_frame(frame).await
+                }
+                CapturedFrame::Gpu(surface) => consumer.push_gpu_surface(surface).await,
+            };
+            if let Err(error) = result {
                 eprintln!("[screen-capture] Windows frame publish failed: {error:?}");
             }
         }
@@ -134,6 +145,7 @@ struct WindowsRunningCapture {
 #[derive(Default)]
 struct CaptureIngressTelemetry {
     dropped: AtomicU64,
+    cpu_readback: AtomicU64,
 }
 
 #[async_trait]
@@ -160,9 +172,11 @@ impl RunningCapture for WindowsRunningCapture {
 
     async fn stats(&self) -> Result<crate::models::CaptureStats> {
         let dropped = self.telemetry.dropped.load(Ordering::Relaxed);
+        let cpu_readback = self.telemetry.cpu_readback.load(Ordering::Relaxed);
         Ok(crate::models::CaptureStats {
             frames_dropped: dropped,
             frames_capture_dropped: dropped,
+            frames_cpu_readback: cpu_readback,
             ..crate::models::CaptureStats::default()
         })
     }
@@ -200,20 +214,29 @@ impl Drop for WindowsRunningCapture {
 }
 
 struct WindowsCaptureHandler {
-    frame_sender: mpsc::Sender<VideoFrame>,
+    frame_sender: mpsc::Sender<CapturedFrame>,
     finish_sender: watch::Sender<Option<crate::models::CaptureErrorPayload>>,
     paused: Arc<AtomicBool>,
     output_size: Option<(u32, u32)>,
     telemetry: Arc<CaptureIngressTelemetry>,
     readback: FrameReadback,
+    gpu_processor: Option<D3D11Nv12Processor>,
+    gpu_surfaces_requested: bool,
+    gpu_surfaces_failed: bool,
 }
 
 struct WindowsCaptureFlags {
-    frame_sender: mpsc::Sender<VideoFrame>,
+    frame_sender: mpsc::Sender<CapturedFrame>,
     finish_sender: watch::Sender<Option<crate::models::CaptureErrorPayload>>,
     paused: Arc<AtomicBool>,
     output_size: Option<(u32, u32)>,
     telemetry: Arc<CaptureIngressTelemetry>,
+    gpu_surfaces_requested: bool,
+}
+
+enum CapturedFrame {
+    Cpu(VideoFrame),
+    Gpu(WindowsGpuSurface),
 }
 
 impl GraphicsCaptureApiHandler for WindowsCaptureHandler {
@@ -228,6 +251,9 @@ impl GraphicsCaptureApiHandler for WindowsCaptureHandler {
             output_size: ctx.flags.output_size,
             telemetry: ctx.flags.telemetry,
             readback: FrameReadback::default(),
+            gpu_processor: None,
+            gpu_surfaces_requested: ctx.flags.gpu_surfaces_requested,
+            gpu_surfaces_failed: false,
         })
     }
 
@@ -245,16 +271,65 @@ impl GraphicsCaptureApiHandler for WindowsCaptureHandler {
             return Ok(());
         }
 
+        if self.gpu_surfaces_requested && !self.gpu_surfaces_failed {
+            let target = self.output_size.unwrap_or((frame.width(), frame.height()));
+            let needs_processor = self.gpu_processor.as_ref().map_or(true, |processor| {
+                !processor.matches(frame.width(), frame.height(), target.0, target.1)
+            });
+            if needs_processor {
+                match D3D11Nv12Processor::new(frame, target.0, target.1) {
+                    Ok(processor) => self.gpu_processor = Some(processor),
+                    Err(error) => {
+                        eprintln!(
+                            "[screen-capture] zero-readback GPU path unavailable; using CPU fallback: {error}"
+                        );
+                        self.gpu_processor = None;
+                        self.gpu_surfaces_failed = true;
+                    }
+                }
+            }
+            if let Some(processor) = self.gpu_processor.as_mut() {
+                match processor.process(frame, now_ns()) {
+                    Ok(Some(surface)) => {
+                        return match self.frame_sender.try_send(CapturedFrame::Gpu(surface)) {
+                            Ok(()) => Ok(()),
+                            Err(mpsc::error::TrySendError::Full(_)) => {
+                                self.telemetry.dropped.fetch_add(1, Ordering::Relaxed);
+                                Ok(())
+                            }
+                            Err(mpsc::error::TrySendError::Closed(_)) => {
+                                Err("Windows capture frame consumer stopped".to_string())
+                            }
+                        };
+                    }
+                    Ok(None) => {
+                        self.telemetry.dropped.fetch_add(1, Ordering::Relaxed);
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "[screen-capture] zero-readback GPU processing failed; using CPU fallback: {error}"
+                        );
+                        self.gpu_processor = None;
+                        self.gpu_surfaces_failed = true;
+                    }
+                }
+            }
+        }
+
         match frame_to_video_frame(frame, self.output_size, &mut self.readback) {
-            Ok(Some(video_frame)) => match self.frame_sender.try_send(video_frame) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    self.telemetry.dropped.fetch_add(1, Ordering::Relaxed);
+            Ok(Some(video_frame)) => {
+                self.telemetry.cpu_readback.fetch_add(1, Ordering::Relaxed);
+                match self.frame_sender.try_send(CapturedFrame::Cpu(video_frame)) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        self.telemetry.dropped.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        return Err("Windows capture frame consumer stopped".to_string());
+                    }
                 }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    return Err("Windows capture frame consumer stopped".to_string());
-                }
-            },
+            }
             Ok(None) => {}
             Err(error) => {
                 let _ = self.finish_sender.send(Some(error.payload()));
@@ -373,9 +448,10 @@ impl GraphicsCaptureApiHandler for ThumbnailCaptureHandler {
 fn start_windows_capture(
     options: &StartCaptureOptions,
     paused: Arc<AtomicBool>,
-    frame_sender: mpsc::Sender<VideoFrame>,
+    frame_sender: mpsc::Sender<CapturedFrame>,
     finish_sender: watch::Sender<Option<crate::models::CaptureErrorPayload>>,
     telemetry: Arc<CaptureIngressTelemetry>,
+    gpu_surfaces_requested: bool,
 ) -> Result<WindowsCaptureControl> {
     let flags = WindowsCaptureFlags {
         frame_sender,
@@ -383,6 +459,7 @@ fn start_windows_capture(
         paused,
         output_size: requested_output_size(options),
         telemetry,
+        gpu_surfaces_requested,
     };
     match options.source_kind {
         CaptureSourceKind::Display => {

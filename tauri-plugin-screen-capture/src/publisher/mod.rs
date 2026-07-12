@@ -20,8 +20,23 @@ pub use webrtc::WebRtcPublisher;
 
 #[async_trait]
 pub trait CapturePublisher: Send + Sync {
+    fn supports_gpu_surfaces(&self) -> bool {
+        false
+    }
+
     async fn start(&self, options: StartCaptureOptions) -> Result<()>;
     async fn push_frame(&self, frame: VideoFrame) -> Result<()>;
+    #[cfg(target_os = "windows")]
+    async fn push_gpu_surface(
+        &self,
+        _surface: crate::platform::windows::media::WindowsGpuSurface,
+    ) -> Result<()> {
+        Err(crate::Error::new(
+            crate::CaptureErrorCode::PublisherUnsupported,
+            "publisher does not support Windows GPU surfaces",
+            true,
+        ))
+    }
     async fn request_keyframe(&self) -> Result<()> {
         Ok(())
     }

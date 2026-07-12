@@ -11,7 +11,9 @@ use crate::{
     error::Error,
     models::{CaptureErrorCode, PixelFormat},
     pipeline::frame::VideoFrame,
-    platform::windows::media::media_foundation::MediaFoundationH264Encoder,
+    platform::windows::media::{
+        media_foundation::MediaFoundationH264Encoder, WindowsGpuSurface,
+    },
     webrtc::track::EncodedVideoSample,
     Result,
 };
@@ -26,11 +28,22 @@ pub struct H264Encoder {
 unsafe impl Send for H264Encoder {}
 
 enum EncoderBackend {
-    MediaFoundation(MediaFoundationH264Encoder),
+    MediaFoundation {
+        encoder: MediaFoundationH264Encoder,
+        gpu_surface: bool,
+    },
     OpenH264(Box<SoftwareH264Encoder>),
 }
 
 impl H264Encoder {
+    pub(crate) fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub(crate) fn height(&self) -> u32 {
+        self.height
+    }
+
     pub fn new(width: u32, height: u32, fps: u32) -> Result<Self> {
         match MediaFoundationH264Encoder::new(width, height, fps) {
             Ok(encoder) => {
@@ -38,7 +51,10 @@ impl H264Encoder {
                     "[screen-capture] Windows H264 encoder: native Media Foundation hardware MFT"
                 );
                 Ok(Self {
-                    backend: EncoderBackend::MediaFoundation(encoder),
+                    backend: EncoderBackend::MediaFoundation {
+                        encoder,
+                        gpu_surface: false,
+                    },
                     width,
                     height,
                     fps: fps.max(1),
@@ -61,23 +77,63 @@ impl H264Encoder {
         }
     }
 
+    pub fn new_gpu_surface(surface: &WindowsGpuSurface, fps: u32) -> Result<Self> {
+        let width = surface.width();
+        let height = surface.height();
+        let encoder = MediaFoundationH264Encoder::new_gpu_surface(
+            width,
+            height,
+            fps,
+            surface.device(),
+        )?;
+        eprintln!(
+            "[screen-capture] Windows H264 encoder: Media Foundation D3D11 surface input"
+        );
+        Ok(Self {
+            backend: EncoderBackend::MediaFoundation {
+                encoder,
+                gpu_surface: true,
+            },
+            width,
+            height,
+            fps: fps.max(1),
+        })
+    }
+
     pub fn force_keyframe(&mut self) -> Result<()> {
         match &mut self.backend {
-            EncoderBackend::MediaFoundation(encoder) => encoder.force_keyframe(),
+            EncoderBackend::MediaFoundation { encoder, .. } => encoder.force_keyframe(),
             EncoderBackend::OpenH264(encoder) => encoder.force_keyframe(),
+        }
+    }
+
+    pub(crate) fn set_bitrate_bps(&mut self, bitrate_bps: u32) -> Result<()> {
+        match &mut self.backend {
+            EncoderBackend::MediaFoundation { encoder, .. } => {
+                encoder.set_bitrate_bps(bitrate_bps)
+            }
+            EncoderBackend::OpenH264(_) => Err(encoder_error(
+                "dynamic bitrate updates are unavailable for the OpenH264 fallback",
+            )),
         }
     }
 
     pub fn backend_name(&self) -> &'static str {
         match self.backend {
-            EncoderBackend::MediaFoundation(_) => "media-foundation-hardware",
+            EncoderBackend::MediaFoundation {
+                gpu_surface: true, ..
+            } => "media-foundation-d3d11-surface",
+            EncoderBackend::MediaFoundation {
+                gpu_surface: false,
+                ..
+            } => "media-foundation-hardware",
             EncoderBackend::OpenH264(_) => "openh264",
         }
     }
 
     pub fn encode_frame(&mut self, frame: &VideoFrame) -> Result<Option<EncodedVideoSample>> {
         let result = match &mut self.backend {
-            EncoderBackend::MediaFoundation(encoder) => encoder.encode_frame(frame),
+            EncoderBackend::MediaFoundation { encoder, .. } => encoder.encode_frame(frame),
             EncoderBackend::OpenH264(encoder) => encoder.encode_frame(frame),
         };
         result.or_else(|error| {
@@ -95,7 +151,61 @@ impl H264Encoder {
             )?));
             match &mut self.backend {
                 EncoderBackend::OpenH264(encoder) => encoder.encode_frame(frame),
-                EncoderBackend::MediaFoundation(_) => unreachable!(),
+                EncoderBackend::MediaFoundation { .. } => unreachable!(),
+            }
+        })
+    }
+
+    pub fn encode_gpu_surface(
+        &mut self,
+        surface: &WindowsGpuSurface,
+    ) -> Result<Option<EncodedVideoSample>> {
+        match &mut self.backend {
+            EncoderBackend::MediaFoundation {
+                encoder,
+                gpu_surface: true,
+            } => encoder.encode_gpu_surface(surface),
+            EncoderBackend::MediaFoundation {
+                gpu_surface: false,
+                ..
+            } => Err(encoder_error(
+                "Media Foundation encoder is not configured for D3D11 surface input",
+            )),
+            EncoderBackend::OpenH264(_) => Err(encoder_error(
+                "OpenH264 cannot encode a D3D11 surface without CPU readback",
+            )),
+        }
+    }
+
+    pub(crate) fn encode_nv12_readback(
+        &mut self,
+        nv12: &[u8],
+        timestamp_ns: u64,
+    ) -> Result<Option<EncodedVideoSample>> {
+        let result = match &mut self.backend {
+            EncoderBackend::MediaFoundation { encoder, .. } => {
+                encoder.encode_nv12_readback(nv12, timestamp_ns)
+            }
+            EncoderBackend::OpenH264(encoder) => {
+                encoder.encode_nv12(nv12, timestamp_ns)
+            }
+        };
+        result.or_else(|error| {
+            if matches!(self.backend, EncoderBackend::OpenH264(_)) {
+                return Err(error);
+            }
+            eprintln!(
+                "[screen-capture] Windows CPU Media Foundation NV12 encode failed, falling back to OpenH264: {}",
+                error.payload().message
+            );
+            self.backend = EncoderBackend::OpenH264(Box::new(SoftwareH264Encoder::new(
+                self.width,
+                self.height,
+                self.fps,
+            )?));
+            match &mut self.backend {
+                EncoderBackend::OpenH264(encoder) => encoder.encode_nv12(nv12, timestamp_ns),
+                EncoderBackend::MediaFoundation { .. } => unreachable!(),
             }
         })
     }
@@ -176,6 +286,44 @@ impl SoftwareH264Encoder {
             data,
             duration: self.frame_duration,
             timestamp_ns: frame.timestamp_ns,
+        }))
+    }
+
+    fn encode_nv12(
+        &mut self,
+        nv12: &[u8],
+        timestamp_ns: u64,
+    ) -> Result<Option<EncodedVideoSample>> {
+        let width = self.width as usize;
+        let height = self.height as usize;
+        let y_len = width * height;
+        let uv_len = y_len / 4;
+        if nv12.len() != y_len + uv_len * 2 {
+            return Err(encoder_error(format!(
+                "OpenH264 expected {} NV12 bytes, got {}",
+                y_len + uv_len * 2,
+                nv12.len()
+            )));
+        }
+        let mut i420 = vec![0u8; y_len + uv_len * 2];
+        i420[..y_len].copy_from_slice(&nv12[..y_len]);
+        for index in 0..uv_len {
+            i420[y_len + index] = nv12[y_len + index * 2];
+            i420[y_len + uv_len + index] = nv12[y_len + index * 2 + 1];
+        }
+        let yuv = YUVBuffer::from_vec(i420, width, height);
+        let bitstream = self
+            .encoder
+            .encode_at(&yuv, Timestamp::from_millis(timestamp_ns / 1_000_000))
+            .map_err(encoder_error)?;
+        let data = annex_b_from_bitstream(&bitstream);
+        if data.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(EncodedVideoSample {
+            data,
+            duration: self.frame_duration,
+            timestamp_ns,
         }))
     }
 }

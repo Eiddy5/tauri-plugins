@@ -28,6 +28,7 @@ fn frame(timestamp_ns: u64) -> VideoFrame {
 struct SlowPublisher {
     pushes: AtomicUsize,
     delay: Duration,
+    supports_gpu_surfaces: bool,
 }
 
 impl SlowPublisher {
@@ -35,12 +36,22 @@ impl SlowPublisher {
         Self {
             pushes: AtomicUsize::new(0),
             delay,
+            supports_gpu_surfaces: false,
         }
+    }
+
+    fn with_gpu_surfaces(mut self) -> Self {
+        self.supports_gpu_surfaces = true;
+        self
     }
 }
 
 #[async_trait]
 impl CapturePublisher for SlowPublisher {
+    fn supports_gpu_surfaces(&self) -> bool {
+        self.supports_gpu_surfaces
+    }
+
     async fn start(&self, _options: StartCaptureOptions) -> Result<()> {
         Ok(())
     }
@@ -105,4 +116,12 @@ fn start_options() -> StartCaptureOptions {
         capture_cursor: Some(true),
         publisher: None,
     }
+}
+
+#[tokio::test]
+async fn pipeline_advertises_gpu_surfaces_only_when_publisher_supports_them() {
+    let publisher = Arc::new(SlowPublisher::new(Duration::from_millis(1)).with_gpu_surfaces());
+    let pipeline = CapturePipeline::new(publisher);
+
+    assert!(pipeline.supports_gpu_surfaces());
 }

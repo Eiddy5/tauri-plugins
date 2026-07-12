@@ -1,16 +1,16 @@
 # macOS / Windows OBS 式平台原生 GPU 屏幕共享方案
 
-> 方案状态：**Windows Phase 0/1 与过渡型 GPU 缩放/readback ring 已采纳（ADOPTED 2026-07-12）；完整 Phase 2 零读回 surface 与 macOS 部分仍为 PROPOSED**
+> 方案状态：**Windows Phase 0/1 与 Phase 2 零读回核心链路已采纳（ADOPTED）；Display DXGI、device-lost 自动恢复、长期 soak 与 macOS 部分仍为 PROPOSED**
 >
 > 设计日期：2026-07-12
 >
-> 采纳标记：`ADOPTED-WINDOWS-NATIVE-MEDIA-PHASE-1`、`ADOPTED-WINDOWS-D3D11-GPU-SCALING-STAGING-RING`。已落地阶段统计、有界 latest-frame 编码/传输线程、原生 Media Foundation 硬件 H264 MFT、OpenH264 降级、D3D11 GPU 缩放与三槽 readback ring；完整 D3D11 surface 零读回和 macOS 实现必须分别完成验收后再标记采纳。
+> 采纳标记：`ADOPTED-WINDOWS-NATIVE-MEDIA-PHASE-1`、`ADOPTED-WINDOWS-D3D11-GPU-SCALING-STAGING-RING`、`ADOPTED-WINDOWS-ZERO-READBACK-D3D11-MF-H264`。Windows 已落地阶段统计、编码前 latest-frame、编码后有序交接、WGC D3D11 BGRA→NV12 surface 与 Media Foundation hardware H264 零读回链路；这不等同于完整 Phase 2 验收，Display DXGI、device-lost/睡眠/热插拔自动恢复、60 秒持续运动和 8/24 小时 soak 完成前不得标记完整 Phase 2 ADOPTED。
 
 ## 1. 问题背景
 
 该插件的长期架构必须同时支持 Windows 和 macOS。两个平台共享 session 生命周期、背压、编码样本、WebRTC transport、统计和验收契约，但 GPU surface、捕获 API、线程模型、硬件编码器与恢复机制必须采用各自平台的原生规范，不能用 Windows 的 D3D11 类型污染跨平台接口。
 
-当前 Windows 链路是：
+优化前 Windows 链路是：
 
 ```text
 Windows Graphics Capture
@@ -38,6 +38,8 @@ Windows Graphics Capture
 | Release 捕获→缩放→OpenH264 | 23.87 FPS |
 
 这些数据证明捕获 API 能达到接近 60 FPS；长期瓶颈是 CPU 帧模型、CPU 缩放/颜色转换、同步编码边界和不完整的丢帧观测，而不是 WebView2 单点渲染问题。
+
+2026-07-13 Windows Phase 2 的零读回核心链路已落地：正常路径为 WGC D3D11 BGRA texture → D3D11 Video Processor NV12 surface → `MFCreateDXGISurfaceBuffer` → Media Foundation H264 MFT，`framesCpuReadback == 0`。具体采纳证据见独立方案 `2026-07-13-windows-zero-readback-d3d11-mf-h264-adopted.md`；编码后样本顺序约束见 `2026-07-13-windows-ordered-h264-sample-handoff-adopted.md`；高运动时的 transport 背压闭环见 `2026-07-13-windows-remb-low-latency-bitrate-control-adopted.md`。本段不宣称 Display DXGI、device-lost 恢复或长期 soak 已完成。
 
 macOS 当前只完成代码路径审计，尚无本轮实体 Mac 性能数据；Phase 0 必须在 Apple Silicon/目标最低 macOS 版本上补齐同口径 baseline，未取得数据前不得宣称 macOS 已满足 1080p60。
 

@@ -128,3 +128,11 @@ async fn composite_publisher_fans_out_lifecycle_calls() {
     let stats = publisher.stats().await.expect("stats");
     assert!(!stats.started);
 }
+
+#[test]
+fn composite_requires_every_publisher_to_support_gpu_surfaces() {
+    let cpu_only = Arc::new(PublisherProbe::default());
+    let publisher = CompositePublisher::new(vec![cpu_only]);
+
+    assert!(!publisher.supports_gpu_surfaces());
+}

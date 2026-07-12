@@ -21,6 +21,14 @@ impl CompositePublisher {
 
 #[async_trait]
 impl CapturePublisher for CompositePublisher {
+    fn supports_gpu_surfaces(&self) -> bool {
+        !self.publishers.is_empty()
+            && self
+                .publishers
+                .iter()
+                .all(|publisher| publisher.supports_gpu_surfaces())
+    }
+
     async fn start(&self, options: StartCaptureOptions) -> Result<()> {
         for publisher in &self.publishers {
             publisher.start(options.clone()).await?;
@@ -31,6 +39,17 @@ impl CapturePublisher for CompositePublisher {
     async fn push_frame(&self, frame: VideoFrame) -> Result<()> {
         for publisher in &self.publishers {
             publisher.push_frame(frame.clone()).await?;
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    async fn push_gpu_surface(
+        &self,
+        surface: crate::platform::windows::media::WindowsGpuSurface,
+    ) -> Result<()> {
+        for publisher in &self.publishers {
+            publisher.push_gpu_surface(surface.clone()).await?;
         }
         Ok(())
     }

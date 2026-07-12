@@ -10,15 +10,15 @@
 ## 解决目标
 
 - 捕获回调和 pipeline 不等待编码或传输。
-- 永远只保留最新一帧，不积压过期画面。
+- 在编码前永远只保留最新一帧，不积压过期画面。
 - COM、Media Foundation transform 和编码器在同一专用 MTA 线程创建、使用与释放。
 - keyframe、stop 和统计具有明确线程安全语义。
 
 ## 已落地方案
 
-新增 `WindowsEncoderWorker` 和容量为 1 的 `LatestFrameSlot`。提交新帧时原子替换尚未消费的旧帧并累计 `framesEncoderDropped`；worker 独占编码器，编码完成后再写 WebRTC。停止时关闭 slot、唤醒线程并 join，避免后台资源悬挂。关键帧请求通过原子标记在编码线程消费。
+新增 `WindowsEncoderWorker` 和容量为 1 的 `LatestFrameSlot`。提交新原始帧时原子替换尚未消费的旧帧并累计 `framesEncoderDropped`；worker 独占编码器。编码完成后的 H264 样本必须通过独立的有序 handoff 发送，不能应用 latest-frame 覆盖。停止时关闭 slot、唤醒线程并 join，避免后台资源悬挂。关键帧请求通过原子标记在编码线程消费。
 
-此方案把延迟上界固定为“一帧正在处理 + 一帧最新待处理”，不会因短时卡顿产生越来越大的直播延迟。
+此方案把编码前延迟上界固定为“一帧正在处理 + 一帧最新待处理”，不会因短时卡顿产生越来越大的直播延迟。编码后的参考帧完整性由独立方案 `2026-07-13-windows-ordered-h264-sample-handoff-adopted.md` 保证。
 
 ## 验证结果
 

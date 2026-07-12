@@ -319,6 +319,9 @@ impl ScreenCaptureState {
         let capture_stats = running_capture.stats().await?;
         stats.frames_published = stats.frames_published.max(publisher_stats.frames_published);
         stats.frames_capture_dropped = capture_stats.frames_capture_dropped;
+        stats.frames_cpu_readback = capture_stats
+            .frames_cpu_readback
+            .saturating_add(publisher_stats.frames_cpu_readback);
         stats.frames_encoder_dropped = publisher_stats.frames_encoder_dropped;
         stats.frames_dropped = stats
             .frames_capture_dropped

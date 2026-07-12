@@ -21,12 +21,19 @@ use crate::{
 pub struct CapturePipeline {
     publisher: Arc<dyn CapturePublisher>,
     stats: Mutex<CaptureStats>,
-    latest_frame: Mutex<Option<VideoFrame>>,
-    pending_frame: Arc<Mutex<Option<VideoFrame>>>,
+    latest_frame: Mutex<Option<PipelineFrame>>,
+    pending_frame: Arc<Mutex<Option<PipelineFrame>>>,
     notify: Arc<Notify>,
     stopped: Arc<AtomicBool>,
     worker: JoinHandle<()>,
     started_at: Mutex<Option<Instant>>,
+}
+
+#[derive(Clone)]
+enum PipelineFrame {
+    Cpu(VideoFrame),
+    #[cfg(target_os = "windows")]
+    Gpu(crate::platform::windows::media::WindowsGpuSurface),
 }
 
 impl CapturePipeline {
@@ -70,7 +77,7 @@ impl CapturePipeline {
             return Ok(());
         };
 
-        self.publisher.push_frame(frame).await
+        publish_pipeline_frame(&self.publisher, frame).await
     }
 }
 
@@ -84,7 +91,25 @@ impl Drop for CapturePipeline {
 
 #[async_trait]
 impl FrameConsumer for CapturePipeline {
+    fn supports_gpu_surfaces(&self) -> bool {
+        self.publisher.supports_gpu_surfaces()
+    }
+
     async fn push_frame(&self, frame: VideoFrame) -> Result<()> {
+        self.push_pipeline_frame(PipelineFrame::Cpu(frame)).await
+    }
+
+    #[cfg(target_os = "windows")]
+    async fn push_gpu_surface(
+        &self,
+        surface: crate::platform::windows::media::WindowsGpuSurface,
+    ) -> Result<()> {
+        self.push_pipeline_frame(PipelineFrame::Gpu(surface)).await
+    }
+}
+
+impl CapturePipeline {
+    async fn push_pipeline_frame(&self, frame: PipelineFrame) -> Result<()> {
         let mut started_at = self.started_at.lock().await;
         if started_at.is_none() {
             *started_at = Some(Instant::now());
@@ -118,14 +143,26 @@ impl FrameConsumer for CapturePipeline {
 
 #[async_trait]
 impl FrameConsumer for Arc<CapturePipeline> {
+    fn supports_gpu_surfaces(&self) -> bool {
+        self.as_ref().supports_gpu_surfaces()
+    }
+
     async fn push_frame(&self, frame: VideoFrame) -> Result<()> {
         self.as_ref().push_frame(frame).await
+    }
+
+    #[cfg(target_os = "windows")]
+    async fn push_gpu_surface(
+        &self,
+        surface: crate::platform::windows::media::WindowsGpuSurface,
+    ) -> Result<()> {
+        self.as_ref().push_gpu_surface(surface).await
     }
 }
 
 fn spawn_latest_frame_worker(
     publisher: Arc<dyn CapturePublisher>,
-    pending_frame: Arc<Mutex<Option<VideoFrame>>>,
+    pending_frame: Arc<Mutex<Option<PipelineFrame>>>,
     notify: Arc<Notify>,
     stopped: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
@@ -137,7 +174,7 @@ fn spawn_latest_frame_worker(
                 if stopped.load(Ordering::Acquire) {
                     return;
                 }
-                if let Err(error) = publisher.push_frame(frame).await {
+                if let Err(error) = publish_pipeline_frame(&publisher, frame).await {
                     eprintln!("[screen-capture] pipeline publish failed: {error:?}");
                 }
             }
@@ -147,4 +184,15 @@ fn spawn_latest_frame_worker(
             }
         }
     })
+}
+
+async fn publish_pipeline_frame(
+    publisher: &Arc<dyn CapturePublisher>,
+    frame: PipelineFrame,
+) -> Result<()> {
+    match frame {
+        PipelineFrame::Cpu(frame) => publisher.push_frame(frame).await,
+        #[cfg(target_os = "windows")]
+        PipelineFrame::Gpu(surface) => publisher.push_gpu_surface(surface).await,
+    }
 }

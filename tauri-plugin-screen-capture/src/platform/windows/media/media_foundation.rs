@@ -8,10 +8,11 @@ use windows::{
     core::Interface,
     Win32::{
         Foundation::VARIANT_TRUE,
+        Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D},
         Media::MediaFoundation::*,
         System::{
             Com::{CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED},
-            Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_BOOL},
+            Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_BOOL, VT_UI4},
         },
     },
 };
@@ -21,6 +22,7 @@ use crate::{
     error::Error,
     models::{CaptureErrorCode, PixelFormat},
     pipeline::frame::VideoFrame,
+    platform::windows::media::WindowsGpuSurface,
     webrtc::track::EncodedVideoSample,
     Result,
 };
@@ -33,12 +35,32 @@ pub(crate) struct MediaFoundationH264Encoder {
     frame_duration: Duration,
     frame_duration_hns: i64,
     com_initialized: bool,
+    _device_manager: Option<IMFDXGIDeviceManager>,
+    gpu_surface_input: bool,
 }
 
 unsafe impl Send for MediaFoundationH264Encoder {}
 
 impl MediaFoundationH264Encoder {
     pub(crate) fn new(width: u32, height: u32, fps: u32) -> Result<Self> {
+        Self::new_internal(width, height, fps, None)
+    }
+
+    pub(crate) fn new_gpu_surface(
+        width: u32,
+        height: u32,
+        fps: u32,
+        device: &ID3D11Device,
+    ) -> Result<Self> {
+        Self::new_internal(width, height, fps, Some(device))
+    }
+
+    fn new_internal(
+        width: u32,
+        height: u32,
+        fps: u32,
+        device: Option<&ID3D11Device>,
+    ) -> Result<Self> {
         if width % 2 != 0 || height % 2 != 0 {
             return Err(mf_error(format!(
                 "Media Foundation H264 requires even dimensions, got {width}x{height}"
@@ -53,8 +75,8 @@ impl MediaFoundationH264Encoder {
             return Err(map_windows_error(error));
         }
 
-        match create_hardware_transform(width, height, fps.max(1)) {
-            Ok((transform, event_generator)) => Ok(Self {
+        match create_hardware_transform(width, height, fps.max(1), device) {
+            Ok((transform, event_generator, device_manager)) => Ok(Self {
                 transform: Some(transform),
                 event_generator,
                 width,
@@ -62,6 +84,8 @@ impl MediaFoundationH264Encoder {
                 frame_duration: Duration::from_secs_f64(1.0 / f64::from(fps.max(1))),
                 frame_duration_hns: 10_000_000 / i64::from(fps.max(1)),
                 com_initialized: true,
+                _device_manager: device_manager,
+                gpu_surface_input: device.is_some(),
             }),
             Err(error) => {
                 let _ = unsafe { MFShutdown() };
@@ -94,6 +118,70 @@ impl MediaFoundationH264Encoder {
         }))
     }
 
+    pub(crate) fn encode_gpu_surface(
+        &mut self,
+        surface: &WindowsGpuSurface,
+    ) -> Result<Option<EncodedVideoSample>> {
+        if !self.gpu_surface_input {
+            return Err(mf_error(
+                "Media Foundation encoder was not configured for DXGI surface input",
+            ));
+        }
+        if surface.width() != self.width || surface.height() != self.height {
+            return Err(mf_error(format!(
+                "Media Foundation expected {}x{} NV12 surface, got {}x{}",
+                self.width,
+                self.height,
+                surface.width(),
+                surface.height()
+            )));
+        }
+        if let Some(events) = &self.event_generator {
+            wait_for_event(events, METransformNeedInput.0)?;
+        }
+
+        let sample = self.make_gpu_input_sample(surface)?;
+        unsafe { self.transform().ProcessInput(0, &sample, 0) }.map_err(map_windows_error)?;
+        if let Some(events) = &self.event_generator {
+            wait_for_event(events, METransformHaveOutput.0)?;
+        }
+
+        let data = self.take_output()?;
+        Ok(data.map(|data| EncodedVideoSample {
+            data: normalize_h264(data),
+            duration: self.frame_duration,
+            timestamp_ns: surface.timestamp_ns(),
+        }))
+    }
+
+    pub(crate) fn encode_nv12_readback(
+        &mut self,
+        nv12: &[u8],
+        timestamp_ns: u64,
+    ) -> Result<Option<EncodedVideoSample>> {
+        let expected_len = self.width as usize * self.height as usize * 3 / 2;
+        if nv12.len() != expected_len {
+            return Err(mf_error(format!(
+                "Media Foundation expected {expected_len} NV12 bytes, got {}",
+                nv12.len()
+            )));
+        }
+        if let Some(events) = &self.event_generator {
+            wait_for_event(events, METransformNeedInput.0)?;
+        }
+        let sample = self.make_nv12_input_sample(nv12, timestamp_ns)?;
+        unsafe { self.transform().ProcessInput(0, &sample, 0) }.map_err(map_windows_error)?;
+        if let Some(events) = &self.event_generator {
+            wait_for_event(events, METransformHaveOutput.0)?;
+        }
+        let data = self.take_output()?;
+        Ok(data.map(|data| EncodedVideoSample {
+            data: normalize_h264(data),
+            duration: self.frame_duration,
+            timestamp_ns,
+        }))
+    }
+
     pub(crate) fn force_keyframe(&mut self) -> Result<()> {
         let codec_api: ICodecAPI = self.transform().cast().map_err(map_windows_error)?;
         let value = VARIANT {
@@ -111,6 +199,15 @@ impl MediaFoundationH264Encoder {
         };
         unsafe { codec_api.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &value) }
             .map_err(map_windows_error)
+    }
+
+    pub(crate) fn set_bitrate_bps(&mut self, bitrate_bps: u32) -> Result<()> {
+        let codec_api: ICodecAPI = self.transform().cast().map_err(map_windows_error)?;
+        set_codec_u32(
+            &codec_api,
+            &CODECAPI_AVEncCommonMeanBitRate,
+            bitrate_bps.max(100_000),
+        )
     }
 
     fn validate_frame(&self, frame: &VideoFrame) -> Result<()> {
@@ -147,6 +244,10 @@ impl MediaFoundationH264Encoder {
             YuvStandardMatrix::Bt709,
         );
 
+        self.make_nv12_input_sample(&nv12, frame.timestamp_ns)
+    }
+
+    fn make_nv12_input_sample(&self, nv12: &[u8], timestamp_ns: u64) -> Result<IMFSample> {
         let buffer =
             unsafe { MFCreateMemoryBuffer(nv12.len() as u32) }.map_err(map_windows_error)?;
         let mut target = ptr::null_mut();
@@ -159,7 +260,25 @@ impl MediaFoundationH264Encoder {
         unsafe {
             sample.AddBuffer(&buffer).map_err(map_windows_error)?;
             sample
-                .SetSampleTime((frame.timestamp_ns / 100) as i64)
+                .SetSampleTime((timestamp_ns / 100) as i64)
+                .map_err(map_windows_error)?;
+            sample
+                .SetSampleDuration(self.frame_duration_hns)
+                .map_err(map_windows_error)?;
+        }
+        Ok(sample)
+    }
+
+    fn make_gpu_input_sample(&self, surface: &WindowsGpuSurface) -> Result<IMFSample> {
+        let buffer = unsafe {
+            MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, surface.texture(), 0, false)
+        }
+        .map_err(map_windows_error)?;
+        let sample = unsafe { MFCreateSample() }.map_err(map_windows_error)?;
+        unsafe {
+            sample.AddBuffer(&buffer).map_err(map_windows_error)?;
+            sample
+                .SetSampleTime((surface.timestamp_ns() / 100) as i64)
                 .map_err(map_windows_error)?;
             sample
                 .SetSampleDuration(self.frame_duration_hns)
@@ -230,7 +349,12 @@ fn create_hardware_transform(
     width: u32,
     height: u32,
     fps: u32,
-) -> Result<(IMFTransform, Option<IMFMediaEventGenerator>)> {
+    device: Option<&ID3D11Device>,
+) -> Result<(
+    IMFTransform,
+    Option<IMFMediaEventGenerator>,
+    Option<IMFDXGIDeviceManager>,
+)> {
     let input = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
         guidSubtype: MFVideoFormat_NV12,
@@ -265,7 +389,7 @@ fn create_hardware_transform(
         };
         let configured = unsafe { activate.ActivateObject::<IMFTransform>() }
             .map_err(map_windows_error)
-            .and_then(|transform| configure_transform(transform, width, height, fps));
+            .and_then(|transform| configure_transform(transform, width, height, fps, device));
         match configured {
             Ok(transform) => {
                 for remaining in entries.iter_mut() {
@@ -286,7 +410,12 @@ fn configure_transform(
     width: u32,
     height: u32,
     fps: u32,
-) -> Result<(IMFTransform, Option<IMFMediaEventGenerator>)> {
+    device: Option<&ID3D11Device>,
+) -> Result<(
+    IMFTransform,
+    Option<IMFMediaEventGenerator>,
+    Option<IMFDXGIDeviceManager>,
+)> {
     let attributes = unsafe { transform.GetAttributes() }.map_err(map_windows_error)?;
     let asynchronous =
         unsafe { attributes.GetUINT32(&MF_TRANSFORM_ASYNC).ok() }.is_some_and(|value| value != 0);
@@ -301,6 +430,40 @@ fn configure_transform(
     } else {
         None
     };
+
+    let device_manager = if let Some(device) = device {
+        let d3d11_aware =
+            unsafe { attributes.GetUINT32(&MF_SA_D3D11_AWARE) }.map_err(map_windows_error)?;
+        if d3d11_aware == 0 {
+            return Err(mf_error("hardware H264 MFT is not D3D11-aware"));
+        }
+        let mut reset_token = 0;
+        let mut manager = None;
+        unsafe { MFCreateDXGIDeviceManager(&mut reset_token, &mut manager) }
+            .map_err(map_windows_error)?;
+        let manager = manager.ok_or_else(|| mf_error("DXGI device manager was not created"))?;
+        unsafe { manager.ResetDevice(device, reset_token) }.map_err(map_windows_error)?;
+        unsafe { transform.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize) }
+            .map_err(map_windows_error)?;
+        Some(manager)
+    } else {
+        None
+    };
+
+    if let Ok(codec_api) = transform.cast::<ICodecAPI>() {
+        let _ = set_codec_bool(&codec_api, &CODECAPI_AVLowLatencyMode, true);
+        let _ = set_codec_bool(&codec_api, &CODECAPI_AVEncCommonRealTime, true);
+        let _ = set_codec_u32(
+            &codec_api,
+            &CODECAPI_AVEncCommonRateControlMode,
+            eAVEncCommonRateControlMode_LowDelayVBR.0 as u32,
+        );
+        let _ = set_codec_u32(
+            &codec_api,
+            &CODECAPI_AVEncCommonMeanBitRate,
+            recommended_bitrate(width, height, fps),
+        );
+    }
 
     let output = unsafe { MFCreateMediaType() }.map_err(map_windows_error)?;
     let configure_output = (|| -> windows::core::Result<()> {
@@ -340,7 +503,43 @@ fn configure_transform(
             .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
             .map_err(map_windows_error)?;
     }
-    Ok((transform, event_generator))
+    Ok((transform, event_generator, device_manager))
+}
+
+fn set_codec_bool(codec_api: &ICodecAPI, key: &windows::core::GUID, enabled: bool) -> Result<()> {
+    let value = VARIANT {
+        Anonymous: VARIANT_0 {
+            Anonymous: ManuallyDrop::new(VARIANT_0_0 {
+                vt: VT_BOOL,
+                wReserved1: 0,
+                wReserved2: 0,
+                wReserved3: 0,
+                Anonymous: VARIANT_0_0_0 {
+                    boolVal: if enabled {
+                        VARIANT_TRUE
+                    } else {
+                        Default::default()
+                    },
+                },
+            }),
+        },
+    };
+    unsafe { codec_api.SetValue(key, &value) }.map_err(map_windows_error)
+}
+
+fn set_codec_u32(codec_api: &ICodecAPI, key: &windows::core::GUID, value: u32) -> Result<()> {
+    let value = VARIANT {
+        Anonymous: VARIANT_0 {
+            Anonymous: ManuallyDrop::new(VARIANT_0_0 {
+                vt: VT_UI4,
+                wReserved1: 0,
+                wReserved2: 0,
+                wReserved3: 0,
+                Anonymous: VARIANT_0_0_0 { ulVal: value },
+            }),
+        },
+    };
+    unsafe { codec_api.SetValue(key, &value) }.map_err(map_windows_error)
 }
 
 fn wait_for_event(generator: &IMFMediaEventGenerator, expected: i32) -> Result<()> {

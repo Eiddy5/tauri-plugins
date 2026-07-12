@@ -25,7 +25,23 @@ pub use windows::WindowsCaptureBackend;
 
 #[async_trait]
 pub trait FrameConsumer: Send + Sync {
+    fn supports_gpu_surfaces(&self) -> bool {
+        false
+    }
+
     async fn push_frame(&self, frame: VideoFrame) -> Result<()>;
+
+    #[cfg(target_os = "windows")]
+    async fn push_gpu_surface(
+        &self,
+        _surface: crate::platform::windows::media::WindowsGpuSurface,
+    ) -> Result<()> {
+        Err(crate::Error::new(
+            crate::CaptureErrorCode::PublisherUnsupported,
+            "frame consumer does not support Windows GPU surfaces",
+            true,
+        ))
+    }
 }
 
 #[async_trait]

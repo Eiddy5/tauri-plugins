@@ -66,6 +66,11 @@ impl WebRtcPublisher {
 
 #[async_trait]
 impl CapturePublisher for WebRtcPublisher {
+    #[cfg(target_os = "windows")]
+    fn supports_gpu_surfaces(&self) -> bool {
+        true
+    }
+
     async fn start(&self, options: StartCaptureOptions) -> Result<()> {
         let width = options.width.unwrap_or(1280);
         let height = options.height.unwrap_or(720);
@@ -122,6 +127,7 @@ impl CapturePublisher for WebRtcPublisher {
                     true,
                 )
             })?;
+            encoder.update_estimated_bitrate(self.signaling.estimated_bitrate_bps());
             encoder.submit(frame);
         }
 
@@ -151,6 +157,31 @@ impl CapturePublisher for WebRtcPublisher {
                 state.stats.frames_dropped += 1;
             }
         }
+        Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    async fn push_gpu_surface(
+        &self,
+        surface: crate::platform::windows::media::WindowsGpuSurface,
+    ) -> Result<()> {
+        {
+            let state = self.state.lock().await;
+            if state.lifecycle != WebRtcPublisherLifecycle::Started {
+                return Ok(());
+            }
+        }
+        self.sync_keyframe_request().await?;
+        let encoder = self.encoder.lock().await;
+        let encoder = encoder.as_ref().ok_or_else(|| {
+            Error::new(
+                CaptureErrorCode::WebRtcTrackFailed,
+                "H264 encoder is not initialized",
+                true,
+            )
+        })?;
+        encoder.update_estimated_bitrate(self.signaling.estimated_bitrate_bps());
+        encoder.submit_gpu(surface);
         Ok(())
     }
 
@@ -207,6 +238,7 @@ impl CapturePublisher for WebRtcPublisher {
             state.stats.frames_published = worker.frames_published;
             state.stats.frames_dropped = worker.frames_dropped;
             state.stats.frames_encoder_dropped = worker.frames_encoder_dropped;
+            state.stats.frames_cpu_readback = worker.frames_cpu_readback;
             state.stats.fps = worker.fps;
             state.stats.publish_fps = worker.publish_fps;
             state.stats.encoder_backend = worker.encoder_backend;
