@@ -105,3 +105,23 @@ fn webrtc_error_codes_use_documented_wire_names() {
         serde_json::from_str("\"webrtcTrackFailed\"").expect("deserialize track error");
     assert_eq!(parsed, CaptureErrorCode::WebRtcTrackFailed);
 }
+
+#[test]
+fn capture_stats_deserializes_legacy_payload_with_zeroed_stage_metrics() {
+    let stats: CaptureStats = serde_json::from_value(serde_json::json!({
+        "framesCaptured": 120,
+        "framesPublished": 110,
+        "framesDropped": 10,
+        "fps": 55.0,
+        "bitrateKbps": 6000,
+        "started": true
+    }))
+    .expect("deserialize legacy capture stats");
+
+    assert_eq!(stats.frames_capture_dropped, 0);
+    assert_eq!(stats.frames_pipeline_dropped, 0);
+    assert_eq!(stats.frames_encoder_dropped, 0);
+    assert_eq!(stats.capture_fps, 0.0);
+    assert_eq!(stats.publish_fps, 0.0);
+    assert_eq!(stats.encoder_backend, None);
+}

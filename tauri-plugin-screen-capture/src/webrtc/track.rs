@@ -12,6 +12,7 @@ pub struct EncodedVideoSample {
     pub timestamp_ns: u64,
 }
 
+#[derive(Clone)]
 pub struct WebRtcH264SampleSender {
     video_track: Arc<TrackLocalStaticSample>,
 }

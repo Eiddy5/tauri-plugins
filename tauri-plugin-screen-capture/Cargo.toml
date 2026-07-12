@@ -41,8 +41,14 @@ windows = { version = "0.62", features = [
   "Graphics_Capture",
   "Win32_Foundation",
   "Win32_Graphics_Dwm",
+  "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Dxgi_Common",
   "Win32_Graphics_Gdi",
+  "Win32_Media_MediaFoundation",
   "Win32_Security",
+  "Win32_System_Com",
+  "Win32_System_Ole",
+  "Win32_System_Variant",
   "Win32_Storage_Xps",
   "Win32_System_Threading",
   "Win32_UI_Accessibility",
@@ -60,3 +66,15 @@ tauri-plugin = { version = "2.6.2", features = ["build"] }
 [dev-dependencies]
 serde_json = "1.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+# The real-time pixel kernels are dependency crates. Keeping them unoptimized in
+# debug builds makes the example appear to lose capture frames even though WGC is
+# healthy, so optimize only those kernels while preserving debuginfo for this crate.
+[profile.dev.package.fast_image_resize]
+opt-level = 3
+
+[profile.dev.package.yuvutils-rs]
+opt-level = 3
+
+[profile.dev.package.openh264]
+opt-level = 3

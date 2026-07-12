@@ -59,6 +59,7 @@ impl CapturePipeline {
             let elapsed = started_at.elapsed().as_secs_f64();
             if elapsed > 0.0 {
                 stats.fps = stats.frames_captured as f64 / elapsed;
+                stats.capture_fps = stats.fps;
             }
         }
         stats
@@ -104,7 +105,9 @@ impl FrameConsumer for CapturePipeline {
         {
             let mut pending_frame = self.pending_frame.lock().await;
             if pending_frame.replace(frame).is_some() {
-                self.stats.lock().await.frames_dropped += 1;
+                let mut stats = self.stats.lock().await;
+                stats.frames_pipeline_dropped += 1;
+                stats.frames_dropped = stats.frames_pipeline_dropped;
             }
         }
         self.notify.notify_one();

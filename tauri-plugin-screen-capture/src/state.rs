@@ -300,22 +300,36 @@ impl ScreenCaptureState {
     }
 
     pub async fn get_capture_stats(&self, session_id: &str) -> Result<CaptureStats> {
-        let (publisher, pipeline) = {
+        let (publisher, pipeline, running_capture) = {
             let sessions = self.sessions.lock().await;
             sessions
                 .get(session_id)
-                .map(|record| (Arc::clone(&record.publisher), Arc::clone(&record.pipeline)))
+                .map(|record| {
+                    (
+                        Arc::clone(&record.publisher),
+                        Arc::clone(&record.pipeline),
+                        Arc::clone(&record.running_capture),
+                    )
+                })
                 .ok_or_else(invalid_session_error)?
         };
 
         let mut stats = pipeline.stats().await;
         let publisher_stats = publisher.stats().await?;
+        let capture_stats = running_capture.stats().await?;
         stats.frames_published = stats.frames_published.max(publisher_stats.frames_published);
-        stats.frames_dropped = stats.frames_dropped.max(publisher_stats.frames_dropped);
+        stats.frames_capture_dropped = capture_stats.frames_capture_dropped;
+        stats.frames_encoder_dropped = publisher_stats.frames_encoder_dropped;
+        stats.frames_dropped = stats
+            .frames_capture_dropped
+            .saturating_add(stats.frames_pipeline_dropped)
+            .saturating_add(stats.frames_encoder_dropped);
         if publisher_stats.frames_published > 0 {
             stats.fps = publisher_stats.fps;
+            stats.publish_fps = publisher_stats.publish_fps.max(publisher_stats.fps);
         }
         stats.bitrate_kbps = stats.bitrate_kbps.max(publisher_stats.bitrate_kbps);
+        stats.encoder_backend = publisher_stats.encoder_backend;
         stats.started = stats.started || publisher_stats.started;
         Ok(stats)
     }

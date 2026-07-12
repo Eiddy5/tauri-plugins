@@ -35,7 +35,7 @@ const state = {
   pollTimer: null,
 }
 
-const captureMaxWidth = 2560
+const captureMaxWidth = 1920
 const captureFps = 60
 
 const app = document.querySelector("#app")
@@ -459,10 +459,11 @@ function renderPreview() {
 }
 
 function renderStats() {
-  elements.captured.textContent = `Captured ${state.stats?.framesCaptured ?? 0}`
-  elements.published.textContent = `Published ${state.stats?.framesPublished ?? 0}`
-  elements.dropped.textContent = `Dropped ${state.stats?.framesDropped ?? 0}`
-  elements.fps.textContent = `FPS ${(state.stats?.fps ?? 0).toFixed(1)}`
+  const stats = state.stats ?? {}
+  elements.captured.textContent = `Captured ${stats.framesCaptured ?? 0} @ ${(stats.captureFps ?? 0).toFixed(1)}`
+  elements.published.textContent = `Published ${stats.framesPublished ?? 0} @ ${(stats.publishFps ?? 0).toFixed(1)}`
+  elements.dropped.textContent = `Dropped ${stats.framesDropped ?? 0} C/P/E ${stats.framesCaptureDropped ?? 0}/${stats.framesPipelineDropped ?? 0}/${stats.framesEncoderDropped ?? 0}`
+  elements.fps.textContent = `FPS ${(stats.fps ?? 0).toFixed(1)} ${stats.encoderBackend ?? "no-encoder"}`
   elements.streaming.textContent = state.stats?.started ? "Streaming" : "Stopped"
   elements.agoraStatus.textContent = state.agoraPublication
     ? `Agora ${state.agoraPublication.channel} / ${state.agoraPublication.uid}`

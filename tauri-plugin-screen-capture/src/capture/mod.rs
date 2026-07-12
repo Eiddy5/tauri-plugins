@@ -10,7 +10,7 @@ use tokio::sync::watch;
 
 use crate::{
     models::{
-        CaptureErrorPayload, CaptureSource, ListSourcesOptions, PermissionStatus,
+        CaptureErrorPayload, CaptureSource, CaptureStats, ListSourcesOptions, PermissionStatus,
         StartCaptureOptions,
     },
     pipeline::frame::VideoFrame,
@@ -48,5 +48,9 @@ pub trait RunningCapture: Send + Sync {
 
     fn finish_receiver(&self) -> Option<watch::Receiver<Option<CaptureErrorPayload>>> {
         None
+    }
+
+    async fn stats(&self) -> Result<CaptureStats> {
+        Ok(CaptureStats::default())
     }
 }

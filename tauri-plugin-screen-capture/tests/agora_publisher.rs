@@ -64,8 +64,7 @@ async fn agora_publisher_pushes_external_frames_through_injected_sink() {
     publisher.start(start_options()).await.expect("start");
     publisher.push_frame(frame()).await.expect("push");
 
-    let pushed = sink.pushed.lock().unwrap();
-    assert_eq!(pushed.as_slice(), &[(2, 1, 8, 42)]);
+    assert_eq!(sink.pushed.lock().unwrap().as_slice(), &[(2, 1, 8, 42)]);
 
     let stats = publisher.stats().await.expect("stats");
     assert_eq!(stats.frames_published, 1);

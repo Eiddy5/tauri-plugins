@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     sync::mpsc as std_mpsc,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -19,6 +19,10 @@ use tokio::{
 };
 use windows::Win32::{
     Foundation::HWND,
+    Graphics::Direct3D11::{
+        ID3D11Texture2D, D3D11_CPU_ACCESS_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
+        D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+    },
     Graphics::Gdi::{
         BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC,
         GetMonitorInfoW, GetWindowDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
@@ -48,6 +52,7 @@ use crate::{
         StartCaptureOptions,
     },
     pipeline::frame::VideoFrame,
+    platform::windows::media::gpu_processor::D3D11BgraScaler,
     sources::thumbnails::encode_png_base64,
     sources::{filter_sources, SourceFilterOptions},
     Result,
@@ -87,6 +92,7 @@ pub fn start_capture(
     consumer: Box<dyn FrameConsumer>,
 ) -> Result<Box<dyn RunningCapture>> {
     let paused = Arc::new(AtomicBool::new(false));
+    let telemetry = Arc::new(CaptureIngressTelemetry::default());
     let (frame_sender, mut frame_receiver) = mpsc::channel(1);
     let (finish_sender, _) = watch::channel(None);
     let control = start_windows_capture(
@@ -94,6 +100,7 @@ pub fn start_capture(
         Arc::clone(&paused),
         frame_sender,
         finish_sender.clone(),
+        Arc::clone(&telemetry),
     )?;
 
     let task = tokio::spawn(async move {
@@ -110,6 +117,7 @@ pub fn start_capture(
         paused,
         task,
         finish_sender,
+        telemetry,
     }))
 }
 
@@ -120,6 +128,12 @@ struct WindowsRunningCapture {
     paused: Arc<AtomicBool>,
     task: JoinHandle<()>,
     finish_sender: watch::Sender<Option<crate::models::CaptureErrorPayload>>,
+    telemetry: Arc<CaptureIngressTelemetry>,
+}
+
+#[derive(Default)]
+struct CaptureIngressTelemetry {
+    dropped: AtomicU64,
 }
 
 #[async_trait]
@@ -142,6 +156,15 @@ impl RunningCapture for WindowsRunningCapture {
         &self,
     ) -> Option<watch::Receiver<Option<crate::models::CaptureErrorPayload>>> {
         Some(self.finish_sender.subscribe())
+    }
+
+    async fn stats(&self) -> Result<crate::models::CaptureStats> {
+        let dropped = self.telemetry.dropped.load(Ordering::Relaxed);
+        Ok(crate::models::CaptureStats {
+            frames_dropped: dropped,
+            frames_capture_dropped: dropped,
+            ..crate::models::CaptureStats::default()
+        })
     }
 }
 
@@ -181,6 +204,8 @@ struct WindowsCaptureHandler {
     finish_sender: watch::Sender<Option<crate::models::CaptureErrorPayload>>,
     paused: Arc<AtomicBool>,
     output_size: Option<(u32, u32)>,
+    telemetry: Arc<CaptureIngressTelemetry>,
+    readback: FrameReadback,
 }
 
 struct WindowsCaptureFlags {
@@ -188,6 +213,7 @@ struct WindowsCaptureFlags {
     finish_sender: watch::Sender<Option<crate::models::CaptureErrorPayload>>,
     paused: Arc<AtomicBool>,
     output_size: Option<(u32, u32)>,
+    telemetry: Arc<CaptureIngressTelemetry>,
 }
 
 impl GraphicsCaptureApiHandler for WindowsCaptureHandler {
@@ -200,6 +226,8 @@ impl GraphicsCaptureApiHandler for WindowsCaptureHandler {
             finish_sender: ctx.flags.finish_sender,
             paused: ctx.flags.paused,
             output_size: ctx.flags.output_size,
+            telemetry: ctx.flags.telemetry,
+            readback: FrameReadback::default(),
         })
     }
 
@@ -213,16 +241,21 @@ impl GraphicsCaptureApiHandler for WindowsCaptureHandler {
         }
 
         if self.frame_sender.capacity() == 0 {
+            self.telemetry.dropped.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
 
-        match frame_to_video_frame(frame, self.output_size) {
-            Ok(video_frame) => match self.frame_sender.try_send(video_frame) {
-                Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
+        match frame_to_video_frame(frame, self.output_size, &mut self.readback) {
+            Ok(Some(video_frame)) => match self.frame_sender.try_send(video_frame) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    self.telemetry.dropped.fetch_add(1, Ordering::Relaxed);
+                }
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     return Err("Windows capture frame consumer stopped".to_string());
                 }
             },
+            Ok(None) => {}
             Err(error) => {
                 let _ = self.finish_sender.send(Some(error.payload()));
                 return Err(error.to_string());
@@ -342,12 +375,14 @@ fn start_windows_capture(
     paused: Arc<AtomicBool>,
     frame_sender: mpsc::Sender<VideoFrame>,
     finish_sender: watch::Sender<Option<crate::models::CaptureErrorPayload>>,
+    telemetry: Arc<CaptureIngressTelemetry>,
 ) -> Result<WindowsCaptureControl> {
     let flags = WindowsCaptureFlags {
         frame_sender,
         finish_sender,
         paused,
         output_size: requested_output_size(options),
+        telemetry,
     };
     match options.source_kind {
         CaptureSourceKind::Display => {
@@ -381,12 +416,141 @@ fn start_windows_capture(
     }
 }
 
-fn frame_to_video_frame(frame: &mut Frame, output_size: Option<(u32, u32)>) -> Result<VideoFrame> {
-    let width = frame.width();
-    let height = frame.height();
-    let buffer = frame.buffer().map_err(runtime_error)?;
-    let mut packed = Vec::new();
-    let data = buffer.as_nopadding_buffer(&mut packed);
+#[derive(Default)]
+struct FrameReadback {
+    width: u32,
+    height: u32,
+    slots: Vec<ReadbackSlot>,
+    next_slot: usize,
+    scaler: Option<D3D11BgraScaler>,
+    gpu_scaler_failed: bool,
+}
+
+struct ReadbackSlot {
+    texture: ID3D11Texture2D,
+    ready: bool,
+}
+
+impl FrameReadback {
+    fn read_bgra(
+        &mut self,
+        frame: &Frame<'_>,
+        output_size: Option<(u32, u32)>,
+    ) -> Result<Option<(u32, u32, Vec<u8>)>> {
+        let source_width = frame.width();
+        let source_height = frame.height();
+        let requested = output_size.unwrap_or((source_width, source_height));
+        let mut source_texture = frame.as_raw_texture().clone();
+        let mut width = source_width;
+        let mut height = source_height;
+
+        if requested != (source_width, source_height) && !self.gpu_scaler_failed {
+            let needs_scaler = self.scaler.as_ref().map_or(true, |scaler| {
+                !scaler.matches(source_width, source_height, requested.0, requested.1)
+            });
+            if needs_scaler {
+                match D3D11BgraScaler::new(frame, requested.0, requested.1) {
+                    Ok(scaler) => self.scaler = Some(scaler),
+                    Err(error) => {
+                        eprintln!(
+                            "[screen-capture] D3D11 GPU scaling unavailable; using CPU fallback: {error}"
+                        );
+                        self.scaler = None;
+                        self.gpu_scaler_failed = true;
+                    }
+                }
+            }
+            if let Some(scaler) = &self.scaler {
+                source_texture = scaler.scale(frame)?;
+                width = requested.0;
+                height = requested.1;
+            }
+        }
+
+        if self.slots.is_empty() || self.width != width || self.height != height {
+            let source = frame.desc();
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: source.Format,
+                SampleDesc: source.SampleDesc,
+                Usage: D3D11_USAGE_STAGING,
+                BindFlags: 0,
+                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                MiscFlags: 0,
+            };
+            let mut slots = Vec::with_capacity(3);
+            for _ in 0..3 {
+                let mut texture = None;
+                unsafe {
+                    frame
+                        .device()
+                        .CreateTexture2D(&desc, None, Some(&mut texture))
+                }
+                .map_err(runtime_error)?;
+                slots.push(ReadbackSlot {
+                    texture: texture
+                        .ok_or_else(|| runtime_error("D3D11 staging texture was not created"))?,
+                    ready: false,
+                });
+            }
+            self.width = width;
+            self.height = height;
+            self.slots = slots;
+            self.next_slot = 0;
+        }
+
+        let slot = &mut self.slots[self.next_slot];
+        let data = if slot.ready {
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            unsafe {
+                frame
+                    .device_context()
+                    .Map(&slot.texture, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+            }
+            .map_err(runtime_error)?;
+            let row_bytes = width as usize * 4;
+            let mut data = vec![0u8; row_bytes * height as usize];
+            for row in 0..height as usize {
+                let source = unsafe {
+                    std::slice::from_raw_parts(
+                        mapped
+                            .pData
+                            .cast::<u8>()
+                            .add(row * mapped.RowPitch as usize),
+                        row_bytes,
+                    )
+                };
+                data[row * row_bytes..(row + 1) * row_bytes].copy_from_slice(source);
+            }
+            unsafe { frame.device_context().Unmap(&slot.texture, 0) };
+            Some(data)
+        } else {
+            None
+        };
+
+        unsafe {
+            frame
+                .device_context()
+                .CopyResource(&slot.texture, &source_texture)
+        };
+        slot.ready = true;
+        self.next_slot = (self.next_slot + 1) % self.slots.len();
+        Ok(data.map(|data| (width, height, data)))
+    }
+}
+
+fn frame_to_video_frame(
+    frame: &mut Frame,
+    output_size: Option<(u32, u32)>,
+    readback: &mut FrameReadback,
+) -> Result<Option<VideoFrame>> {
+    let Some((width, height, packed)) = readback.read_bgra(frame, output_size)? else {
+        return Ok(None);
+    };
+    let data = packed.as_slice();
     let (width, height, data) = if let Some((target_width, target_height)) = output_size {
         if target_width != width || target_height != height {
             let resized = resize_bgra_hamming(data, width, height, target_width, target_height)?;
@@ -398,13 +562,13 @@ fn frame_to_video_frame(frame: &mut Frame, output_size: Option<(u32, u32)>) -> R
         (width, height, data.to_vec())
     };
 
-    Ok(VideoFrame {
+    Ok(Some(VideoFrame {
         width,
         height,
         pixel_format: PixelFormat::Bgra,
         timestamp_ns: now_ns(),
         data: Arc::from(data),
-    })
+    }))
 }
 
 fn frame_to_thumbnail(frame: &mut Frame) -> Result<String> {
@@ -448,9 +612,8 @@ where
     };
     let result = receiver
         .recv_timeout(THUMBNAIL_TIMEOUT)
-        .map_err(|error| {
+        .inspect_err(|error| {
             eprintln!("[screen-capture] Windows thumbnail capture timed out or closed: {error}");
-            error
         })
         .ok()
         .and_then(|result| {

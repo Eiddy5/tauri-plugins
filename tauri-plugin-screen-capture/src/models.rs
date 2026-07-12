@@ -176,8 +176,20 @@ pub struct CaptureStats {
     pub frames_captured: u64,
     pub frames_published: u64,
     pub frames_dropped: u64,
+    #[serde(default)]
+    pub frames_capture_dropped: u64,
+    #[serde(default)]
+    pub frames_pipeline_dropped: u64,
+    #[serde(default)]
+    pub frames_encoder_dropped: u64,
     pub fps: f64,
+    #[serde(default)]
+    pub capture_fps: f64,
+    #[serde(default)]
+    pub publish_fps: f64,
     pub bitrate_kbps: u32,
+    #[serde(default)]
+    pub encoder_backend: Option<String>,
     pub started: bool,
 }
 
@@ -187,8 +199,14 @@ impl Default for CaptureStats {
             frames_captured: 0,
             frames_published: 0,
             frames_dropped: 0,
+            frames_capture_dropped: 0,
+            frames_pipeline_dropped: 0,
+            frames_encoder_dropped: 0,
             fps: 0.0,
+            capture_fps: 0.0,
+            publish_fps: 0.0,
             bitrate_kbps: 0,
+            encoder_backend: None,
             started: false,
         }
     }

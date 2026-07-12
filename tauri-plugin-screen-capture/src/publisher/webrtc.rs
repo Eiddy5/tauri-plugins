@@ -8,15 +8,22 @@ use crate::{
     models::{CaptureStats, StartCaptureOptions},
     pipeline::frame::VideoFrame,
     publisher::CapturePublisher,
-    webrtc::{
-        h264_encoder::H264Encoder, signaling::WebRtcSignalingState, track::WebRtcH264SampleSender,
-    },
+    webrtc::{signaling::WebRtcSignalingState, track::WebRtcH264SampleSender},
     Result,
 };
+
+#[cfg(not(target_os = "windows"))]
+use crate::webrtc::h264_encoder::H264Encoder;
+
+#[cfg(target_os = "windows")]
+use crate::platform::windows::media::encoder_worker::WindowsEncoderWorker;
 
 pub struct WebRtcPublisher {
     signaling: std::sync::Arc<WebRtcSignalingState>,
     h264_sender: WebRtcH264SampleSender,
+    #[cfg(target_os = "windows")]
+    encoder: Mutex<Option<WindowsEncoderWorker>>,
+    #[cfg(not(target_os = "windows"))]
     encoder: Mutex<Option<H264Encoder>>,
     pending_frame: Mutex<Option<VideoFrame>>,
     state: Mutex<WebRtcPublisherState>,
@@ -63,7 +70,20 @@ impl CapturePublisher for WebRtcPublisher {
         let width = options.width.unwrap_or(1280);
         let height = options.height.unwrap_or(720);
         let fps = options.effective_fps();
-        *self.encoder.lock().await = Some(H264Encoder::new(width, height, fps)?);
+        #[cfg(target_os = "windows")]
+        {
+            *self.encoder.lock().await = Some(WindowsEncoderWorker::start(
+                width,
+                height,
+                fps,
+                self.h264_sender.clone(),
+                tokio::runtime::Handle::current(),
+            )?);
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            *self.encoder.lock().await = Some(H264Encoder::new(width, height, fps)?);
+        }
 
         let mut state = self.state.lock().await;
         state.lifecycle = WebRtcPublisherLifecycle::Started;
@@ -92,6 +112,20 @@ impl CapturePublisher for WebRtcPublisher {
 
         self.sync_keyframe_request().await?;
 
+        #[cfg(target_os = "windows")]
+        {
+            let encoder = self.encoder.lock().await;
+            let encoder = encoder.as_ref().ok_or_else(|| {
+                Error::new(
+                    CaptureErrorCode::WebRtcTrackFailed,
+                    "H264 encoder is not initialized",
+                    true,
+                )
+            })?;
+            encoder.submit(frame);
+        }
+
+        #[cfg(not(target_os = "windows"))]
         {
             let mut encoder = self.encoder.lock().await;
             let encoder = encoder.as_mut().ok_or_else(|| {
@@ -126,9 +160,7 @@ impl CapturePublisher for WebRtcPublisher {
             let mut state = self.state.lock().await;
             state.last_keyframe_request_seen = self.signaling.pending_keyframe_requests();
         }
-        if let Some(encoder) = self.encoder.lock().await.as_mut() {
-            encoder.force_keyframe()?;
-        }
+        self.force_encoder_keyframe().await?;
         Ok(())
     }
 
@@ -154,7 +186,14 @@ impl CapturePublisher for WebRtcPublisher {
             state.lifecycle = WebRtcPublisherLifecycle::Stopped;
             state.stats.started = false;
         }
-        *self.encoder.lock().await = None;
+        #[cfg(target_os = "windows")]
+        if let Some(encoder) = self.encoder.lock().await.take() {
+            encoder.stop();
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            *self.encoder.lock().await = None;
+        }
         *self.pending_frame.lock().await = None;
         self.signaling.close().await
     }
@@ -162,10 +201,21 @@ impl CapturePublisher for WebRtcPublisher {
     async fn stats(&self) -> Result<CaptureStats> {
         let mut state = self.state.lock().await;
         refresh_published_fps(&mut state, Instant::now());
+        #[cfg(target_os = "windows")]
+        if let Some(encoder) = self.encoder.lock().await.as_ref() {
+            let worker = encoder.stats();
+            state.stats.frames_published = worker.frames_published;
+            state.stats.frames_dropped = worker.frames_dropped;
+            state.stats.frames_encoder_dropped = worker.frames_encoder_dropped;
+            state.stats.fps = worker.fps;
+            state.stats.publish_fps = worker.publish_fps;
+            state.stats.encoder_backend = worker.encoder_backend;
+        }
         Ok(state.stats.clone())
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn record_published_frame(state: &mut WebRtcPublisherState, now: Instant) {
     state.published_at.push_back(now);
     refresh_published_fps(state, now);
@@ -189,9 +239,19 @@ impl WebRtcPublisher {
         if requested > state.last_keyframe_request_seen {
             state.last_keyframe_request_seen = requested;
             drop(state);
-            if let Some(encoder) = self.encoder.lock().await.as_mut() {
-                encoder.force_keyframe()?;
-            }
+            self.force_encoder_keyframe().await?;
+        }
+        Ok(())
+    }
+
+    async fn force_encoder_keyframe(&self) -> Result<()> {
+        #[cfg(target_os = "windows")]
+        if let Some(encoder) = self.encoder.lock().await.as_ref() {
+            encoder.request_keyframe();
+        }
+        #[cfg(not(target_os = "windows"))]
+        if let Some(encoder) = self.encoder.lock().await.as_mut() {
+            encoder.force_keyframe()?;
         }
         Ok(())
     }

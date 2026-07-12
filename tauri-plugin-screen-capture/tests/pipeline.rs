@@ -79,6 +79,21 @@ async fn pipeline_accepts_frames_without_waiting_for_slow_publisher() {
         .expect("push frame");
 }
 
+#[tokio::test]
+async fn pipeline_reports_replaced_frames_as_pipeline_stage_drops() {
+    let publisher = Arc::new(SlowPublisher::new(Duration::from_millis(200)));
+    let pipeline = CapturePipeline::new(publisher);
+
+    pipeline.push_frame(frame(1)).await.expect("first frame");
+    pipeline.push_frame(frame(2)).await.expect("second frame");
+    pipeline.push_frame(frame(3)).await.expect("third frame");
+
+    let stats = pipeline.stats().await;
+    assert!(stats.frames_pipeline_dropped >= 1);
+    assert_eq!(stats.frames_dropped, stats.frames_pipeline_dropped);
+    assert!(stats.capture_fps > 0.0);
+}
+
 #[allow(dead_code)]
 fn start_options() -> StartCaptureOptions {
     StartCaptureOptions {

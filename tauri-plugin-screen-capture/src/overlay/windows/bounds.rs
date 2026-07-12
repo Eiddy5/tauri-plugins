@@ -30,9 +30,7 @@ pub fn windows_display_index_from_source_id(source_id: &str) -> Option<usize> {
 }
 
 pub(crate) fn display_bounds_from_source_id(source_id: &str) -> Option<OverlayRect> {
-    let Some(index) = windows_display_index_from_source_id(source_id) else {
-        return None;
-    };
+    let index = windows_display_index_from_source_id(source_id)?;
     let monitor = match Monitor::from_index(index + 1) {
         Ok(monitor) => monitor,
         Err(_) => return None,

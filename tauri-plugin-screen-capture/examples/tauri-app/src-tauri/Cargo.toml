@@ -26,3 +26,12 @@ tauri-plugin-screen-capture = { path = "../../../", features = ["macos-screencap
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 tauri-plugin-screen-capture = { path = "../../../" }
+
+[profile.dev.package.fast_image_resize]
+opt-level = 3
+
+[profile.dev.package.yuvutils-rs]
+opt-level = 3
+
+[profile.dev.package.openh264]
+opt-level = 3

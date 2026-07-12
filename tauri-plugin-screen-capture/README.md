@@ -1,5 +1,11 @@
 # Tauri Plugin screen-capture
 
+## Windows real-time media path
+
+Windows H264 publishing uses the system/driver Media Foundation hardware MFT and does not start FFmpeg or another encoder executable. Encoding runs on a dedicated latest-frame thread; a slow encoder or WebRTC writer cannot block the Windows capture callback. If no hardware MFT can be activated, the plugin falls back to OpenH264 and reports the actual backend in `CaptureStats.encoderBackend`.
+
+`CaptureStats` also exposes `framesCaptureDropped`, `framesPipelineDropped`, `framesEncoderDropped`, `captureFps`, and `publishFps`. The legacy aggregate fields remain available. See the [Windows media module](src/platform/windows/media/README.md) and the independent decisions under [docs/media-solutions](docs/media-solutions/).
+
 ## Publisher selection
 
 `startCapture` defaults to the existing WebRTC loopback publisher:

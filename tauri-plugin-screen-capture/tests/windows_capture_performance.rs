@@ -157,7 +157,7 @@ async fn display_capture_resize_and_h264_encode_stay_realtime_end_to_end() {
         .into_iter()
         .find(|source| source.kind == CaptureSourceKind::Display)
         .expect("at least one Windows display");
-    let target_width = source.width.min(1920).max(2) & !1;
+    let target_width = source.width.clamp(2, 1920) & !1;
     let scale = target_width as f64 / source.width.max(1) as f64;
     let target_height = ((source.height as f64 * scale).round() as u32).max(2) & !1;
     let probe = Arc::new(EncodingProbe {
