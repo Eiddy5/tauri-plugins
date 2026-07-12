@@ -12,6 +12,16 @@ import {
 import { publishAgoraScreenTrack } from "./lib/agoraPublisher.js"
 import { connectVideo } from "./lib/screenCapture.js"
 
+const captureQualityPresets = {
+  "720p": { label: "720p HD", maxWidth: 1280, maxHeight: 720, fps: 60 },
+  "1080p": { label: "1080p Full HD（推荐）", maxWidth: 1920, maxHeight: 1080, fps: 60 },
+  "2k": { label: "2K QHD", maxWidth: 2560, maxHeight: 1440, fps: 60 },
+  "4k": { label: "4K UHD", maxWidth: 3840, maxHeight: 2160, fps: 30 },
+}
+const storedCaptureQuality = localStorage.getItem("screenCapture.quality")
+const defaultCaptureQuality = Object.hasOwn(captureQualityPresets, storedCaptureQuality)
+  ? storedCaptureQuality
+  : "1080p"
 const state = {
   sources: [],
   selected: null,
@@ -22,6 +32,7 @@ const state = {
   debugRawSources: false,
   includeCurrentApp: false,
   includeSystemUi: false,
+  captureQuality: defaultCaptureQuality,
   activeKind: "display",
   peerConnection: null,
   captureVideoTrack: null,
@@ -34,9 +45,6 @@ const state = {
   agoraUid: localStorage.getItem("screenCapture.agora.uid") ?? "",
   pollTimer: null,
 }
-
-const captureMaxWidth = 1920
-const captureFps = 60
 
 const app = document.querySelector("#app")
 
@@ -55,6 +63,18 @@ app.innerHTML = `
         <button type="button" role="tab" data-kind="display">共享屏幕 <span data-display-count>0</span></button>
         <button type="button" role="tab" data-kind="window">共享窗口 <span data-window-count>0</span></button>
       </div>
+
+      <label class="quality-control">
+        <span>共享清晰度</span>
+        <select data-quality aria-label="共享清晰度">
+          ${Object.entries(captureQualityPresets)
+            .map(
+              ([value, preset]) =>
+                `<option value="${value}">${preset.label} · ${preset.fps} FPS</option>`,
+            )
+            .join("")}
+        </select>
+      </label>
 
       <div class="options">
         <label><input type="checkbox" data-option="debugRawSources" /> Debug raw</label>
@@ -128,6 +148,7 @@ const elements = {
   sourceSummary: app.querySelector("[data-source-summary]"),
   refresh: app.querySelector("[data-refresh]"),
   kindButtons: [...app.querySelectorAll("[data-kind]")],
+  quality: app.querySelector("[data-quality]"),
   displayCount: app.querySelector("[data-display-count]"),
   windowCount: app.querySelector("[data-window-count]"),
   optionInputs: [...app.querySelectorAll("[data-option]")],
@@ -158,6 +179,12 @@ elements.start.addEventListener("click", start)
 elements.pause.addEventListener("click", pause)
 elements.resume.addEventListener("click", resume)
 elements.stop.addEventListener("click", stop)
+elements.quality.addEventListener("change", () => {
+  if (!Object.hasOwn(captureQualityPresets, elements.quality.value)) return
+  state.captureQuality = elements.quality.value
+  localStorage.setItem("screenCapture.quality", state.captureQuality)
+  render()
+})
 
 for (const button of elements.kindButtons) {
   button.addEventListener("click", () => selectKind(button.dataset.kind))
@@ -230,16 +257,19 @@ async function start() {
       throw new Error(`Screen recording permission is ${permission}`)
     }
 
+    const quality = selectedQualityPreset()
+    const captureSize = scaledCaptureSize(state.selected, quality.maxWidth, quality.maxHeight)
     console.info("[screen-capture] starting capture", {
       sourceId: state.selected.id,
       sourceKind: state.selected.kind,
       name: state.selected.name,
+      quality: state.captureQuality,
+      outputSize: captureSize,
     })
-    const captureSize = scaledCaptureSize(state.selected, captureMaxWidth)
     state.session = await startCapture({
       sourceId: state.selected.id,
       sourceKind: state.selected.kind,
-      fps: captureFps,
+      fps: quality.fps,
       width: captureSize.width,
       height: captureSize.height,
       captureCursor: true,
@@ -375,6 +405,9 @@ function render() {
     input.disabled = hasSession
   }
 
+  elements.quality.value = state.captureQuality
+  elements.quality.disabled = hasSession
+
   elements.agoraEnabled.checked = state.agoraEnabled
   elements.agoraEnabled.disabled = hasSession
   for (const input of elements.agoraFields) {
@@ -454,7 +487,7 @@ function renderPreview() {
   elements.previewIdle.hidden = Boolean(state.session)
   elements.previewTitle.textContent = state.selected ? state.selected.name : "请选择左侧来源"
   elements.previewSubtitle.textContent = state.selected
-    ? sourceSubtitle(state.selected)
+    ? `${sourceSubtitle(state.selected)} · 输出 ${captureSizeLabel(state.selected)}`
     : "选择后点击开始共享"
 }
 
@@ -492,12 +525,26 @@ function sourceSubtitle(source) {
   return size
 }
 
-function scaledCaptureSize(source, maxWidth) {
-  const scale = Math.min(1, maxWidth / Math.max(source.width, 1))
+function scaledCaptureSize(source, maxWidth, maxHeight) {
+  const scale = Math.min(
+    1,
+    maxWidth / Math.max(source.width, 1),
+    maxHeight / Math.max(source.height, 1),
+  )
   return {
     width: Math.max(1, Math.round(source.width * scale)),
     height: Math.max(1, Math.round(source.height * scale)),
   }
+}
+
+function selectedQualityPreset() {
+  return captureQualityPresets[state.captureQuality] ?? captureQualityPresets["1080p"]
+}
+
+function captureSizeLabel(source) {
+  const quality = selectedQualityPreset()
+  const size = scaledCaptureSize(source, quality.maxWidth, quality.maxHeight)
+  return `${size.width} × ${size.height} @ ${quality.fps} FPS`
 }
 
 function persistAgoraConfig(field, value) {

@@ -12,7 +12,7 @@ use std::{
 use crate::{
     models::CaptureStats,
     pipeline::frame::VideoFrame,
-    platform::windows::media::WindowsGpuSurface,
+    platform::windows::media::{recommended_screen_share_bitrate, WindowsGpuSurface},
     webrtc::{
         h264_encoder::H264Encoder,
         track::{EncodedVideoSample, WebRtcH264SampleSender},
@@ -88,7 +88,7 @@ impl WindowsEncoderWorker {
         let sample_slot = Arc::new(OrderedSlot::default());
         let force_keyframe = Arc::new(AtomicBool::new(false));
         let target_bitrate_bps = Arc::new(AtomicU64::new(0));
-        let maximum_bitrate_bps = recommended_bitrate(width, height, fps);
+        let maximum_bitrate_bps = u64::from(recommended_screen_share_bitrate(width, height, fps));
         let telemetry = Arc::new(EncoderTelemetry::new());
 
         let transport_slot = Arc::clone(&sample_slot);
@@ -427,26 +427,43 @@ fn run_encoder(
     let mut repeated_timestamp_ns = 0u64;
     let mut next_repeat_at = Instant::now() + frame_period;
     loop {
-        let wait_for = next_repeat_at.saturating_duration_since(Instant::now());
-        let (frame, repeated) = match frame_slot.wait_next_timeout(wait_for) {
-            SlotWait::Value(frame) => {
-                if cadence.on_captured_frame() {
-                    force_keyframe.store(true, Ordering::Release);
+        let captured = if last_frame.is_none() {
+            match frame_slot.wait_next_timeout(frame_period) {
+                SlotWait::Value(frame) => Some(frame),
+                SlotWait::Timeout => continue,
+                SlotWait::Stopped => break,
+            }
+        } else {
+            let mut latest = None;
+            loop {
+                let wait_for = next_repeat_at.saturating_duration_since(Instant::now());
+                match frame_slot.wait_next_timeout(wait_for) {
+                    SlotWait::Value(frame) => {
+                        latest = Some(frame);
+                        if Instant::now() >= next_repeat_at {
+                            break;
+                        }
+                    }
+                    SlotWait::Timeout => break,
+                    SlotWait::Stopped => return,
                 }
-                repeated_timestamp_ns = frame.timestamp_ns();
-                last_frame = Some(frame.clone());
-                next_repeat_at = Instant::now() + frame_period;
-                (frame, false)
             }
-            SlotWait::Timeout => {
-                let Some(frame) = last_frame.as_ref() else {
-                    continue;
-                };
-                cadence.on_repeat_tick();
-                repeated_timestamp_ns = repeated_timestamp_ns.saturating_add(frame_duration_ns);
-                (frame.with_timestamp(repeated_timestamp_ns), true)
+            latest
+        };
+        let frame = if let Some(frame) = captured {
+            if cadence.on_captured_frame() {
+                force_keyframe.store(true, Ordering::Release);
             }
-            SlotWait::Stopped => break,
+            repeated_timestamp_ns = frame.timestamp_ns();
+            last_frame = Some(frame.clone());
+            frame
+        } else {
+            let Some(frame) = last_frame.as_ref() else {
+                continue;
+            };
+            cadence.on_repeat_tick();
+            repeated_timestamp_ns = repeated_timestamp_ns.saturating_add(frame_duration_ns);
+            frame.with_timestamp(repeated_timestamp_ns)
         };
         let requested_bitrate_bps = target_bitrate_bps.load(Ordering::Relaxed);
         if requested_bitrate_bps > 0
@@ -482,19 +499,15 @@ fn run_encoder(
                 Err(error) => {
                     telemetry.dropped.fetch_add(1, Ordering::Relaxed);
                     eprintln!("[screen-capture] Windows CPU fallback encoder failed: {error}");
-                    if repeated {
-                        next_repeat_at =
-                            next_repeat_deadline(next_repeat_at, Instant::now(), frame_period);
-                    }
+                    next_repeat_at =
+                        next_repeat_deadline(next_repeat_at, Instant::now(), frame_period);
                     continue;
                 }
             }
         }
         if force_keyframe.swap(false, Ordering::AcqRel) && encoder.force_keyframe().is_err() {
             telemetry.dropped.fetch_add(1, Ordering::Relaxed);
-            if repeated {
-                next_repeat_at = next_repeat_deadline(next_repeat_at, Instant::now(), frame_period);
-            }
+            next_repeat_at = next_repeat_deadline(next_repeat_at, Instant::now(), frame_period);
             continue;
         }
         let result = match &frame {
@@ -524,9 +537,7 @@ fn run_encoder(
                 eprintln!("[screen-capture] Windows H264 encode failed: {error}");
             }
         }
-        if repeated {
-            next_repeat_at = next_repeat_deadline(next_repeat_at, Instant::now(), frame_period);
-        }
+        next_repeat_at = next_repeat_deadline(next_repeat_at, Instant::now(), frame_period);
     }
 }
 
@@ -537,15 +548,6 @@ fn next_repeat_deadline(previous: Instant, now: Instant, period: Duration) -> In
     } else {
         now + period
     }
-}
-
-fn recommended_bitrate(width: u32, height: u32, fps: u32) -> u64 {
-    u64::from(width)
-        .saturating_mul(u64::from(height))
-        .saturating_mul(u64::from(fps.max(1)))
-        .saturating_mul(8)
-        .div_ceil(100)
-        .clamp(4_000_000, 8_000_000)
 }
 
 fn target_bitrate_from_remb(maximum_bitrate_bps: u64, estimated_bitrate_bps: Option<u64>) -> u64 {

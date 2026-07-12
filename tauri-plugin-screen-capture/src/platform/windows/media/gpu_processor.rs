@@ -9,13 +9,13 @@ use windows::{
                 ID3D11Multithread, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice,
                 ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
                 ID3D11VideoProcessorOutputView, D3D11_BIND_RENDER_TARGET, D3D11_TEX2D_VPIV,
-                D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
-                D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
-                D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
-                D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
-                D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
-                D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
-                D3D11_VPOV_DIMENSION_TEXTURE2D,
+                D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_VIDEO_COLOR,
+                D3D11_VIDEO_COLOR_0, D3D11_VIDEO_COLOR_RGBA, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+                D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT,
+                D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
+                D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
+                D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+                D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D,
             },
             Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_RATIONAL},
         },
@@ -23,7 +23,10 @@ use windows::{
 };
 use windows_capture::frame::Frame;
 
-use crate::{platform::windows::media::WindowsGpuSurface, Error, Result};
+use crate::{
+    platform::windows::media::{fit_inside_even, WindowsGpuSurface},
+    Error, Result,
+};
 
 const GPU_SURFACE_POOL_SIZE: usize = 4;
 
@@ -133,14 +136,26 @@ impl D3D11Nv12Processor {
             right: source_width as i32,
             bottom: source_height as i32,
         };
-        let target_rect = RECT {
+        let output_rect = RECT {
             left: 0,
             top: 0,
             right: target_width as i32,
             bottom: target_height as i32,
         };
+        let target_rect = letterbox_rect(source_width, source_height, target_width, target_height);
+        let background = D3D11_VIDEO_COLOR {
+            Anonymous: D3D11_VIDEO_COLOR_0 {
+                RGBA: D3D11_VIDEO_COLOR_RGBA {
+                    R: 0.0,
+                    G: 0.0,
+                    B: 0.0,
+                    A: 1.0,
+                },
+            },
+        };
         unsafe {
-            video_context.VideoProcessorSetOutputTargetRect(&processor, true, Some(&target_rect));
+            video_context.VideoProcessorSetOutputTargetRect(&processor, true, Some(&output_rect));
+            video_context.VideoProcessorSetOutputBackgroundColor(&processor, false, &background);
             video_context.VideoProcessorSetStreamSourceRect(
                 &processor,
                 0,
@@ -325,14 +340,26 @@ impl D3D11BgraScaler {
             right: source_width as i32,
             bottom: source_height as i32,
         };
-        let target_rect = RECT {
+        let output_rect = RECT {
             left: 0,
             top: 0,
             right: target_width as i32,
             bottom: target_height as i32,
         };
+        let target_rect = letterbox_rect(source_width, source_height, target_width, target_height);
+        let background = D3D11_VIDEO_COLOR {
+            Anonymous: D3D11_VIDEO_COLOR_0 {
+                RGBA: D3D11_VIDEO_COLOR_RGBA {
+                    R: 0.0,
+                    G: 0.0,
+                    B: 0.0,
+                    A: 1.0,
+                },
+            },
+        };
         unsafe {
-            video_context.VideoProcessorSetOutputTargetRect(&processor, true, Some(&target_rect));
+            video_context.VideoProcessorSetOutputTargetRect(&processor, true, Some(&output_rect));
+            video_context.VideoProcessorSetOutputBackgroundColor(&processor, false, &background);
             video_context.VideoProcessorSetStreamSourceRect(
                 &processor,
                 0,
@@ -418,10 +445,44 @@ impl D3D11BgraScaler {
     }
 }
 
+fn letterbox_rect(
+    source_width: u32,
+    source_height: u32,
+    target_width: u32,
+    target_height: u32,
+) -> RECT {
+    let (content_width, content_height) =
+        fit_inside_even(source_width, source_height, target_width, target_height);
+    let left = (target_width.saturating_sub(content_width) / 2) & !1;
+    let top = (target_height.saturating_sub(content_height) / 2) & !1;
+    RECT {
+        left: left as i32,
+        top: top as i32,
+        right: left.saturating_add(content_width) as i32,
+        bottom: top.saturating_add(content_height) as i32,
+    }
+}
+
 fn gpu_error(error: impl std::fmt::Display) -> Error {
     Error::new(
         crate::CaptureErrorCode::CaptureRuntimeFailed,
         format!("D3D11 video processor scaling failed: {error}"),
         true,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::letterbox_rect;
+
+    #[test]
+    fn letterbox_rect_preserves_landscape_and_portrait_aspect_ratios() {
+        let landscape = letterbox_rect(1600, 900, 1920, 1080);
+        assert_eq!((landscape.left, landscape.top), (0, 0));
+        assert_eq!((landscape.right, landscape.bottom), (1920, 1080));
+
+        let portrait = letterbox_rect(900, 1600, 1920, 1080);
+        assert_eq!((portrait.left, portrait.top), (656, 0));
+        assert_eq!((portrait.right, portrait.bottom), (1262, 1080));
+    }
 }

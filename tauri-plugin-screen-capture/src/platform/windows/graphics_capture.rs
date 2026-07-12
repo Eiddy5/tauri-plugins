@@ -53,6 +53,7 @@ use crate::{
     },
     pipeline::frame::VideoFrame,
     platform::windows::media::{
+        fit_inside_even,
         gpu_processor::{D3D11BgraScaler, D3D11Nv12Processor},
         WindowsGpuSurface,
     },
@@ -630,7 +631,8 @@ fn frame_to_video_frame(
     let data = packed.as_slice();
     let (width, height, data) = if let Some((target_width, target_height)) = output_size {
         if target_width != width || target_height != height {
-            let resized = resize_bgra_hamming(data, width, height, target_width, target_height)?;
+            let resized =
+                resize_bgra_letterboxed(data, width, height, target_width, target_height)?;
             (target_width, target_height, resized)
         } else {
             (width, height, data.to_vec())
@@ -1240,6 +1242,39 @@ fn resize_bgra_hamming(
     Ok(destination.into_vec())
 }
 
+fn resize_bgra_letterboxed(
+    input: &[u8],
+    source_width: u32,
+    source_height: u32,
+    target_width: u32,
+    target_height: u32,
+) -> Result<Vec<u8>> {
+    let (content_width, content_height) =
+        fit_inside_even(source_width, source_height, target_width, target_height);
+    let resized = resize_bgra_hamming(
+        input,
+        source_width,
+        source_height,
+        content_width,
+        content_height,
+    )?;
+    let mut output = vec![0; target_width as usize * target_height as usize * 4];
+    for pixel in output.chunks_exact_mut(4) {
+        pixel[3] = 255;
+    }
+    let left = ((target_width.saturating_sub(content_width) / 2) & !1) as usize;
+    let top = ((target_height.saturating_sub(content_height) / 2) & !1) as usize;
+    let source_stride = content_width as usize * 4;
+    let target_stride = target_width as usize * 4;
+    for row in 0..content_height as usize {
+        let source_start = row * source_stride;
+        let target_start = (top + row) * target_stride + left * 4;
+        output[target_start..target_start + source_stride]
+            .copy_from_slice(&resized[source_start..source_start + source_stride]);
+    }
+    Ok(output)
+}
+
 fn dxgi_to_rgba(data: &[u8], format: DxgiDuplicationFormat) -> Option<Vec<u8>> {
     match format {
         DxgiDuplicationFormat::Rgba8 | DxgiDuplicationFormat::Rgba8Srgb => Some(data.to_vec()),
@@ -1389,6 +1424,19 @@ mod tests {
                 && pixel[1] == pixel[2]
                 && pixel[3] == 255
         }));
+    }
+
+    #[test]
+    fn letterboxed_resize_preserves_portrait_content_without_stretching() {
+        let input = vec![255; 2 * 4 * 4];
+        let output = resize_bgra_letterboxed(&input, 2, 4, 6, 4).expect("letterboxed BGRA resize");
+
+        for row in 0..4 {
+            let pixels = &output[row * 6 * 4..(row + 1) * 6 * 4];
+            assert_eq!(&pixels[0..8], &[0, 0, 0, 255, 0, 0, 0, 255]);
+            assert_eq!(&pixels[8..16], &[255; 8]);
+            assert_eq!(&pixels[16..24], &[0, 0, 0, 255, 0, 0, 0, 255]);
+        }
     }
 
     #[test]

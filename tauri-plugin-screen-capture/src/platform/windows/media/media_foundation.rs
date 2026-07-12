@@ -22,7 +22,7 @@ use crate::{
     error::Error,
     models::{CaptureErrorCode, PixelFormat},
     pipeline::frame::VideoFrame,
-    platform::windows::media::WindowsGpuSurface,
+    platform::windows::media::{recommended_screen_share_bitrate, WindowsGpuSurface},
     webrtc::track::EncodedVideoSample,
     Result,
 };
@@ -461,7 +461,7 @@ fn configure_transform(
         let _ = set_codec_u32(
             &codec_api,
             &CODECAPI_AVEncCommonMeanBitRate,
-            recommended_bitrate(width, height, fps),
+            recommended_screen_share_bitrate(width, height, fps),
         );
     }
 
@@ -470,7 +470,10 @@ fn configure_transform(
         unsafe {
             output.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
             output.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;
-            output.SetUINT32(&MF_MT_AVG_BITRATE, recommended_bitrate(width, height, fps))?;
+            output.SetUINT32(
+                &MF_MT_AVG_BITRATE,
+                recommended_screen_share_bitrate(width, height, fps),
+            )?;
             output.SetUINT64(&MF_MT_FRAME_SIZE, pack_ratio(width, height))?;
             output.SetUINT64(&MF_MT_FRAME_RATE, pack_ratio(fps, 1))?;
             output.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
@@ -571,15 +574,6 @@ fn pack_ratio(numerator: u32, denominator: u32) -> u64 {
     (u64::from(numerator) << 32) | u64::from(denominator)
 }
 
-fn recommended_bitrate(width: u32, height: u32, fps: u32) -> u32 {
-    let bits = u64::from(width)
-        .saturating_mul(u64::from(height))
-        .saturating_mul(u64::from(fps))
-        .saturating_mul(8)
-        / 100;
-    bits.clamp(4_000_000, 8_000_000) as u32
-}
-
 fn normalize_h264(data: Vec<u8>) -> Vec<u8> {
     if data.windows(3).any(|window| window == [0, 0, 1]) {
         return data;
@@ -615,7 +609,7 @@ fn mf_error(message: impl Into<String>) -> Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_h264, pack_ratio, recommended_bitrate};
+    use super::{normalize_h264, pack_ratio, recommended_screen_share_bitrate};
 
     #[test]
     fn ratio_attributes_use_media_foundation_packing() {
@@ -632,7 +626,7 @@ mod tests {
 
     #[test]
     fn realtime_screen_share_bitrate_is_bounded_for_webrtc_backpressure() {
-        assert_eq!(recommended_bitrate(1920, 1080, 60), 8_000_000);
-        assert_eq!(recommended_bitrate(1280, 720, 30), 4_000_000);
+        assert_eq!(recommended_screen_share_bitrate(1920, 1080, 60), 8_000_000);
+        assert_eq!(recommended_screen_share_bitrate(1280, 720, 30), 4_000_000);
     }
 }

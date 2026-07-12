@@ -12,7 +12,8 @@ use crate::{
     models::{CaptureErrorCode, PixelFormat},
     pipeline::frame::VideoFrame,
     platform::windows::media::{
-        media_foundation::MediaFoundationH264Encoder, WindowsGpuSurface,
+        media_foundation::MediaFoundationH264Encoder, recommended_screen_share_bitrate,
+        WindowsGpuSurface,
     },
     webrtc::track::EncodedVideoSample,
     Result,
@@ -222,7 +223,7 @@ impl SoftwareH264Encoder {
     fn new(width: u32, height: u32, fps: u32) -> Result<Self> {
         validate_bgra_encoder_input(width, height)?;
         let config = EncoderConfig::new()
-            .set_bitrate_bps(recommended_bitrate(width, height, fps))
+            .set_bitrate_bps(recommended_screen_share_bitrate(width, height, fps))
             .max_frame_rate(fps.max(1) as f32)
             .enable_skip_frame(true)
             .rate_control_mode(RateControlMode::Bitrate);
@@ -361,15 +362,6 @@ fn validate_bgra_encoder_input(width: u32, height: u32) -> Result<()> {
         )));
     }
     Ok(())
-}
-
-fn recommended_bitrate(width: u32, height: u32, fps: u32) -> u32 {
-    let bits = u64::from(width)
-        .saturating_mul(u64::from(height))
-        .saturating_mul(u64::from(fps.max(1)))
-        .saturating_mul(8)
-        / 100;
-    bits.clamp(4_000_000, 8_000_000) as u32
 }
 
 fn encoder_error(error: impl std::fmt::Display) -> Error {

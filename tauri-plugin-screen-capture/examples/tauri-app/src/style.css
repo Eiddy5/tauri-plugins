@@ -16,7 +16,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -47,7 +48,7 @@ button:disabled {
   padding: 16px;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto auto auto auto 1fr;
+  grid-template-rows: auto auto auto auto auto 1fr;
   gap: 14px;
   overflow: hidden;
 }
@@ -364,4 +365,29 @@ video {
   border: 1px solid #fecdca;
   border-radius: 6px;
   padding: 10px;
+}
+
+.quality-control {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  color: #475569;
+  font-size: 13px;
+}
+
+.quality-control select {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 7px 28px 7px 8px;
+  color: #17202a;
+  background: #ffffff;
+}
+
+.quality-control select:disabled {
+  color: #94a3b8;
+  background: #f1f5f9;
 }
