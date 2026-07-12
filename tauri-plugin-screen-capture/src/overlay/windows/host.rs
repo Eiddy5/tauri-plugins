@@ -1,17 +1,19 @@
 use std::{
     collections::HashMap,
     ffi::c_void,
-    sync::mpsc,
+    sync::{mpsc, Arc},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
 use windows::Win32::{
-    Foundation::HWND,
+    Foundation::{CloseHandle, HANDLE, HWND, WAIT_FAILED},
+    System::Threading::{CreateEventW, SetEvent},
     UI::{
         Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON},
         WindowsAndMessaging::{
-            DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE, WM_QUIT,
+            DispatchMessageW, MsgWaitForMultipleObjectsEx, PeekMessageW, TranslateMessage, MSG,
+            MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, WM_QUIT,
         },
     },
 };
@@ -34,21 +36,82 @@ use super::{
     window::OverlayWindow,
 };
 
-const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const WINDOW_LOCATION_CHANGE_REFRESH_DELAY: Duration = Duration::from_millis(160);
 
 #[derive(Debug)]
+struct CommandWake {
+    handle: usize,
+}
+
+impl CommandWake {
+    fn new() -> Result<Self> {
+        let handle = unsafe { CreateEventW(None, false, false, None) }.map_err(|error| {
+            Error::new(
+                CaptureErrorCode::Internal,
+                format!("failed to create share border overlay wake event: {error}"),
+                true,
+            )
+        })?;
+        Ok(Self {
+            handle: handle.0 as usize,
+        })
+    }
+
+    fn handle(&self) -> HANDLE {
+        HANDLE(self.handle as *mut c_void)
+    }
+
+    fn wake(&self) -> std::result::Result<(), ()> {
+        unsafe { SetEvent(self.handle()) }.map_err(|_| ())
+    }
+}
+
+impl Drop for CommandWake {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.handle());
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct OverlayCommandSender {
+    commands: mpsc::Sender<OverlayCommand>,
+    wake: Option<Arc<CommandWake>>,
+}
+
+impl OverlayCommandSender {
+    #[cfg(test)]
+    pub(crate) fn without_wake(commands: mpsc::Sender<OverlayCommand>) -> Self {
+        Self {
+            commands,
+            wake: None,
+        }
+    }
+
+    pub(crate) fn send(&self, command: OverlayCommand) -> std::result::Result<(), ()> {
+        self.commands.send(command).map_err(|_| ())?;
+        if let Some(wake) = &self.wake {
+            wake.wake()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
 pub(crate) struct OverlayHost {
-    pub(crate) sender: mpsc::Sender<OverlayCommand>,
+    pub(crate) sender: OverlayCommandSender,
     thread: Option<JoinHandle<()>>,
 }
 
 impl OverlayHost {
     pub(crate) fn spawn() -> Result<Self> {
-        let (sender, receiver) = mpsc::channel();
+        let (commands, receiver) = mpsc::channel();
+        let wake = Arc::new(CommandWake::new()?);
+        let thread_wake = Arc::clone(&wake);
         let thread = thread::Builder::new()
             .name("tauri-screen-capture-share-overlay".into())
-            .spawn(move || OverlayThread::default().run(receiver))
+            .spawn(move || OverlayThread::default().run(receiver, thread_wake))
             .map_err(|error| {
                 Error::new(
                     CaptureErrorCode::Internal,
@@ -58,7 +121,10 @@ impl OverlayHost {
             })?;
 
         Ok(Self {
-            sender,
+            sender: OverlayCommandSender {
+                commands,
+                wake: Some(wake),
+            },
             thread: Some(thread),
         })
     }
@@ -171,7 +237,7 @@ pub(crate) enum OverlayCommand {
         target_hwnd: usize,
         source_id: String,
         style: OverlayStyle,
-        event_sender: mpsc::Sender<OverlayCommand>,
+        event_sender: OverlayCommandSender,
         reply: OverlayReply,
     },
     ClearWindowEventTarget {
@@ -201,7 +267,7 @@ impl OverlayCommand {
 }
 
 pub(crate) async fn send_overlay_command(
-    sender: mpsc::Sender<OverlayCommand>,
+    sender: OverlayCommandSender,
     build_command: impl FnOnce(OverlayReply) -> OverlayCommand + Send + 'static,
 ) -> Result<()> {
     tokio::task::spawn_blocking(move || {
@@ -248,7 +314,7 @@ pub(crate) struct PendingWindowEventRefresh {
 }
 
 impl OverlayThread {
-    fn run(mut self, receiver: mpsc::Receiver<OverlayCommand>) {
+    fn run(mut self, receiver: mpsc::Receiver<OverlayCommand>, wake: Arc<CommandWake>) {
         loop {
             if !pump_window_messages() {
                 break;
@@ -257,20 +323,37 @@ impl OverlayThread {
                 break;
             }
             self.refresh_due_window_event_targets();
-
-            match receiver.recv_timeout(COMMAND_POLL_INTERVAL) {
-                Ok(command) => {
-                    if self.handle_command(command) {
-                        break;
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            let timeout_ms = self.next_refresh_timeout_ms();
+            let handles = [wake.handle()];
+            let wait_result = unsafe {
+                MsgWaitForMultipleObjectsEx(
+                    Some(&handles),
+                    timeout_ms,
+                    QS_ALLINPUT,
+                    MWMO_INPUTAVAILABLE,
+                )
+            };
+            if wait_result == WAIT_FAILED {
+                eprintln!("[screen-capture] Windows overlay wait failed; stopping overlay thread");
+                break;
             }
         }
 
         self.clear_all_window_event_targets();
         self.windows.clear();
+    }
+
+    fn next_refresh_timeout_ms(&self) -> u32 {
+        let Some(due_at) = self
+            .pending_window_event_refreshes
+            .values()
+            .map(|refresh| refresh.due_at)
+            .min()
+        else {
+            return u32::MAX;
+        };
+        let remaining = due_at.saturating_duration_since(Instant::now());
+        u32::try_from(remaining.as_millis().max(1)).unwrap_or(u32::MAX - 1)
     }
 
     pub(crate) fn handle_queued_commands(
@@ -539,7 +622,7 @@ impl OverlayThread {
         target_hwnd: usize,
         source_id: String,
         style: OverlayStyle,
-        event_sender: mpsc::Sender<OverlayCommand>,
+        event_sender: OverlayCommandSender,
     ) -> Result<()> {
         self.clear_window_event_target(registration_id);
 

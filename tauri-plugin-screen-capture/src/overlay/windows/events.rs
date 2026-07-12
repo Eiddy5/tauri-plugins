@@ -3,7 +3,7 @@ use std::{
     ffi::c_void,
     sync::{
         atomic::{AtomicU64, Ordering},
-        mpsc, Mutex, OnceLock,
+        Mutex, OnceLock,
     },
 };
 
@@ -22,7 +22,9 @@ use windows::Win32::{
 use crate::{error::Error, models::CaptureErrorCode, overlay::OverlayStyle, Result};
 
 use super::{
-    bounds::window_bounds_from_source_id, host::OverlayCommand, placement::OverlayPlacement,
+    bounds::window_bounds_from_source_id,
+    host::{OverlayCommand, OverlayCommandSender},
+    placement::OverlayPlacement,
 };
 
 static NEXT_WINDOW_EVENT_REGISTRATION_ID: AtomicU64 = AtomicU64::new(1);
@@ -113,20 +115,20 @@ struct WindowEventTarget {
     registration_id: u64,
     source_id: String,
     style: OverlayStyle,
-    sender: mpsc::Sender<OverlayCommand>,
+    sender: OverlayCommandSender,
     moving_or_sizing: bool,
 }
 
 enum WindowEventAction {
     Hide {
-        sender: mpsc::Sender<OverlayCommand>,
+        sender: OverlayCommandSender,
     },
     HideAndSuspendLocationChange {
-        sender: mpsc::Sender<OverlayCommand>,
+        sender: OverlayCommandSender,
         registration_id: u64,
     },
     HideAndClear {
-        sender: mpsc::Sender<OverlayCommand>,
+        sender: OverlayCommandSender,
         registration_id: u64,
     },
     RefreshBounds {
@@ -134,14 +136,14 @@ enum WindowEventAction {
         source_id: String,
         style: OverlayStyle,
         target_hwnd: usize,
-        sender: mpsc::Sender<OverlayCommand>,
+        sender: OverlayCommandSender,
     },
     DeferRefresh {
         registration_id: u64,
         source_id: String,
         style: OverlayStyle,
         target_hwnd: usize,
-        sender: mpsc::Sender<OverlayCommand>,
+        sender: OverlayCommandSender,
     },
 }
 
@@ -158,7 +160,7 @@ pub(crate) fn register_window_event_target(
     target_hwnd: usize,
     source_id: String,
     style: OverlayStyle,
-    sender: mpsc::Sender<OverlayCommand>,
+    sender: OverlayCommandSender,
 ) -> Result<()> {
     let mut registry = lock_window_event_registry()?;
     let targets = registry.targets_by_hwnd.entry(target_hwnd).or_default();

@@ -5,7 +5,7 @@ mod placement;
 mod util;
 mod window;
 
-use std::sync::{mpsc, Mutex};
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 
@@ -18,7 +18,7 @@ use crate::{
 
 use bounds::{display_bounds_from_source_id, window_bounds_from_source_id};
 use events::next_window_event_registration_id;
-use host::{send_overlay_command, OverlayCommand, OverlayHost};
+use host::{send_overlay_command, OverlayCommand, OverlayCommandSender, OverlayHost};
 use placement::{OverlayFocus, OverlayPlacement};
 
 pub use bounds::{windows_display_index_from_source_id, windows_target_handle_from_source_id};
@@ -151,7 +151,7 @@ impl WindowsShareOverlay {
         .await
     }
 
-    fn ensure_host_sender(&self) -> Result<mpsc::Sender<OverlayCommand>> {
+    fn ensure_host_sender(&self) -> Result<OverlayCommandSender> {
         let mut host = self.lock_host()?;
 
         if host.is_none() {
@@ -165,7 +165,7 @@ impl WindowsShareOverlay {
             .clone())
     }
 
-    fn host_sender(&self) -> Result<Option<mpsc::Sender<OverlayCommand>>> {
+    fn host_sender(&self) -> Result<Option<OverlayCommandSender>> {
         Ok(self.lock_host()?.as_ref().map(|host| host.sender.clone()))
     }
 
@@ -218,15 +218,19 @@ use windows::Win32::UI::WindowsAndMessaging::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
+    use std::{
+        sync::mpsc,
+        time::{Duration, Instant},
+    };
     use windows::{
         core::PCWSTR,
         Win32::{
             Foundation::{HWND, RECT},
             UI::WindowsAndMessaging::{
-                CreateWindowExW, DestroyWindow, GetWindow, GetWindowRect, IsWindowVisible,
-                SetWindowPos, ShowWindow, GW_HWNDPREV, HMENU, HWND_TOP, SWP_NOACTIVATE,
-                SWP_SHOWWINDOW, SW_MINIMIZE, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+                CreateWindowExW, DestroyWindow, FindWindowExW, GetWindow, GetWindowRect,
+                IsWindowVisible, SetWindowPos, ShowWindow, GW_HWNDPREV, GW_OWNER, HMENU, HWND_TOP,
+                SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_MINIMIZE, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW,
+                WS_VISIBLE,
             },
         },
     };
@@ -362,6 +366,86 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires an interactive Windows desktop"]
+    async fn owned_overlay_hides_within_one_frame_on_movesize_start() {
+        let class_name = wide("STATIC");
+        let owner_title = wide("screen-capture-overlay-drag-latency-test");
+        let owner = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                PCWSTR(class_name.as_ptr()),
+                PCWSTR(owner_title.as_ptr()),
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                200,
+                160,
+                800,
+                600,
+                None,
+                Some(HMENU::default()),
+                None,
+                None,
+            )
+        }
+        .expect("create real overlay drag owner window");
+        let overlay = WindowsShareOverlay::default();
+        overlay
+            .start(OverlayTarget {
+                source_id: format!("window:{:x}", owner.0 as usize),
+                source_kind: CaptureSourceKind::Window,
+            })
+            .await
+            .expect("start real owned overlay");
+        let overlay_windows = overlay_windows_for_owner(owner);
+        assert_eq!(overlay_windows.len(), 8);
+        assert!(overlay_windows
+            .iter()
+            .all(|hwnd| unsafe { IsWindowVisible(*hwnd).as_bool() }));
+
+        let test_registration_id = next_window_event_registration_id();
+        let test_hook = usize::MAX - test_registration_id as usize;
+        register_window_event_target(
+            test_registration_id,
+            owner.0 as usize,
+            format!("window:{:x}", owner.0 as usize),
+            OverlayStyle::default(),
+            overlay.host_sender().unwrap().unwrap(),
+        )
+        .unwrap();
+        register_window_event_hook_handles(test_registration_id, owner.0 as usize, &[test_hook])
+            .unwrap();
+        let started = Instant::now();
+        dispatch_window_event(
+            test_hook,
+            EVENT_SYSTEM_MOVESIZESTART,
+            owner.0 as usize,
+            OBJID_WINDOW.0,
+        );
+        while overlay_windows
+            .iter()
+            .any(|hwnd| unsafe { IsWindowVisible(*hwnd).as_bool() })
+            && started.elapsed() < Duration::from_millis(50)
+        {
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        let hide_latency = started.elapsed();
+        eprintln!(
+            "WINDOWS_OVERLAY_DRAG_START hide_latency_ms={:.3}",
+            hide_latency.as_secs_f64() * 1000.0
+        );
+
+        unregister_window_event_target(test_registration_id);
+        overlay.stop().await.expect("stop real owned overlay");
+        unsafe {
+            let _ = DestroyWindow(owner);
+        }
+        assert!(
+            hide_latency <= Duration::from_millis(8),
+            "overlay should hide within half a 60 Hz frame, got {:.3} ms",
+            hide_latency.as_secs_f64() * 1000.0
+        );
+    }
+
     fn window_is_above(expected_above: HWND, lower: HWND) -> bool {
         let mut current = lower;
         for _ in 0..512 {
@@ -374,6 +458,25 @@ mod tests {
             }
         }
         false
+    }
+
+    fn overlay_windows_for_owner(owner: HWND) -> Vec<HWND> {
+        let class_name = wide(window::CLASS_NAME);
+        let mut windows = Vec::new();
+        let mut after = None;
+        loop {
+            let Ok(hwnd) = (unsafe {
+                FindWindowExW(None, after, PCWSTR(class_name.as_ptr()), PCWSTR::null())
+            }) else {
+                break;
+            };
+            if unsafe { GetWindow(hwnd, GW_OWNER) }.is_ok_and(|actual_owner| actual_owner == owner)
+            {
+                windows.push(hwnd);
+            }
+            after = Some(hwnd);
+        }
+        windows
     }
 
     #[test]
@@ -412,7 +515,7 @@ mod tests {
             hwnd,
             "window:1234".to_string(),
             OverlayStyle::default(),
-            first_sender,
+            OverlayCommandSender::without_wake(first_sender),
         )
         .unwrap();
         register_window_event_hook_handles(first_id, hwnd, &[first_hook]).unwrap();
@@ -421,7 +524,7 @@ mod tests {
             hwnd,
             "window:1234".to_string(),
             OverlayStyle::default(),
-            second_sender,
+            OverlayCommandSender::without_wake(second_sender),
         )
         .unwrap();
         register_window_event_hook_handles(second_id, hwnd, &[second_hook]).unwrap();
@@ -468,7 +571,7 @@ mod tests {
             hwnd,
             "window:5678".to_string(),
             OverlayStyle::default(),
-            first_sender,
+            OverlayCommandSender::without_wake(first_sender),
         )
         .unwrap();
         register_window_event_hook_handles(first_id, hwnd, &[first_hook]).unwrap();
@@ -477,7 +580,7 @@ mod tests {
             hwnd,
             "window:5678".to_string(),
             OverlayStyle::default(),
-            second_sender,
+            OverlayCommandSender::without_wake(second_sender),
         )
         .unwrap();
         register_window_event_hook_handles(second_id, hwnd, &[second_hook]).unwrap();
@@ -519,7 +622,7 @@ mod tests {
             hwnd,
             "window:7777".to_string(),
             OverlayStyle::default(),
-            sender,
+            OverlayCommandSender::without_wake(sender),
         )
         .unwrap();
         register_window_event_hook_handles(registration_id, hwnd, &[hook]).unwrap();
@@ -564,7 +667,7 @@ mod tests {
             hwnd,
             "window:8899".to_string(),
             OverlayStyle::default(),
-            sender,
+            OverlayCommandSender::without_wake(sender),
         )
         .unwrap();
         register_window_event_hook_handles(registration_id, hwnd, &[hook]).unwrap();
@@ -598,7 +701,7 @@ mod tests {
             hwnd,
             "window:8990".to_string(),
             OverlayStyle::default(),
-            sender,
+            OverlayCommandSender::without_wake(sender),
         )
         .unwrap();
         register_window_event_hook_handles(registration_id, hwnd, &[hook]).unwrap();
@@ -656,7 +759,7 @@ mod tests {
             hwnd,
             "window:8888".to_string(),
             OverlayStyle::default(),
-            sender,
+            OverlayCommandSender::without_wake(sender),
         )
         .unwrap();
         register_window_event_hook_handles(registration_id, hwnd, &[hook]).unwrap();
@@ -806,7 +909,7 @@ mod tests {
             hwnd,
             "window:9abc".to_string(),
             OverlayStyle::default(),
-            sender,
+            OverlayCommandSender::without_wake(sender),
         )
         .unwrap();
         register_window_event_hook_handles(registration_id, hwnd, &[hook]).unwrap();

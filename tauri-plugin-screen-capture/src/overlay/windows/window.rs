@@ -25,7 +25,7 @@ use super::{
     util::{rgb_to_colorref, wide, windows_error},
 };
 
-const CLASS_NAME: &str = "TauriPluginScreenCaptureShareBorder";
+pub(crate) const CLASS_NAME: &str = "TauriPluginScreenCaptureShareBorder";
 
 #[derive(Debug)]
 pub(crate) struct OverlayWindow {
