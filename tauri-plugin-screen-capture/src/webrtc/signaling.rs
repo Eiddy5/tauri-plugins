@@ -41,7 +41,7 @@ const H264_SDP_FMTP_LINE: &str =
 
 #[cfg(not(target_os = "windows"))]
 const H264_SDP_FMTP_LINE: &str =
-    "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f";
+    "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640033";
 
 pub struct WebRtcSignalingState {
     peer_connection: Arc<RTCPeerConnection>,
@@ -202,6 +202,10 @@ impl WebRtcSignalingState {
         })
         .await
         .unwrap_or(false)
+    }
+
+    pub fn is_connected(&self) -> bool {
+        *self.connected_rx.borrow()
     }
 
     pub async fn add_ice_candidate(&self, candidate: WebRtcIceCandidate) -> Result<()> {

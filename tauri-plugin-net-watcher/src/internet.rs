@@ -277,7 +277,6 @@ async fn macos_active_probe() -> (InternetProbeResult, bool) {
         NSData, NSError, NSHTTPURLResponse, NSString, NSURLRequest, NSURLRequestCachePolicy,
         NSURLResponse, NSURLSession, NSURLSessionConfiguration,
     };
-    use tokio::sync::oneshot;
 
     const URL: &str = "http://captive.apple.com/hotspot-detect.html";
     const TIMEOUT: Duration = Duration::from_secs(5);
@@ -290,8 +289,16 @@ async fn macos_active_probe() -> (InternetProbeResult, bool) {
         error: Option<String>,
     }
 
+    unsafe fn copy_nsdata(data: &NSData) -> Vec<u8> {
+        let mut bytes = vec![0_u8; data.length()];
+        if let Some(pointer) = NonNull::new(bytes.as_mut_ptr().cast::<c_void>()) {
+            data.getBytes_length(pointer, bytes.len());
+        }
+        bytes
+    }
+
     let started = Instant::now();
-    let (sender, receiver) = oneshot::channel();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     let sender = Mutex::new(Some(sender));
 
     let Some(url) = objc2_foundation::NSURL::URLWithString(&NSString::from_str(URL)) else {
@@ -326,7 +333,10 @@ async fn macos_active_probe() -> (InternetProbeResult, bool) {
                     .and_then(NSURLResponse::URL)
                     .and_then(|value| value.absoluteString())
                     .map(|value| value.to_string());
-                let body = data.as_ref().map(copy_nsdata).unwrap_or_default();
+                let body = data
+                    .as_ref()
+                    .map(|value| copy_nsdata(value))
+                    .unwrap_or_default();
                 let error = error
                     .as_ref()
                     .map(|value| value.localizedDescription().to_string());
@@ -350,18 +360,18 @@ async fn macos_active_probe() -> (InternetProbeResult, bool) {
     drop(task);
     drop(completion);
 
-    let response = tokio::time::timeout(TIMEOUT + Duration::from_secs(1), receiver).await;
+    let response = receiver.recv_timeout(TIMEOUT + Duration::from_secs(1));
     session.invalidateAndCancel();
     let duration_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
 
     match response {
-        Ok(Ok(response)) if response.error.is_none() => classify_macos_response(
+        Ok(response) if response.error.is_none() => classify_macos_response(
             duration_ms,
             response.status,
             response.final_url,
             &response.body,
         ),
-        Ok(Ok(response)) => (
+        Ok(response) => (
             InternetProbeResult {
                 status: InternetProbeStatus::Failed,
                 duration_ms,
@@ -375,24 +385,11 @@ async fn macos_active_probe() -> (InternetProbeResult, bool) {
             },
             false,
         ),
-        Ok(Err(_)) => failed_macos_probe(
-            started,
-            "internet_probe_cancelled",
-            "Apple probe completion channel closed",
-        ),
         Err(_) => failed_macos_probe(
             started,
             "internet_timeout",
             "internet probe timed out after 5000ms",
         ),
-    }
-
-    unsafe fn copy_nsdata(data: &NSData) -> Vec<u8> {
-        let mut bytes = vec![0_u8; data.length()];
-        if let Some(pointer) = NonNull::new(bytes.as_mut_ptr().cast::<c_void>()) {
-            data.getBytes_length(pointer, bytes.len());
-        }
-        bytes
     }
 }
 

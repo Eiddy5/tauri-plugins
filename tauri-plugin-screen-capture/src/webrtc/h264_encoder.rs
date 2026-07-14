@@ -29,6 +29,8 @@ mod macos {
         context: *mut EncoderContext,
         receiver: Receiver<EncodedVideoSample>,
         frame_duration: Duration,
+        target_bitrate_bps: u32,
+        force_next_keyframe: bool,
     }
 
     struct EncoderContext {
@@ -42,6 +44,7 @@ mod macos {
         pub fn new(width: u32, height: u32, fps: u32) -> Result<Self> {
             let (sender, receiver) = mpsc::channel();
             let frame_duration = Duration::from_secs_f64(1.0 / f64::from(fps.max(1)));
+            let target_bitrate_bps = recommended_bitrate(width, height, fps) as u32;
             let context = Box::into_raw(Box::new(EncoderContext {
                 sender,
                 frame_duration,
@@ -91,10 +94,16 @@ mod macos {
                 context,
                 receiver,
                 frame_duration,
+                target_bitrate_bps,
+                force_next_keyframe: false,
             })
         }
 
-        pub fn encode_frame(&self, frame: &VideoFrame) -> Result<Option<EncodedVideoSample>> {
+        pub fn target_bitrate_bps(&self) -> u32 {
+            self.target_bitrate_bps
+        }
+
+        pub fn encode_frame(&mut self, frame: &VideoFrame) -> Result<Option<EncodedVideoSample>> {
             if frame.pixel_format != PixelFormat::Bgra {
                 return Err(Error::new(
                     CaptureErrorCode::WebRtcTrackFailed,
@@ -103,19 +112,31 @@ mod macos {
                 ));
             }
 
-            let mut data = frame.data.to_vec();
-            let pixel_buffer = unsafe {
-                CVPixelBuffer::create_with_bytes(
-                    frame.width as usize,
-                    frame.height as usize,
-                    K_CV_PIXEL_FORMAT_TYPE_32_BGRA,
-                    data.as_mut_ptr().cast(),
-                    frame.width as usize * 4,
-                )
-            }
+            let pixel_buffer = CVPixelBuffer::create(
+                frame.width as usize,
+                frame.height as usize,
+                K_CV_PIXEL_FORMAT_TYPE_32_BGRA,
+            )
             .map_err(|status| {
                 video_toolbox_error("failed to create encoder pixel buffer", status)
             })?;
+            {
+                let mut guard = pixel_buffer.lock_read_write().map_err(|status| {
+                    video_toolbox_error("failed to lock encoder pixel buffer", status)
+                })?;
+                let bytes_per_row = guard.bytes_per_row();
+                let tight_bytes_per_row = frame.width as usize * 4;
+                let destination = guard.as_slice_mut().ok_or_else(|| {
+                    video_toolbox_error("encoder pixel buffer was not writable", -1)
+                })?;
+                for (source_row, destination_row) in frame
+                    .data
+                    .chunks_exact(tight_bytes_per_row)
+                    .zip(destination.chunks_mut(bytes_per_row))
+                {
+                    destination_row[..tight_bytes_per_row].copy_from_slice(source_row);
+                }
+            }
             let timestamp = Box::into_raw(Box::new(frame.timestamp_ns));
             let pts = CMTime::new(
                 i64::try_from(frame.timestamp_ns / 1_000).unwrap_or(i64::MAX),
@@ -125,17 +146,15 @@ mod macos {
                 i64::try_from(self.frame_duration.as_micros()).unwrap_or(i64::MAX),
                 1_000_000,
             );
-            let status = unsafe {
-                VTCompressionSessionEncodeFrame(
-                    self.session,
-                    pixel_buffer.as_ptr(),
-                    pts,
-                    duration,
-                    ptr::null(),
-                    timestamp.cast(),
-                    ptr::null_mut(),
-                )
-            };
+            let force_keyframe = std::mem::take(&mut self.force_next_keyframe);
+            let status = encode_video_frame(
+                self.session,
+                pixel_buffer.as_ptr(),
+                pts,
+                duration,
+                timestamp.cast(),
+                force_keyframe,
+            )?;
             if status != 0 {
                 unsafe {
                     drop(Box::from_raw(timestamp));
@@ -146,11 +165,11 @@ mod macos {
                 ));
             }
 
-            let _ = unsafe { VTCompressionSessionCompleteFrames(self.session, CMTime::INVALID) };
             Ok(self.receiver.try_iter().last())
         }
 
         pub fn force_keyframe(&mut self) -> Result<()> {
+            self.force_next_keyframe = true;
             Ok(())
         }
     }
@@ -264,38 +283,140 @@ mod macos {
         fps: u32,
     ) -> Result<()> {
         set_bool_property(session, "RealTime", true)?;
+        set_bool_property(session, "AllowFrameReordering", false)?;
+        set_i32_property(
+            session,
+            "ExpectedFrameRate",
+            i32::try_from(fps.max(1)).unwrap_or(60),
+        )?;
         set_i32_property(
             session,
             "AverageBitRate",
             recommended_bitrate(width, height, fps),
         )?;
+        set_f64_property(session, "Quality", 1.0)?;
         set_i32_property(
             session,
             "MaxKeyFrameInterval",
-            i32::try_from(fps.max(1) * 2).unwrap_or(60),
+            i32::try_from(fps.max(1).saturating_mul(5)).unwrap_or(300),
         )?;
-        set_string_property(session, "ProfileLevel", "H264_Baseline_AutoLevel")?;
+        // Screen content benefits substantially from CABAC and the additional
+        // prediction modes available in High Profile. Baseline was originally
+        // selected for compatibility, but it produces visibly softer text at
+        // the same real-time bitrate.
+        set_string_property(session, "ProfileLevel", "H264_High_AutoLevel")?;
         Ok(())
     }
 
     fn recommended_bitrate(width: u32, height: u32, fps: u32) -> i32 {
         let pixels = u64::from(width).saturating_mul(u64::from(height));
-        let fps = u64::from(fps.max(1));
-        let bits = pixels
-            .saturating_mul(fps)
+        let target_bitrate_bps = pixels
+            .saturating_mul(u64::from(fps.max(1)))
             .saturating_mul(16)
-            .saturating_div(100);
-        i32::try_from(bits.clamp(6_000_000, 32_000_000)).unwrap_or(16_000_000)
+            .div_ceil(100);
+        i32::try_from(target_bitrate_bps.clamp(8_000_000, 48_000_000)).unwrap_or(32_000_000)
     }
 
     #[cfg(test)]
     mod tests {
-        use super::recommended_bitrate;
+        use super::{recommended_bitrate, H264Encoder};
+        use crate::{models::PixelFormat, pipeline::frame::VideoFrame};
 
         #[test]
-        fn bitrate_is_high_enough_for_2k_screen_text() {
-            assert!(recommended_bitrate(2560, 1440, 30) >= 16_000_000);
+        fn bitrate_matches_the_screen_share_transport_budget() {
+            assert_eq!(recommended_bitrate(1920, 1080, 60), 19_906_560);
+            assert_eq!(recommended_bitrate(2560, 1440, 60), 35_389_440);
+            assert_eq!(recommended_bitrate(3840, 2160, 30), 39_813_120);
         }
+
+        #[test]
+        fn force_keyframe_makes_the_next_video_toolbox_sample_an_idr() {
+            let mut encoder = H264Encoder::new(64, 64, 30).expect("create VideoToolbox encoder");
+            let frame = |timestamp_ns| VideoFrame {
+                width: 64,
+                height: 64,
+                pixel_format: PixelFormat::Bgra,
+                timestamp_ns,
+                data: vec![0x80; 64 * 64 * 4].into(),
+            };
+
+            let _ = encoder
+                .encode_frame(&frame(0))
+                .expect("encode initial frame");
+            encoder.force_keyframe().expect("request keyframe");
+            let _ = encoder
+                .encode_frame(&frame(33_333_333))
+                .expect("encode forced frame");
+            let status = unsafe {
+                super::VTCompressionSessionCompleteFrames(
+                    encoder.session,
+                    apple_cf::cm::CMTime::INVALID,
+                )
+            };
+            assert_eq!(status, 0);
+            let sample = encoder
+                .receiver
+                .try_iter()
+                .last()
+                .expect("receive forced frame");
+
+            assert!(sample.is_h264_idr());
+        }
+    }
+
+    fn encode_video_frame(
+        session: VTCompressionSessionRef,
+        image_buffer: *mut c_void,
+        pts: CMTime,
+        duration: CMTime,
+        timestamp: *mut c_void,
+        force_keyframe: bool,
+    ) -> Result<i32> {
+        if !force_keyframe {
+            return Ok(unsafe {
+                VTCompressionSessionEncodeFrame(
+                    session,
+                    image_buffer,
+                    pts,
+                    duration,
+                    ptr::null(),
+                    timestamp,
+                    ptr::null_mut(),
+                )
+            });
+        }
+
+        let keys = [unsafe { kVTEncodeFrameOptionKey_ForceKeyFrame }];
+        let values = [unsafe { kCFBooleanTrue }];
+        let properties = unsafe {
+            CFDictionaryCreate(
+                ptr::null(),
+                keys.as_ptr(),
+                values.as_ptr(),
+                1,
+                std::ptr::addr_of!(kCFTypeDictionaryKeyCallBacks).cast(),
+                std::ptr::addr_of!(kCFTypeDictionaryValueCallBacks).cast(),
+            )
+        };
+        if properties.is_null() {
+            return Err(video_toolbox_error(
+                "failed to create force-keyframe properties",
+                -1,
+            ));
+        }
+        let status = unsafe {
+            VTCompressionSessionEncodeFrame(
+                session,
+                image_buffer,
+                pts,
+                duration,
+                properties,
+                timestamp,
+                ptr::null_mut(),
+            )
+        };
+        unsafe { CFRelease(properties) };
+        Ok(status)
     }
 
     fn set_bool_property(session: VTCompressionSessionRef, key: &str, value: bool) -> Result<()> {
@@ -347,6 +468,34 @@ mod macos {
         })
     }
 
+    fn set_f64_property(session: VTCompressionSessionRef, key: &str, value: f64) -> Result<()> {
+        with_cf_string(key, |key| {
+            let number = unsafe {
+                CFNumberCreate(
+                    ptr::null(),
+                    K_CF_NUMBER_FLOAT64_TYPE,
+                    (&value as *const f64).cast(),
+                )
+            };
+            if number.is_null() {
+                return Err(video_toolbox_error(
+                    "failed to create CoreFoundation number",
+                    -1,
+                ));
+            }
+            let status = unsafe { VTSessionSetProperty(session, key, number.cast()) };
+            unsafe { CFRelease(number.cast()) };
+            if status == 0 {
+                Ok(())
+            } else {
+                Err(video_toolbox_error(
+                    "failed to set VideoToolbox floating-point property",
+                    status,
+                ))
+            }
+        })
+    }
+
     fn set_string_property(session: VTCompressionSessionRef, key: &str, value: &str) -> Result<()> {
         with_cf_string(key, |key| {
             with_cf_string(value, |value| {
@@ -388,6 +537,7 @@ mod macos {
     type VTCompressionSessionRef = *mut c_void;
     const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
     const K_CF_NUMBER_SINT32_TYPE: i32 = 3;
+    const K_CF_NUMBER_FLOAT64_TYPE: i32 = 6;
 
     #[link(name = "VideoToolbox", kind = "framework")]
     #[link(name = "CoreMedia", kind = "framework")]
@@ -454,8 +604,20 @@ mod macos {
             value_ptr: *const c_void,
         ) -> *const c_void;
 
+        fn CFDictionaryCreate(
+            allocator: *const c_void,
+            keys: *const *const c_void,
+            values: *const *const c_void,
+            count: isize,
+            key_callbacks: *const c_void,
+            value_callbacks: *const c_void,
+        ) -> *const c_void;
+
         static kCFBooleanTrue: *const c_void;
         static kCFBooleanFalse: *const c_void;
+        static kCFTypeDictionaryKeyCallBacks: u8;
+        static kCFTypeDictionaryValueCallBacks: u8;
+        static kVTEncodeFrameOptionKey_ForceKeyFrame: *const c_void;
     }
 }
 

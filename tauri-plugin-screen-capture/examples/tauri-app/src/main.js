@@ -18,14 +18,14 @@ import { shareExperienceMode } from "./lib/shareExperience.js"
 
 const captureQualityPresets = {
   "720p": { label: "720p HD", maxWidth: 1280, maxHeight: 720, fps: 60 },
-  "1080p": { label: "1080p Full HD（推荐）", maxWidth: 1920, maxHeight: 1080, fps: 60 },
-  "2k": { label: "2K QHD", maxWidth: 2560, maxHeight: 1440, fps: 60 },
+  "1080p": { label: "1080p Full HD", maxWidth: 1920, maxHeight: 1080, fps: 60 },
+  "2k": { label: "2K QHD（推荐）", maxWidth: 2560, maxHeight: 1440, fps: 60 },
   "4k": { label: "4K UHD", maxWidth: 3840, maxHeight: 2160, fps: 30 },
 }
 const storedCaptureQuality = localStorage.getItem("screenCapture.quality")
 const defaultCaptureQuality = Object.hasOwn(captureQualityPresets, storedCaptureQuality)
   ? storedCaptureQuality
-  : "1080p"
+  : "2k"
 const state = {
   sources: [],
   selected: null,

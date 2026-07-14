@@ -11,6 +11,7 @@ struct PlatformInterfaceDetails {
     interface_type: Option<InterfaceType>,
     operational_status: Option<InterfaceStatus>,
     display_name: Option<String>,
+    is_primary: bool,
     gateway: Option<String>,
     dns_servers: Vec<String>,
     mac: Option<String>,
@@ -84,7 +85,7 @@ fn build_interfaces_from_entries_with_platform_details(
                     display_name,
                     interface_type,
                     status,
-                    is_primary: false,
+                    is_primary: details.is_primary,
                     addresses: InterfaceAddresses {
                         mac: details.mac,
                         ..InterfaceAddresses::default()
@@ -137,10 +138,7 @@ fn normalize_interface_key(name: &str) -> String {
 
 #[cfg(target_os = "macos")]
 fn should_prefer_name_classification(interface_type: InterfaceType) -> bool {
-    matches!(
-        interface_type,
-        InterfaceType::Wifi | InterfaceType::Vpn | InterfaceType::Loopback
-    )
+    matches!(interface_type, InterfaceType::Vpn | InterfaceType::Loopback)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -153,6 +151,8 @@ struct MacosPrimaryServiceInterface {
     bsd_name: String,
     hardware: Option<String>,
     interface_type: Option<String>,
+    gateway: Option<String>,
+    dns_servers: Vec<String>,
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -169,6 +169,16 @@ fn apply_macos_primary_service_interface_type(
             .or_default()
             .interface_type = Some(interface_type);
     }
+
+    interface_details
+        .entry(normalize_interface_key(&interface.bsd_name))
+        .or_default();
+    let details = interface_details
+        .get_mut(&normalize_interface_key(&interface.bsd_name))
+        .expect("primary interface details were just inserted");
+    details.is_primary = true;
+    details.gateway = interface.gateway;
+    details.dns_servers = interface.dns_servers;
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -195,6 +205,7 @@ fn read_platform_interface_details() -> BTreeMap<String, PlatformInterfaceDetail
         .into_iter()
         .filter_map(|interface| {
             let name = interface.bsd_name()?.to_string();
+            let display_name = interface.display_name().map(|value| value.to_string());
             let interface_type = match interface.interface_type()? {
                 SCNetworkInterfaceType::IEEE80211 => InterfaceType::Wifi,
                 SCNetworkInterfaceType::Ethernet
@@ -211,6 +222,7 @@ fn read_platform_interface_details() -> BTreeMap<String, PlatformInterfaceDetail
                 normalize_interface_key(&name),
                 PlatformInterfaceDetails {
                     interface_type: Some(interface_type),
+                    display_name,
                     ..Default::default()
                 },
             ))
@@ -228,7 +240,8 @@ fn read_platform_interface_details() -> BTreeMap<String, PlatformInterfaceDetail
 fn read_macos_primary_service_interface() -> Option<MacosPrimaryServiceInterface> {
     use system_configuration::{
         core_foundation::{
-            base::{TCFType, ToVoid},
+            array::CFArray,
+            base::{CFType, TCFType, ToVoid},
             dictionary::CFDictionary,
             propertylist::CFPropertyList,
             string::{CFString, CFStringRef},
@@ -236,7 +249,8 @@ fn read_macos_primary_service_interface() -> Option<MacosPrimaryServiceInterface
         dynamic_store::SCDynamicStoreBuilder,
         sys::schema_definitions::{
             kSCDynamicStorePropNetPrimaryInterface, kSCDynamicStorePropNetPrimaryService,
-            kSCPropNetInterfaceDeviceName, kSCPropNetInterfaceHardware, kSCPropNetInterfaceType,
+            kSCPropNetDNSServerAddresses, kSCPropNetIPv4Router, kSCPropNetInterfaceDeviceName,
+            kSCPropNetInterfaceHardware, kSCPropNetInterfaceType,
         },
     };
 
@@ -244,6 +258,20 @@ fn read_macos_primary_service_interface() -> Option<MacosPrimaryServiceInterface
         dictionary
             .find(key.to_void())
             .map(|ptr| unsafe { CFString::wrap_under_get_rule(*ptr as CFStringRef).to_string() })
+    }
+
+    fn string_array_value(dictionary: &CFDictionary, key: CFStringRef) -> Option<Vec<String>> {
+        let values = dictionary
+            .find(key.to_void())
+            .map(|ptr| unsafe { CFType::wrap_under_get_rule(*ptr) })
+            .and_then(CFType::downcast_into::<CFArray>)?;
+        let mut result = Vec::with_capacity(values.len() as usize);
+        for value in &values {
+            let value =
+                unsafe { CFType::wrap_under_get_rule(*value) }.downcast_into::<CFString>()?;
+            result.push(value.to_string());
+        }
+        Some(result)
     }
 
     let store = SCDynamicStoreBuilder::new("tauri-plugin-net-watcher").build()?;
@@ -261,12 +289,29 @@ fn read_macos_primary_service_interface() -> Option<MacosPrimaryServiceInterface
     let service_interface = store
         .get(service_interface_key.as_str())
         .and_then(CFPropertyList::downcast_into::<CFDictionary>)?;
+    let service_ipv4_key = format!("State:/Network/Service/{primary_service}/IPv4");
+    let service_dns_key = format!("State:/Network/Service/{primary_service}/DNS");
+    let service_ipv4 = store
+        .get(service_ipv4_key.as_str())
+        .and_then(CFPropertyList::downcast_into::<CFDictionary>);
+    let service_dns = store
+        .get(service_dns_key.as_str())
+        .or_else(|| store.get("State:/Network/Global/DNS"))
+        .and_then(CFPropertyList::downcast_into::<CFDictionary>);
 
     Some(MacosPrimaryServiceInterface {
         bsd_name: string_value(&service_interface, unsafe { kSCPropNetInterfaceDeviceName })
             .unwrap_or(primary_interface),
         hardware: string_value(&service_interface, unsafe { kSCPropNetInterfaceHardware }),
         interface_type: string_value(&service_interface, unsafe { kSCPropNetInterfaceType }),
+        gateway: service_ipv4
+            .as_ref()
+            .and_then(|ipv4| string_value(ipv4, unsafe { kSCPropNetIPv4Router }))
+            .or_else(|| string_value(&global_ipv4, unsafe { kSCPropNetIPv4Router })),
+        dns_servers: service_dns
+            .as_ref()
+            .and_then(|dns| string_array_value(dns, unsafe { kSCPropNetDNSServerAddresses }))
+            .unwrap_or_default(),
     })
 }
 
@@ -289,17 +334,16 @@ fn read_windows_current_profile_interface_type(
     let adapter = profile.NetworkAdapter().ok()?;
     let adapter_id = format!("{:?}", adapter.NetworkAdapterId().ok()?);
 
-    if profile.IsWlanConnectionProfile().ok()? {
-        return Some(platform_interface_type_overrides_from_type(
-            Some(&adapter_id),
-            InterfaceType::Wifi,
-        ));
-    }
+    let mut details = if profile.IsWlanConnectionProfile().ok()? {
+        platform_interface_type_overrides_from_type(Some(&adapter_id), InterfaceType::Wifi)
+    } else {
+        platform_interface_type_overrides(Some(&adapter_id), adapter.IanaInterfaceType().ok())
+    };
 
-    Some(platform_interface_type_overrides(
-        Some(&adapter_id),
-        adapter.IanaInterfaceType().ok(),
-    ))
+    for detail in details.values_mut() {
+        detail.is_primary = true;
+    }
+    Some(details)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -355,6 +399,10 @@ impl PlatformInterfaceDetails {
 
         if other.display_name.is_some() {
             self.display_name = other.display_name;
+        }
+
+        if other.is_primary {
+            self.is_primary = true;
         }
 
         if other.gateway.is_some() {
@@ -585,8 +633,6 @@ pub fn classify_interface(name: &str) -> InterfaceType {
         || normalized.contains("wlan")
         || normalized.contains("wireless")
         || normalized.contains("\u{65e0}\u{7ebf}")
-        || normalized == "en0"
-        || normalized == "en1"
     {
         InterfaceType::Wifi
     } else if normalized.starts_with("utun")
@@ -648,6 +694,17 @@ fn sanitize_id(name: &str) -> String {
 }
 
 fn mark_primary(interfaces: &mut [NetworkInterface]) {
+    if interfaces
+        .iter()
+        .any(|interface| interface.is_primary && can_be_primary(interface))
+    {
+        return;
+    }
+
+    for interface in interfaces.iter_mut() {
+        interface.is_primary = false;
+    }
+
     if let Some(index) = interfaces
         .iter()
         .enumerate()
@@ -754,7 +811,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_en1_with_ip_is_wifi_like_logger_enrichment() {
+    fn macos_en_name_does_not_override_platform_ethernet_type() {
         let mut interface_types = BTreeMap::new();
         interface_types.insert(
             "en1".to_string(),
@@ -772,7 +829,7 @@ mod tests {
             &interface_types,
         );
 
-        assert_eq!(interfaces[0].interface_type, InterfaceType::Wifi);
+        assert_eq!(interfaces[0].interface_type, InterfaceType::Ethernet);
     }
 
     #[test]
@@ -896,6 +953,8 @@ mod tests {
                 bsd_name: "en5".to_string(),
                 hardware: Some("AirPort".to_string()),
                 interface_type: Some("IEEE80211".to_string()),
+                gateway: Some("192.168.1.1".to_string()),
+                dns_servers: vec!["1.1.1.1".to_string()],
             },
         );
 
@@ -908,6 +967,9 @@ mod tests {
         );
 
         assert_eq!(interfaces[0].interface_type, InterfaceType::Wifi);
+        assert!(interfaces[0].is_primary);
+        assert_eq!(interfaces[0].gateway.as_deref(), Some("192.168.1.1"));
+        assert_eq!(interfaces[0].dns_servers, vec!["1.1.1.1"]);
     }
 
     #[test]
@@ -940,7 +1002,7 @@ mod tests {
         assert_eq!(classify_interface("Wi-Fi"), InterfaceType::Wifi);
         assert_eq!(classify_interface("WLAN"), InterfaceType::Wifi);
         assert_eq!(classify_interface(&wireless_name()), InterfaceType::Wifi);
-        assert_eq!(classify_interface("en0"), InterfaceType::Wifi);
+        assert_eq!(classify_interface("en0"), InterfaceType::Ethernet);
         assert_eq!(classify_interface("Ethernet"), InterfaceType::Ethernet);
         assert_eq!(
             classify_interface(&ethernet_name()),

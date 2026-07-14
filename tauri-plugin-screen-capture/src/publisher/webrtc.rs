@@ -34,6 +34,7 @@ struct WebRtcPublisherState {
     lifecycle: WebRtcPublisherLifecycle,
     stats: CaptureStats,
     last_keyframe_request_seen: u64,
+    sent_connected_keyframe: bool,
     published_at: VecDeque<Instant>,
 }
 
@@ -97,6 +98,7 @@ impl CapturePublisher for WebRtcPublisher {
             ..CaptureStats::default()
         };
         state.last_keyframe_request_seen = self.signaling.pending_keyframe_requests();
+        state.sent_connected_keyframe = false;
         state.published_at.clear();
         drop(state);
 
@@ -116,6 +118,7 @@ impl CapturePublisher for WebRtcPublisher {
         }
 
         self.sync_keyframe_request().await?;
+        self.ensure_connected_keyframe().await?;
 
         #[cfg(target_os = "windows")]
         {
@@ -230,6 +233,13 @@ impl CapturePublisher for WebRtcPublisher {
     }
 
     async fn stats(&self) -> Result<CaptureStats> {
+        #[cfg(target_os = "macos")]
+        let macos_encoder_bitrate_kbps = self
+            .encoder
+            .lock()
+            .await
+            .as_ref()
+            .map(|encoder| encoder.target_bitrate_bps() / 1_000);
         let mut state = self.state.lock().await;
         refresh_published_fps(&mut state, Instant::now());
         #[cfg(target_os = "windows")]
@@ -243,6 +253,12 @@ impl CapturePublisher for WebRtcPublisher {
             state.stats.fps = worker.fps;
             state.stats.publish_fps = worker.publish_fps;
             state.stats.encoder_backend = worker.encoder_backend;
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(bitrate_kbps) = macos_encoder_bitrate_kbps {
+            state.stats.bitrate_kbps = bitrate_kbps;
+            state.stats.encoder_backend = Some("VideoToolbox".to_string());
+            state.stats.publish_fps = state.stats.fps;
         }
         Ok(state.stats.clone())
     }
@@ -266,6 +282,25 @@ fn refresh_published_fps(state: &mut WebRtcPublisherState, now: Instant) {
 }
 
 impl WebRtcPublisher {
+    async fn ensure_connected_keyframe(&self) -> Result<()> {
+        if !self.signaling.is_connected() {
+            return Ok(());
+        }
+        let should_force = {
+            let mut state = self.state.lock().await;
+            if state.sent_connected_keyframe {
+                false
+            } else {
+                state.sent_connected_keyframe = true;
+                true
+            }
+        };
+        if should_force {
+            self.force_encoder_keyframe().await?;
+        }
+        Ok(())
+    }
+
     async fn sync_keyframe_request(&self) -> Result<()> {
         let requested = self.signaling.pending_keyframe_requests();
         let mut state = self.state.lock().await;

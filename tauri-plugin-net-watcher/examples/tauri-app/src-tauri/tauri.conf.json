@@ -3,8 +3,8 @@
   "version": "0.1.0",
   "identifier": "com.eiddy.net-watcher-example",
   "build": {
-    "beforeDevCommand": "corepack pnpm dev",
-    "beforeBuildCommand": "corepack pnpm build",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist"
   },
