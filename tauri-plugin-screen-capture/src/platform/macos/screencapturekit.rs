@@ -30,6 +30,7 @@ mod real {
     use super::*;
     use crate::models::{CaptureSourceKind, PixelFormat};
     use crate::pipeline::frame::VideoFrame;
+    use crate::platform::macos::window_filter::macos_window_filtered_reason;
     use crate::sources::{filter_sources, thumbnails::encode_png_base64, SourceFilterOptions};
 
     const THUMBNAIL_MAX_WIDTH: u32 = 320;
@@ -101,6 +102,11 @@ mod real {
                 let app_name = app.map(|app| app.application_name.clone());
                 let pid = app.and_then(|app| u32::try_from(app.process_id).ok());
                 let title = window.title.clone();
+                let has_title = title
+                    .as_deref()
+                    .is_some_and(|title| !title.trim().is_empty());
+                let filtered_reason =
+                    macos_window_filtered_reason(window.is_on_screen, app.is_some(), has_title);
                 let name = title
                     .clone()
                     .filter(|title| !title.is_empty())
@@ -119,7 +125,7 @@ mod real {
                     scale_factor: 1.0,
                     is_primary: false,
                     thumbnail_base64: None,
-                    filtered_reason: None,
+                    filtered_reason: filtered_reason.map(str::to_string),
                 }
             }));
         }

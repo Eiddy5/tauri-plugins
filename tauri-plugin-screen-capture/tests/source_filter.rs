@@ -113,6 +113,34 @@ fn debug_mode_keeps_filtered_sources_with_reasons() {
 }
 
 #[test]
+fn honors_platform_specific_filtered_reason() {
+    let mut ownerless = window("window:ownerless", "", "", 280, 529, 0);
+    ownerless.filtered_reason = Some("missingOwner".to_string());
+
+    let hidden = filter_sources(
+        vec![ownerless.clone()],
+        SourceFilterOptions {
+            current_pid: None,
+            include_current_app: false,
+            include_system_ui: false,
+            debug_raw_sources: false,
+        },
+    );
+    assert!(hidden.is_empty());
+
+    let debug = filter_sources(
+        vec![ownerless],
+        SourceFilterOptions {
+            current_pid: None,
+            include_current_app: false,
+            include_system_ui: false,
+            debug_raw_sources: true,
+        },
+    );
+    assert_eq!(debug[0].filtered_reason.as_deref(), Some("missingOwner"));
+}
+
+#[test]
 fn include_system_ui_keeps_known_system_ui_sources() {
     let sources = vec![window("window:dock", "Dock", "Dock", 1728, 80, 10)];
 
