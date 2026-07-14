@@ -1,3 +1,5 @@
+use std::panic::AssertUnwindSafe;
+
 use tauri::{AppHandle, Runtime};
 use tokio::sync::oneshot;
 
@@ -37,7 +39,7 @@ pub async fn request<T: Send + 'static>(
 ) -> Result<T> {
     let (sender, receiver) = oneshot::channel();
     dispatcher.dispatch(Box::new(move || {
-        let _ = sender.send(operation());
+        let _ = sender.send(run_catching_objc_exception(operation));
     }))?;
     receiver.await.map_err(|_| {
         Error::new(
@@ -48,9 +50,26 @@ pub async fn request<T: Send + 'static>(
     })?
 }
 
+fn run_catching_objc_exception<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
+    match objc2::exception::catch(AssertUnwindSafe(operation)) {
+        Ok(result) => result,
+        Err(exception) => {
+            let detail = exception
+                .map(|exception| format!("{exception:?}"))
+                .unwrap_or_else(|| "nil Objective-C exception".to_string());
+            Err(Error::new(
+                CaptureErrorCode::Internal,
+                format!("macOS 浮层原生调用失败: {detail}"),
+                true,
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use objc2_foundation::{NSException, NSGenericException, NSString};
 
     struct InlineDispatcher;
 
@@ -68,5 +87,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn objective_c_exception_becomes_overlay_error() {
+        let result = run_catching_objc_exception(|| -> crate::Result<()> {
+            let reason = NSString::from_str("unsupported NSScreen selector");
+            let exception = NSException::new(unsafe { NSGenericException }, Some(&reason), None)
+                .expect("create NSException");
+            exception.raise();
+        });
+
+        let error = result.expect_err("Objective-C exception must become an error");
+        assert!(error.to_string().contains("unsupported NSScreen selector"));
     }
 }
