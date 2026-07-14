@@ -439,7 +439,7 @@ mod real {
                     .into_iter()
                     .find(|display| display.display_id() == display_id)
                     .ok_or_else(|| source_not_found(&options.source_id))?;
-                Ok(display_content_filter(content, &display))
+                display_content_filter(content, &display)
             }
             CaptureSourceKind::Window => {
                 let window_id = parse_source_id(&options.source_id, "window")?;
@@ -465,7 +465,7 @@ mod real {
                     .into_iter()
                     .find(|display| display.display_id() == display_id)
                     .ok_or_else(|| source_not_found(&source.id))?;
-                Ok(display_content_filter(content, &display))
+                display_content_filter(content, &display)
             }
             CaptureSourceKind::Window => {
                 let window_id = parse_source_id(&source.id, "window")?;
@@ -482,23 +482,25 @@ mod real {
     fn display_content_filter(
         content: &SCShareableContent,
         display: &SCDisplay,
-    ) -> SCContentFilter {
-        let Ok(current_pid) = i32::try_from(std::process::id()) else {
-            return SCContentFilter::create()
-                .with_display(display)
-                .with_excluding_windows(&[])
-                .build();
-        };
+    ) -> Result<SCContentFilter> {
+        let current_pid = i32::try_from(std::process::id()).map_err(|_| {
+            Error::new(
+                CaptureErrorCode::CaptureStartFailed,
+                "当前进程 ID 超出 ScreenCaptureKit 支持范围",
+                false,
+            )
+        })?;
         let applications = content.applications();
-        let Some(current_app) = applications
+        let current_app = applications
             .iter()
             .find(|application| application.process_id() == current_pid)
-        else {
-            return SCContentFilter::create()
-                .with_display(display)
-                .with_excluding_windows(&[])
-                .build();
-        };
+            .ok_or_else(|| {
+                Error::new(
+                    CaptureErrorCode::CaptureStartFailed,
+                    "无法构造安全的浮层排除策略：ScreenCaptureKit 未返回当前应用",
+                    true,
+                )
+            })?;
         let windows = content.windows();
         let filter_windows = windows
             .iter()
@@ -516,10 +518,10 @@ mod real {
             .filter(|window| exception_ids.contains(&window.window_id()))
             .collect::<Vec<&SCWindow>>();
 
-        SCContentFilter::create()
+        Ok(SCContentFilter::create()
             .with_display(display)
             .with_excluding_applications(&[current_app], &exceptions)
-            .build()
+            .build())
     }
 
     #[derive(Debug, Clone, Copy)]
