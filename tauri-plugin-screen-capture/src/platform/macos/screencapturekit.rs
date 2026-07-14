@@ -21,6 +21,7 @@ mod real {
             SCStreamConfiguration, SCStreamOutputType,
         },
         screenshot_manager::SCScreenshotManager,
+        shareable_content::{SCDisplay, SCWindow},
         stream::delegate_trait::StreamCallbacks,
     };
     use tokio::{runtime::Handle, sync::Notify, task::JoinHandle};
@@ -32,6 +33,26 @@ mod real {
 
     const THUMBNAIL_MAX_WIDTH: u32 = 320;
     const THUMBNAIL_MAX_HEIGHT: u32 = 180;
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct FilterWindow {
+        id: u32,
+        pid: i32,
+        title: String,
+    }
+
+    fn current_app_window_exceptions(current_pid: i32, windows: &[FilterWindow]) -> Vec<u32> {
+        windows
+            .iter()
+            .filter(|window| {
+                window.pid == current_pid
+                    && !window
+                        .title
+                        .starts_with(crate::overlay::macos::OVERLAY_WINDOW_TITLE_PREFIX)
+            })
+            .map(|window| window.id)
+            .collect()
+    }
 
     pub async fn list_sources(options: ListSourcesOptions) -> Result<Vec<CaptureSource>> {
         let content = shareable_content()?;
@@ -418,10 +439,7 @@ mod real {
                     .into_iter()
                     .find(|display| display.display_id() == display_id)
                     .ok_or_else(|| source_not_found(&options.source_id))?;
-                Ok(SCContentFilter::create()
-                    .with_display(&display)
-                    .with_excluding_windows(&[])
-                    .build())
+                Ok(display_content_filter(content, &display))
             }
             CaptureSourceKind::Window => {
                 let window_id = parse_source_id(&options.source_id, "window")?;
@@ -447,10 +465,7 @@ mod real {
                     .into_iter()
                     .find(|display| display.display_id() == display_id)
                     .ok_or_else(|| source_not_found(&source.id))?;
-                Ok(SCContentFilter::create()
-                    .with_display(&display)
-                    .with_excluding_windows(&[])
-                    .build())
+                Ok(display_content_filter(content, &display))
             }
             CaptureSourceKind::Window => {
                 let window_id = parse_source_id(&source.id, "window")?;
@@ -462,6 +477,49 @@ mod real {
                 Ok(SCContentFilter::create().with_window(&window).build())
             }
         }
+    }
+
+    fn display_content_filter(
+        content: &SCShareableContent,
+        display: &SCDisplay,
+    ) -> SCContentFilter {
+        let Ok(current_pid) = i32::try_from(std::process::id()) else {
+            return SCContentFilter::create()
+                .with_display(display)
+                .with_excluding_windows(&[])
+                .build();
+        };
+        let applications = content.applications();
+        let Some(current_app) = applications
+            .iter()
+            .find(|application| application.process_id() == current_pid)
+        else {
+            return SCContentFilter::create()
+                .with_display(display)
+                .with_excluding_windows(&[])
+                .build();
+        };
+        let windows = content.windows();
+        let filter_windows = windows
+            .iter()
+            .filter_map(|window| {
+                Some(FilterWindow {
+                    id: window.window_id(),
+                    pid: window.owning_application()?.process_id(),
+                    title: window.title().unwrap_or_default(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let exception_ids = current_app_window_exceptions(current_pid, &filter_windows);
+        let exceptions = windows
+            .iter()
+            .filter(|window| exception_ids.contains(&window.window_id()))
+            .collect::<Vec<&SCWindow>>();
+
+        SCContentFilter::create()
+            .with_display(display)
+            .with_excluding_applications(&[current_app], &exceptions)
+            .build()
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -586,6 +644,34 @@ mod real {
 
     fn positive_usize_u32(value: usize) -> u32 {
         u32::try_from(value).unwrap_or(u32::MAX)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn keeps_current_process_non_overlay_windows_as_exceptions() {
+            let windows = vec![
+                FilterWindow {
+                    id: 1,
+                    pid: 123,
+                    title: "TAURI_SCREEN_CAPTURE_OVERLAY:7:tl".into(),
+                },
+                FilterWindow {
+                    id: 2,
+                    pid: 123,
+                    title: "设置".into(),
+                },
+                FilterWindow {
+                    id: 3,
+                    pid: 456,
+                    title: "文档".into(),
+                },
+            ];
+
+            assert_eq!(current_app_window_exceptions(123, &windows), vec![2]);
+        }
     }
 }
 
