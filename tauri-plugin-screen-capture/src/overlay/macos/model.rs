@@ -123,3 +123,30 @@ pub const fn needs_native_update(
 ) -> bool {
     !panels_visible || bounds_changed || !relative_order_valid
 }
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct OrderVerificationState {
+    generation: u64,
+    pending_generation: Option<u64>,
+}
+
+impl OrderVerificationState {
+    pub fn request(&mut self) -> bool {
+        self.generation = self.generation.wrapping_add(1);
+        let should_schedule = self.pending_generation.is_none();
+        self.pending_generation = Some(self.generation);
+        should_schedule
+    }
+
+    pub const fn pending_generation(&self) -> Option<u64> {
+        self.pending_generation
+    }
+
+    pub fn take_pending(&mut self) -> Option<u64> {
+        self.pending_generation.take()
+    }
+
+    pub fn cancel(&mut self) {
+        self.pending_generation = None;
+    }
+}
