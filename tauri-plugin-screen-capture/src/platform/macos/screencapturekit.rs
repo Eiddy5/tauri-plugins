@@ -105,8 +105,7 @@ mod real {
                 let has_title = title
                     .as_deref()
                     .is_some_and(|title| !title.trim().is_empty());
-                let filtered_reason =
-                    macos_window_filtered_reason(window.is_on_screen, app.is_some(), has_title);
+                let filtered_reason = macos_window_filtered_reason(window.is_on_screen, has_title);
                 let name = title
                     .clone()
                     .filter(|title| !title.is_empty())
