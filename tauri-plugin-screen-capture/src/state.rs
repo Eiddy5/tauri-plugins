@@ -96,6 +96,17 @@ impl ScreenCaptureState {
         )
     }
 
+    pub(crate) fn with_overlay_factory_and_publisher_factory(
+        overlay_factory: Arc<dyn ShareOverlayFactory>,
+        publisher_factory: Option<Arc<dyn CapturePublisherFactory>>,
+    ) -> Self {
+        Self::with_backend_overlay_and_publisher_factory(
+            default_backend(),
+            overlay_factory,
+            publisher_factory.unwrap_or_else(|| Arc::new(DefaultPublisherFactory)),
+        )
+    }
+
     fn with_backend_overlay_and_publisher_factory(
         backend: Arc<dyn CaptureBackend>,
         overlay_factory: Arc<dyn ShareOverlayFactory>,

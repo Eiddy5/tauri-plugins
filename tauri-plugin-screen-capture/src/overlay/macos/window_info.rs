@@ -1,0 +1,109 @@
+use objc2_core_foundation::{
+    CFBoolean, CFDictionary, CFNumber, CFString, CFType, CGRect, ConcreteType,
+};
+use objc2_core_graphics::{
+    kCGNullWindowID, kCGWindowBounds, kCGWindowIsOnscreen, kCGWindowLayer, kCGWindowNumber,
+    CGDisplayBounds, CGMainDisplayID, CGRectMakeWithDictionaryRepresentation,
+    CGWindowListCopyWindowInfo, CGWindowListOption,
+};
+
+use crate::{models::CaptureErrorCode, Error, Result};
+
+use super::{MacRect, OrderedWindow, WindowSnapshot};
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct WindowGeometry {
+    pub snapshot: WindowSnapshot,
+    pub frame: MacRect,
+}
+
+pub(crate) fn display_frame(display_id: u32) -> MacRect {
+    appkit_rect(CGDisplayBounds(display_id))
+}
+
+pub(crate) fn window_geometry(window_id: u32) -> Result<Option<WindowGeometry>> {
+    let rows = window_rows(CGWindowListOption::OptionAll)?;
+    Ok(rows.into_iter().enumerate().find_map(|(order, row)| {
+        let id = number(&row, unsafe { kCGWindowNumber })?.as_i64()? as u32;
+        if id != window_id {
+            return None;
+        }
+        let layer = number(&row, unsafe { kCGWindowLayer })?.as_i64()? as i32;
+        let on_screen = boolean(&row, unsafe { kCGWindowIsOnscreen })
+            .map(CFBoolean::as_bool)
+            .unwrap_or(false);
+        let frame = bounds(&row)?;
+        Some(WindowGeometry {
+            snapshot: WindowSnapshot {
+                id,
+                layer,
+                order,
+                on_screen,
+                minimized: !on_screen,
+            },
+            frame: appkit_rect(frame),
+        })
+    }))
+}
+
+pub(crate) fn ordered_windows(target_id: u32, panel_ids: &[u32]) -> Result<Vec<OrderedWindow>> {
+    let rows = window_rows(CGWindowListOption::OptionOnScreenOnly)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let id = number(&row, unsafe { kCGWindowNumber })?.as_i64()? as u32;
+            Some(if id == target_id {
+                OrderedWindow::target(id)
+            } else if panel_ids.contains(&id) {
+                OrderedWindow::panel(id)
+            } else {
+                OrderedWindow::other(id)
+            })
+        })
+        .collect())
+}
+
+fn window_rows(
+    option: CGWindowListOption,
+) -> Result<Vec<objc2_core_foundation::CFRetained<CFDictionary<CFString, CFType>>>> {
+    let rows = CGWindowListCopyWindowInfo(option, kCGNullWindowID)
+        .ok_or_else(|| Error::new(CaptureErrorCode::Internal, "无法读取 macOS 窗口层级", true))?;
+    // SAFETY: CGWindowListCopyWindowInfo documents every array element as a CFDictionary
+    // whose keys are CFString and whose values are Core Foundation objects.
+    let rows = unsafe { rows.cast_unchecked::<CFDictionary<CFString, CFType>>() };
+    Ok(rows.iter().collect())
+}
+
+fn value<'a, T: ConcreteType>(
+    row: &'a CFDictionary<CFString, CFType>,
+    key: &CFString,
+) -> Option<&'a T> {
+    // SAFETY: The dictionary is immutable for the duration of this borrow.
+    unsafe { row.get_unchecked(key) }?.downcast_ref::<T>()
+}
+
+fn number<'a>(row: &'a CFDictionary<CFString, CFType>, key: &CFString) -> Option<&'a CFNumber> {
+    value(row, key)
+}
+
+fn boolean<'a>(row: &'a CFDictionary<CFString, CFType>, key: &CFString) -> Option<&'a CFBoolean> {
+    value(row, key)
+}
+
+fn bounds(row: &CFDictionary<CFString, CFType>) -> Option<CGRect> {
+    let dictionary = value::<CFDictionary>(row, unsafe { kCGWindowBounds })?;
+    let mut rect = CGRect::ZERO;
+    // SAFETY: CoreGraphics produced the bounds dictionary and rect is a valid out pointer.
+    let valid = unsafe { CGRectMakeWithDictionaryRepresentation(Some(dictionary), &mut rect) };
+    valid.then_some(rect)
+}
+
+fn appkit_rect(rect: CGRect) -> MacRect {
+    let main = CGDisplayBounds(CGMainDisplayID());
+    MacRect {
+        x: rect.origin.x,
+        y: main.size.height - rect.origin.y - rect.size.height,
+        width: rect.size.width,
+        height: rect.size.height,
+    }
+}

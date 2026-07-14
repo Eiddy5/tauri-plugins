@@ -91,11 +91,16 @@ impl Builder {
                 #[cfg(desktop)]
                 let screen_capture = desktop::init(app, api)?;
                 app.manage(screen_capture);
-                let state = if let Some(publisher_factory) = publisher_factory.clone() {
-                    ScreenCaptureState::with_publisher_factory(publisher_factory)
-                } else {
-                    ScreenCaptureState::default()
-                };
+                #[cfg(target_os = "macos")]
+                let overlay_factory: Arc<dyn overlay::ShareOverlayFactory> =
+                    Arc::new(overlay::macos::MacOsShareOverlayFactory::new(app.clone()));
+                #[cfg(not(target_os = "macos"))]
+                let overlay_factory: Arc<dyn overlay::ShareOverlayFactory> =
+                    Arc::new(overlay::DefaultShareOverlayFactory);
+                let state = ScreenCaptureState::with_overlay_factory_and_publisher_factory(
+                    overlay_factory,
+                    publisher_factory.clone(),
+                );
                 app.manage(state);
                 Ok(())
             })
