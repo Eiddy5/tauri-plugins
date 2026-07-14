@@ -26,8 +26,8 @@ use super::{ShareOverlay, ShareOverlayFactory};
 
 pub use events::{event_action, OverlayEvent, RefreshAction};
 pub use model::{
-    decide_window_overlay, needs_native_update, verify_relative_order, OrderVerificationState,
-    OrderedWindow, OverlayDecision, WindowSnapshot,
+    decide_window_overlay, needs_native_update, verify_panel_placements, verify_relative_order,
+    visible_corner_panels, OrderVerificationState, OrderedWindow, OverlayDecision, WindowSnapshot,
 };
 pub use panel::{corner_panel_frames, MacRect};
 

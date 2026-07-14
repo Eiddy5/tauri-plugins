@@ -2,8 +2,9 @@
 
 use tauri_plugin_screen_capture::overlay::macos::{
     corner_panel_frames, decide_window_overlay, event_action, needs_native_update,
-    verify_relative_order, MacRect, OrderVerificationState, OrderedWindow, OverlayDecision,
-    OverlayEvent, RefreshAction, WindowSnapshot,
+    verify_panel_placements, verify_relative_order, visible_corner_panels, MacRect,
+    OrderVerificationState, OrderedWindow, OverlayDecision, OverlayEvent, RefreshAction,
+    WindowSnapshot,
 };
 
 fn window(id: u32, layer: i32, order: usize, on_screen: bool) -> WindowSnapshot {
@@ -14,6 +15,33 @@ fn window(id: u32, layer: i32, order: usize, on_screen: bool) -> WindowSnapshot 
         on_screen,
         minimized: false,
     }
+}
+
+fn rect(x: f64, y: f64, width: f64, height: f64) -> MacRect {
+    MacRect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+fn detailed_target(id: u32, layer: i32, owner_pid: u32, frame: MacRect) -> OrderedWindow {
+    OrderedWindow::target_at_layer(id, layer)
+        .with_owner_pid(owner_pid)
+        .with_frame(frame)
+}
+
+fn detailed_panel(id: u32, layer: i32, owner_pid: u32, frame: MacRect) -> OrderedWindow {
+    OrderedWindow::panel_at_layer(id, layer)
+        .with_owner_pid(owner_pid)
+        .with_frame(frame)
+}
+
+fn detailed_other(id: u32, layer: i32, owner_pid: u32, frame: MacRect) -> OrderedWindow {
+    OrderedWindow::other_at_layer(id, layer)
+        .with_owner_pid(owner_pid)
+        .with_frame(frame)
 }
 
 #[test]
@@ -148,6 +176,65 @@ fn verification_rejects_panel_on_a_different_window_server_layer() {
     ];
 
     assert!(!verify_relative_order(&windows, 42, &[11, 12, 13, 14]));
+}
+
+#[test]
+fn non_overlapping_same_owner_siblings_do_not_invalidate_panels() {
+    let corners = corner_panel_frames(rect(0.0, 0.0, 2560.0, 1440.0), 32.0);
+    let windows = vec![
+        detailed_panel(11, 0, 9000, corners[0]),
+        detailed_panel(12, 0, 9000, corners[1]),
+        detailed_panel(13, 0, 9000, corners[2]),
+        detailed_panel(14, 0, 9000, corners[3]),
+        detailed_other(16818, 0, 36957, rect(48.0, 2.0, 2464.0, 1386.0)),
+        detailed_other(18571, 0, 36957, rect(49.0, 458.0, 11.0, 64.0)),
+        detailed_target(16303, 0, 36957, rect(0.0, 0.0, 2560.0, 1440.0)),
+    ];
+    let panels = [
+        (11, corners[0]),
+        (12, corners[1]),
+        (13, corners[2]),
+        (14, corners[3]),
+    ];
+
+    assert_eq!(visible_corner_panels(&windows, 16303, &corners), [true; 4]);
+    assert!(verify_panel_placements(&windows, 16303, &panels));
+}
+
+#[test]
+fn same_owner_sibling_hides_only_the_overlapped_corner() {
+    let corners = corner_panel_frames(rect(0.0, 0.0, 100.0, 100.0), 32.0);
+    let windows = vec![
+        detailed_other(7, 0, 42, rect(0.0, 80.0, 10.0, 10.0)),
+        detailed_target(8, 0, 42, rect(0.0, 0.0, 100.0, 100.0)),
+    ];
+
+    assert_eq!(
+        visible_corner_panels(&windows, 8, &corners),
+        [false, true, true, true]
+    );
+}
+
+#[test]
+fn different_owner_window_does_not_change_sibling_visibility() {
+    let corners = corner_panel_frames(rect(0.0, 0.0, 100.0, 100.0), 32.0);
+    let windows = vec![
+        detailed_other(7, 0, 99, rect(0.0, 80.0, 10.0, 10.0)),
+        detailed_target(8, 0, 42, rect(0.0, 0.0, 100.0, 100.0)),
+    ];
+
+    assert_eq!(visible_corner_panels(&windows, 8, &corners), [true; 4]);
+}
+
+#[test]
+fn touching_sibling_bounds_do_not_occlude_a_corner() {
+    let corners = corner_panel_frames(rect(0.0, 0.0, 100.0, 100.0), 32.0);
+    let windows = vec![
+        detailed_other(7, 0, 42, rect(32.0, 80.0, 10.0, 10.0)),
+        detailed_target(8, 0, 42, rect(0.0, 0.0, 100.0, 100.0)),
+    ];
+
+    assert_eq!(visible_corner_panels(&windows, 8, &corners), [true; 4]);
 }
 
 #[test]
