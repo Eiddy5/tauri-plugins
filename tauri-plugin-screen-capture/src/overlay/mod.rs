@@ -1,6 +1,9 @@
 #[cfg(windows)]
 mod windows;
 
+#[cfg(target_os = "macos")]
+pub mod macos;
+
 #[cfg(windows)]
 pub use windows::{
     windows_display_index_from_source_id, windows_target_handle_from_source_id, WindowsShareOverlay,
