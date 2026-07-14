@@ -4,7 +4,7 @@
 
 **Goal:** Prevent macOS window sharing from failing because AppKit window ordering is verified before the WindowServer commits it.
 
-**Architecture:** Split window-overlay placement and verification into two main-run-loop phases. `OverlayHost` places panels synchronously, coalesces a pending verification generation, and an `NSTimer` callback on the next main RunLoop validates the latest order; invalid order hides only the overlay and never retroactively fails capture startup.
+**Architecture:** Split window-overlay placement and verification into two main-run-loop phases. `OverlayHost` places panels synchronously, records the newest pending verification generation, and an `NSTimer` callback on the next main RunLoop validates the latest order only when its generation still matches; invalid order hides only the overlay and never retroactively fails capture startup.
 
 **Tech Stack:** Rust 2021, Tauri 2, objc2 AppKit/Foundation bindings, CoreGraphics window list, Cargo tests.
 
@@ -14,9 +14,10 @@
 
 - Modify `src/overlay/macos/model.rs`: add the pure pending-verification state machine used by production code and tests.
 - Modify `src/overlay/macos/mod.rs`: export the new model type for the existing macOS policy integration test.
-- Modify `tests/macos_overlay_policy.rs`: lock down deferral, coalescing, and cancellation behavior.
+- Modify `tests/macos_overlay_policy.rs`: lock down deferral, stale-generation rejection, and cancellation behavior.
 - Modify `src/overlay/macos/events.rs`: schedule a one-shot callback on the next main RunLoop.
 - Modify `src/overlay/macos/host.rs`: separate native placement from post-RunLoop verification and ignore callbacks for hidden/stopped hosts.
+- Create `scripts/macos-overlay-order-probe.swift`: retain the deterministic AppKit/WindowServer timing probe.
 
 ### Task 1: Add the pending-verification state model
 
@@ -33,25 +34,40 @@ Add the import and tests below to `tests/macos_overlay_policy.rs`:
 use tauri_plugin_screen_capture::overlay::macos::OrderVerificationState;
 
 #[test]
-fn order_verification_is_deferred_and_coalesces_latest_generation() {
+fn order_verification_only_accepts_latest_generation() {
     let mut state = OrderVerificationState::default();
 
-    assert!(state.request());
+    let stale_generation = state.request();
+    assert_eq!(stale_generation, 1);
     assert_eq!(state.pending_generation(), Some(1));
-    assert!(!state.request());
+    let current_generation = state.request();
+    assert_eq!(current_generation, 2);
     assert_eq!(state.pending_generation(), Some(2));
-    assert_eq!(state.take_pending(), Some(2));
+    assert!(!state.take_if_current(stale_generation));
+    assert!(state.take_if_current(current_generation));
     assert_eq!(state.pending_generation(), None);
 }
 
 #[test]
 fn hidden_overlay_cancels_pending_order_verification() {
     let mut state = OrderVerificationState::default();
-    state.request();
+    let generation = state.request();
 
     state.cancel();
 
-    assert_eq!(state.take_pending(), None);
+    assert!(!state.take_if_current(generation));
+}
+
+#[test]
+fn stale_timer_cannot_consume_verification_requested_after_cancel() {
+    let mut state = OrderVerificationState::default();
+    let stale_generation = state.request();
+    state.cancel();
+    let current_generation = state.request();
+
+    assert!(!state.take_if_current(stale_generation));
+    assert_eq!(state.pending_generation(), Some(current_generation));
+    assert!(state.take_if_current(current_generation));
 }
 ```
 
@@ -77,19 +93,22 @@ pub struct OrderVerificationState {
 }
 
 impl OrderVerificationState {
-    pub fn request(&mut self) -> bool {
+    pub fn request(&mut self) -> u64 {
         self.generation = self.generation.wrapping_add(1);
-        let should_schedule = self.pending_generation.is_none();
         self.pending_generation = Some(self.generation);
-        should_schedule
+        self.generation
     }
 
     pub const fn pending_generation(&self) -> Option<u64> {
         self.pending_generation
     }
 
-    pub fn take_pending(&mut self) -> Option<u64> {
-        self.pending_generation.take()
+    pub fn take_if_current(&mut self, generation: u64) -> bool {
+        if self.pending_generation != Some(generation) {
+            return false;
+        }
+        self.pending_generation = None;
+        true
     }
 
     pub fn cancel(&mut self) {
@@ -108,7 +127,7 @@ Run:
 cargo test --test macos_overlay_policy order_verification
 ```
 
-Expected: both focused tests pass.
+Expected: all focused verification-state tests pass.
 
 - [ ] **Step 5: Commit the model cycle**
 
@@ -128,9 +147,9 @@ git commit -m "test: 覆盖 macOS 浮层延迟校验状态"
 Add this function to `src/overlay/macos/events.rs`:
 
 ```rust
-pub(crate) fn schedule_order_verification(session_id: u64) {
+pub(crate) fn schedule_order_verification(session_id: u64, generation: u64) {
     let block = RcBlock::new(move |_: NonNull<NSTimer>| {
-        super::host::verify_pending_order(session_id);
+        super::host::verify_pending_order(session_id, generation);
     });
     // SAFETY: The block captures only a numeric ID and the scheduled timer fires on
     // the current main RunLoop. The RunLoop retains the one-shot timer until it fires.
@@ -150,9 +169,8 @@ After applying panel frames and calling `order_above`, replace the immediate `or
 self.last_frame = Some(geometry.frame);
 self.last_level = Some(level);
 self.panels_visible = true;
-if self.order_verification.request() {
-    schedule_order_verification(self.session_id);
-}
+let generation = self.order_verification.request();
+schedule_order_verification(self.session_id, generation);
 Ok(())
 ```
 
@@ -163,21 +181,18 @@ Make `hide_panels` call `self.order_verification.cancel()` before ordering panel
 Add the registry entrypoint:
 
 ```rust
-pub(crate) fn verify_pending_order(session_id: u64) {
-    let result = with_host(session_id, OverlayHost::verify_pending_order);
-    if let Err(error) = result {
-        tracing::debug!(%error, session_id, "macOS 浮层延迟层级校验失败");
-    }
+pub(crate) fn verify_pending_order(session_id: u64, generation: u64) {
+    let _ = with_host(session_id, |host| host.verify_pending_order(generation));
 }
 ```
 
 Add the host method:
 
 ```rust
-fn verify_pending_order(&mut self) -> Result<()> {
-    let Some(generation) = self.order_verification.take_pending() else {
+fn verify_pending_order(&mut self, generation: u64) -> Result<()> {
+    if !self.order_verification.take_if_current(generation) {
         return Ok(());
-    };
+    }
     if !self.requested_visible || self.dragging || !self.panels_visible {
         return Ok(());
     }
@@ -211,7 +226,13 @@ Expected: formatting is clean and every macOS overlay policy test passes.
 
 - [ ] **Step 5: Re-run the original AppKit feedback loop**
 
-Run the Swift WindowServer probe used during diagnosis. Expected: the immediate list lacks the new panels while the post-RunLoop list contains all four immediately above the target, proving the implementation now validates at the meaningful boundary.
+Run:
+
+```bash
+xcrun swift scripts/macos-overlay-order-probe.swift
+```
+
+Expected: `immediate_valid=false` and `zero_timer_valid=Optional(true)`, proving the implementation validates at the meaningful boundary.
 
 - [ ] **Step 6: Commit the runtime fix**
 

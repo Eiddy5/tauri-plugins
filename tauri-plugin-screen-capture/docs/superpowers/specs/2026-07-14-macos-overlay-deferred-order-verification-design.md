@@ -29,11 +29,11 @@
 
 `OverlayHost::refresh_window` 保留刷新前的层级读取和 `needs_native_update` 判断。当需要更新原生窗口时，它只执行边界更新、设置目标层级和相对排序，随后更新本地可见状态并安排一次主 RunLoop 延迟校验，不再在同一调用栈读取排序结果。
 
-延迟校验由 `interval = 0`、`repeats = false` 的一次性 `NSTimer` 调度到下一轮主 RunLoop。回调只携带会话 ID，不跨线程持有 AppKit 对象。回调进入现有主线程 host registry 后读取最新待校验代次，重新读取窗口列表并调用现有 `verify_relative_order`。
+延迟校验由 `interval = 0`、`repeats = false` 的一次性 `NSTimer` 调度到下一轮主 RunLoop。回调只携带会话 ID 和校验代次，不跨线程持有 AppKit 对象。回调进入现有主线程 host registry 后先确认代次仍是最新待校验代次，再重新读取窗口列表并调用现有 `verify_relative_order`。
 
 ### 回调合并与过期保护
 
-每个 `OverlayHost` 保存单调递增的刷新代次以及是否已有校验待执行。连续刷新可以复用同一轮 RunLoop 回调；回调执行时只校验最新代次。
+每个 `OverlayHost` 保存单调递增的刷新代次和最新待校验代次。每次原生排序都安排携带对应代次的下一轮 RunLoop 回调；只有与最新 pending 代次完全一致的回调能够消费校验，较旧回调直接结束。这样既不会重复执行有效校验，也不会让已取消的 Timer 消费隐藏后新创建的校验。
 
 出现以下任一情况时，回调直接结束：
 
