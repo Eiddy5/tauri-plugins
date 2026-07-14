@@ -1,3 +1,5 @@
+use super::MacRect;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WindowSnapshot {
     pub id: u32,
@@ -32,10 +34,12 @@ pub fn decide_window_overlay(
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OrderedWindow {
     pub id: u32,
     pub layer: i32,
+    owner_pid: Option<u32>,
+    frame: Option<MacRect>,
     kind: OrderedWindowKind,
 }
 
@@ -55,6 +59,8 @@ impl OrderedWindow {
         Self {
             id,
             layer,
+            owner_pid: None,
+            frame: None,
             kind: OrderedWindowKind::Target,
         }
     }
@@ -67,6 +73,8 @@ impl OrderedWindow {
         Self {
             id,
             layer,
+            owner_pid: None,
+            frame: None,
             kind: OrderedWindowKind::Panel,
         }
     }
@@ -79,8 +87,20 @@ impl OrderedWindow {
         Self {
             id,
             layer,
+            owner_pid: None,
+            frame: None,
             kind: OrderedWindowKind::Other,
         }
+    }
+
+    pub const fn with_owner_pid(mut self, owner_pid: u32) -> Self {
+        self.owner_pid = Some(owner_pid);
+        self
+    }
+
+    pub const fn with_frame(mut self, frame: MacRect) -> Self {
+        self.frame = Some(frame);
+        self
     }
 }
 
@@ -114,6 +134,109 @@ pub fn verify_relative_order(windows: &[OrderedWindow], target_id: u32, panel_id
         && windows[..panel_start]
             .iter()
             .all(|window| !panel_ids.contains(&window.id))
+}
+
+pub fn visible_corner_panels(
+    windows: &[OrderedWindow],
+    target_id: u32,
+    panel_frames: &[MacRect; 4],
+) -> [bool; 4] {
+    let Some(target_index) = windows
+        .iter()
+        .position(|window| window.id == target_id && window.kind == OrderedWindowKind::Target)
+    else {
+        return [false; 4];
+    };
+    let target = windows[target_index];
+    let Some(target_owner_pid) = target.owner_pid else {
+        return [false; 4];
+    };
+    if !target.frame.is_some_and(MacRect::is_valid) {
+        return [false; 4];
+    }
+
+    panel_frames.map(|panel_frame| {
+        panel_frame.is_valid()
+            && windows[..target_index].iter().all(|window| {
+                if window.kind != OrderedWindowKind::Other
+                    || window.layer != target.layer
+                    || window.owner_pid != Some(target_owner_pid)
+                {
+                    return true;
+                }
+                window
+                    .frame
+                    .is_some_and(|frame| !rects_intersect(frame, panel_frame))
+            })
+    })
+}
+
+pub fn verify_panel_placements(
+    windows: &[OrderedWindow],
+    target_id: u32,
+    panels: &[(u32, MacRect)],
+) -> bool {
+    let Some(target_index) = windows
+        .iter()
+        .position(|window| window.id == target_id && window.kind == OrderedWindowKind::Target)
+    else {
+        return false;
+    };
+    let target = windows[target_index];
+    let Some(target_owner_pid) = target.owner_pid else {
+        return false;
+    };
+    if !target.frame.is_some_and(MacRect::is_valid)
+        || windows.iter().any(|window| {
+            window.kind == OrderedWindowKind::Panel
+                && !panels.iter().any(|(panel_id, _)| *panel_id == window.id)
+        })
+    {
+        return false;
+    }
+
+    panels.iter().all(|(panel_id, panel_frame)| {
+        if !panel_frame.is_valid() {
+            return false;
+        }
+        let Some(panel_index) = windows
+            .iter()
+            .position(|window| window.id == *panel_id && window.kind == OrderedWindowKind::Panel)
+        else {
+            return false;
+        };
+        if panel_index >= target_index || windows[panel_index].layer != target.layer {
+            return false;
+        }
+
+        windows[(panel_index + 1)..target_index]
+            .iter()
+            .all(|window| match window.kind {
+                OrderedWindowKind::Panel => {
+                    panels
+                        .iter()
+                        .any(|(expected_id, _)| *expected_id == window.id)
+                        && window.layer == target.layer
+                }
+                OrderedWindowKind::Other => {
+                    window.layer == target.layer
+                        && window.owner_pid == Some(target_owner_pid)
+                        && window
+                            .frame
+                            .is_some_and(|frame| !rects_intersect(frame, *panel_frame))
+                }
+                OrderedWindowKind::Target => false,
+            })
+    })
+}
+
+fn rects_intersect(first: MacRect, second: MacRect) -> bool {
+    first.is_valid()
+        && second.is_valid()
+        && first.x < second.x + second.width
+        && second.x < first.x + first.width
+        && first.y < second.y + second.height
+        && second.y < first.y + first.height
 }
 
 pub const fn needs_native_update(
