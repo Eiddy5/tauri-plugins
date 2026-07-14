@@ -274,30 +274,22 @@ impl ScreenCaptureState {
     }
 
     pub async fn stop_capture(&self, session_id: &str) -> Result<()> {
-        let (publisher, running_capture, overlay) = {
-            let sessions = self.sessions.lock().await;
-            sessions
-                .get(session_id)
-                .map(|record| {
-                    (
-                        Arc::clone(&record.publisher),
-                        Arc::clone(&record.running_capture),
-                        Arc::clone(&record.overlay),
-                    )
-                })
-                .ok_or_else(invalid_session_error)?
-        };
-
-        running_capture.stop().await?;
-        publisher.stop().await?;
-        if let Err(error) = overlay.stop().await {
-            eprintln!("[screen-capture] failed to stop share overlay: {error}");
-        }
-        self.sessions
+        let record = self
+            .sessions
             .lock()
             .await
             .remove(session_id)
             .ok_or_else(invalid_session_error)?;
+
+        // 从会话表移除后依次清理所有资源，确保任一 stop 失败都不会跳过浮层销毁。
+        let capture_result = record.running_capture.stop().await;
+        let publisher_result = record.publisher.stop().await;
+        if let Err(error) = record.overlay.stop().await {
+            eprintln!("[screen-capture] failed to stop share overlay: {error}");
+        }
+
+        capture_result?;
+        publisher_result?;
         Ok(())
     }
 

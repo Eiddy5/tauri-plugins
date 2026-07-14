@@ -1,3 +1,5 @@
+use objc2::MainThreadMarker;
+use objc2_app_kit::NSScreen;
 use objc2_core_foundation::{
     CFBoolean, CFDictionary, CFNumber, CFString, CFType, CGRect, ConcreteType,
 };
@@ -17,8 +19,21 @@ pub(crate) struct WindowGeometry {
     pub frame: MacRect,
 }
 
-pub(crate) fn display_frame(display_id: u32) -> MacRect {
-    appkit_rect(CGDisplayBounds(display_id))
+pub(crate) fn display_frame(display_id: u32) -> Option<MacRect> {
+    let screens = NSScreen::screens(MainThreadMarker::new()?);
+    screens.iter().find_map(|screen| {
+        if screen.CGDirectDisplayID() != display_id {
+            return None;
+        }
+        let frame = screen.frame();
+        let frame = MacRect {
+            x: frame.origin.x,
+            y: frame.origin.y,
+            width: frame.size.width,
+            height: frame.size.height,
+        };
+        frame.is_valid().then_some(frame)
+    })
 }
 
 pub(crate) fn window_geometry(window_id: u32) -> Result<Option<WindowGeometry>> {
@@ -32,7 +47,10 @@ pub(crate) fn window_geometry(window_id: u32) -> Result<Option<WindowGeometry>> 
         let on_screen = boolean(&row, unsafe { kCGWindowIsOnscreen })
             .map(CFBoolean::as_bool)
             .unwrap_or(false);
-        let frame = bounds(&row)?;
+        let frame = appkit_rect(bounds(&row)?);
+        if !frame.is_valid() {
+            return None;
+        }
         Some(WindowGeometry {
             snapshot: WindowSnapshot {
                 id,
@@ -41,7 +59,7 @@ pub(crate) fn window_geometry(window_id: u32) -> Result<Option<WindowGeometry>> 
                 on_screen,
                 minimized: !on_screen,
             },
-            frame: appkit_rect(frame),
+            frame,
         })
     }))
 }
@@ -52,12 +70,13 @@ pub(crate) fn ordered_windows(target_id: u32, panel_ids: &[u32]) -> Result<Vec<O
         .into_iter()
         .filter_map(|row| {
             let id = number(&row, unsafe { kCGWindowNumber })?.as_i64()? as u32;
+            let layer = number(&row, unsafe { kCGWindowLayer })?.as_i64()? as i32;
             Some(if id == target_id {
-                OrderedWindow::target(id)
+                OrderedWindow::target_at_layer(id, layer)
             } else if panel_ids.contains(&id) {
-                OrderedWindow::panel(id)
+                OrderedWindow::panel_at_layer(id, layer)
             } else {
-                OrderedWindow::other(id)
+                OrderedWindow::other_at_layer(id, layer)
             })
         })
         .collect())

@@ -7,9 +7,12 @@ mod window_info;
 
 pub const OVERLAY_WINDOW_TITLE_PREFIX: &str = "TAURI_SCREEN_CAPTURE_OVERLAY:";
 
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
+use std::{
+    collections::HashSet,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, MutexGuard, OnceLock,
+    },
 };
 
 use async_trait::async_trait;
@@ -27,6 +30,27 @@ pub use model::{
     OverlayDecision, WindowSnapshot,
 };
 pub use panel::{corner_panel_frames, MacRect};
+
+static OVERLAY_WINDOW_IDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+
+pub(crate) fn register_overlay_window(window_id: u32) {
+    overlay_window_ids().insert(window_id);
+}
+
+pub(crate) fn unregister_overlay_window(window_id: u32) {
+    overlay_window_ids().remove(&window_id);
+}
+
+pub(crate) fn is_registered_overlay_window(window_id: u32) -> bool {
+    overlay_window_ids().contains(&window_id)
+}
+
+fn overlay_window_ids() -> MutexGuard<'static, HashSet<u32>> {
+    OVERLAY_WINDOW_IDS
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 pub struct MacOsShareOverlayFactory {
     dispatcher: Arc<dyn MainThreadDispatcher>,
@@ -54,6 +78,15 @@ impl ShareOverlayFactory for MacOsShareOverlayFactory {
 struct MacOsShareOverlay {
     id: u64,
     dispatcher: Arc<dyn MainThreadDispatcher>,
+}
+
+impl Drop for MacOsShareOverlay {
+    fn drop(&mut self) {
+        let id = self.id;
+        let _ = self.dispatcher.dispatch(Box::new(move || {
+            let _ = host::stop(id);
+        }));
+    }
 }
 
 #[async_trait]

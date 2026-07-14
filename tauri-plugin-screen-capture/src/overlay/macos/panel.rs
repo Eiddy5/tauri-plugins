@@ -1,9 +1,32 @@
+use objc2::{rc::Retained, MainThreadMarker, MainThreadOnly};
+use objc2_app_kit::{
+    NSBackingStoreType, NSColor, NSPanel, NSView, NSWindowCollectionBehavior, NSWindowOrderingMode,
+    NSWindowStyleMask,
+};
+use objc2_foundation::{NSInteger, NSPoint, NSRect, NSSize, NSString};
+use objc2_quartz_core::{CALayer, CATransaction};
+
+use crate::{models::CaptureErrorCode, Error, Result};
+
+use super::{register_overlay_window, unregister_overlay_window, OVERLAY_WINDOW_TITLE_PREFIX};
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MacRect {
     pub x: f64,
     pub y: f64,
     pub width: f64,
     pub height: f64,
+}
+
+impl MacRect {
+    pub fn is_valid(self) -> bool {
+        self.x.is_finite()
+            && self.y.is_finite()
+            && self.width.is_finite()
+            && self.height.is_finite()
+            && self.width > 0.0
+            && self.height > 0.0
+    }
 }
 
 pub fn corner_panel_frames(target: MacRect, corner_length: f64) -> [MacRect; 4] {
@@ -73,6 +96,7 @@ pub(crate) struct CornerPanel {
     horizontal: Retained<CALayer>,
     vertical: Retained<CALayer>,
     corner: Corner,
+    window_id: u32,
 }
 
 impl CornerPanel {
@@ -142,11 +166,14 @@ impl CornerPanel {
         // SAFETY: CornerPanel retains the NSPanel and explicitly closes it on drop.
         unsafe { panel.setReleasedWhenClosed(false) };
 
+        let window_id = panel.windowNumber() as u32;
+        register_overlay_window(window_id);
         let panel = Self {
             panel,
             horizontal,
             vertical,
             corner,
+            window_id,
         };
         panel.update_frame(MacRect {
             x: 0.0,
@@ -159,6 +186,9 @@ impl CornerPanel {
 
     pub(crate) fn update_frame(&self, frame: MacRect) {
         self.panel.setFrame_display(ns_rect(frame), false);
+        let contents_scale = self.panel.backingScaleFactor();
+        self.horizontal.setContentsScale(contents_scale);
+        self.vertical.setContentsScale(contents_scale);
         let width = frame.width.max(1.0);
         let height = frame.height.max(1.0);
         let thickness = 4.0_f64.min(width).min(height);
@@ -200,12 +230,13 @@ impl CornerPanel {
     }
 
     pub(crate) fn window_id(&self) -> u32 {
-        self.panel.windowNumber() as u32
+        self.window_id
     }
 }
 
 impl Drop for CornerPanel {
     fn drop(&mut self) {
+        unregister_overlay_window(self.window_id);
         self.panel.orderOut(None);
         self.panel.close();
     }
@@ -217,14 +248,3 @@ fn ns_rect(rect: MacRect) -> NSRect {
         NSSize::new(rect.width, rect.height),
     )
 }
-use objc2::{rc::Retained, MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSPanel, NSView, NSWindowCollectionBehavior, NSWindowOrderingMode,
-    NSWindowStyleMask,
-};
-use objc2_foundation::{NSInteger, NSPoint, NSRect, NSSize, NSString};
-use objc2_quartz_core::{CALayer, CATransaction};
-
-use crate::{models::CaptureErrorCode, Error, Result};
-
-use super::OVERLAY_WINDOW_TITLE_PREFIX;

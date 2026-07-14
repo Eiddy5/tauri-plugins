@@ -84,6 +84,31 @@ fn four_corner_panels_only_allocate_corner_squares() {
 }
 
 #[test]
+fn overlay_rejects_empty_or_non_finite_bounds() {
+    assert!(!MacRect {
+        x: 0.0,
+        y: 0.0,
+        width: 0.0,
+        height: 100.0,
+    }
+    .is_valid());
+    assert!(!MacRect {
+        x: f64::NAN,
+        y: 0.0,
+        width: 100.0,
+        height: 100.0,
+    }
+    .is_valid());
+    assert!(MacRect {
+        x: -1920.0,
+        y: 0.0,
+        width: 1920.0,
+        height: 1080.0,
+    }
+    .is_valid());
+}
+
+#[test]
 fn verification_accepts_four_panels_immediately_above_target() {
     let windows = vec![
         OrderedWindow::other(90),
@@ -107,6 +132,19 @@ fn verification_rejects_a_panel_promoted_above_an_existing_cover_window() {
         OrderedWindow::panel(13),
         OrderedWindow::panel(12),
         OrderedWindow::target(42),
+    ];
+
+    assert!(!verify_relative_order(&windows, 42, &[11, 12, 13, 14]));
+}
+
+#[test]
+fn verification_rejects_panel_on_a_different_window_server_layer() {
+    let windows = vec![
+        OrderedWindow::panel_at_layer(14, 0),
+        OrderedWindow::panel_at_layer(13, 0),
+        OrderedWindow::panel_at_layer(12, 0),
+        OrderedWindow::panel_at_layer(11, 1),
+        OrderedWindow::target_at_layer(42, 0),
     ];
 
     assert!(!verify_relative_order(&windows, 42, &[11, 12, 13, 14]));

@@ -11,6 +11,7 @@ mod real {
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     };
+    use std::time::Duration;
 
     use async_trait::async_trait;
     use screencapturekit::{
@@ -39,6 +40,7 @@ mod real {
         id: u32,
         pid: i32,
         title: String,
+        registered_overlay: bool,
     }
 
     fn current_app_window_exceptions(current_pid: i32, windows: &[FilterWindow]) -> Vec<u32> {
@@ -46,6 +48,7 @@ mod real {
             .iter()
             .filter(|window| {
                 window.pid == current_pid
+                    && !window.registered_overlay
                     && !window
                         .title
                         .starts_with(crate::overlay::macos::OVERLAY_WINDOW_TITLE_PREFIX)
@@ -204,7 +207,7 @@ mod real {
                 true,
             )
         })?;
-        let dispatcher = LatestFrameDispatcher::new(Arc::from(consumer), runtime_handle);
+        let dispatcher = LatestFrameDispatcher::new(Arc::from(consumer), runtime_handle.clone());
         let delegate = StreamCallbacks::new()
             .on_error(|error| {
                 tracing::error!(?error, "ScreenCaptureKit stream error");
@@ -271,17 +274,30 @@ mod real {
             .map_err(|err| sck_error("failed to start ScreenCaptureKit stream", err))?;
         eprintln!("[screen-capture] ScreenCaptureKit stream started");
 
+        let stream = Arc::new(Mutex::new(stream));
+        let worker_stopped = dispatcher.handle.stopped;
+        let filter_worker = (options.source_kind == CaptureSourceKind::Display).then(|| {
+            spawn_display_filter_worker(
+                runtime_handle,
+                Arc::clone(&stream),
+                options,
+                Arc::clone(&worker_stopped),
+            )
+        });
+
         Ok(Box::new(ScreenCaptureKitRunningCapture {
-            stream: Mutex::new(stream),
+            stream,
             worker: dispatcher.worker,
-            worker_stopped: dispatcher.handle.stopped,
+            filter_worker,
+            worker_stopped,
             worker_notify: dispatcher.handle.notify,
         }))
     }
 
     struct ScreenCaptureKitRunningCapture {
-        stream: Mutex<SCStream>,
+        stream: Arc<Mutex<SCStream>>,
         worker: JoinHandle<()>,
+        filter_worker: Option<JoinHandle<()>>,
         worker_stopped: Arc<AtomicBool>,
         worker_notify: Arc<Notify>,
     }
@@ -319,6 +335,9 @@ mod real {
             self.worker_stopped.store(true, Ordering::Release);
             self.worker_notify.notify_waiters();
             self.worker.abort();
+            if let Some(worker) = &self.filter_worker {
+                worker.abort();
+            }
         }
     }
 
@@ -327,7 +346,55 @@ mod real {
             self.worker_stopped.store(true, Ordering::Release);
             self.worker_notify.notify_waiters();
             self.worker.abort();
+            if let Some(worker) = &self.filter_worker {
+                worker.abort();
+            }
         }
+    }
+
+    fn spawn_display_filter_worker(
+        runtime_handle: Handle,
+        stream: Arc<Mutex<SCStream>>,
+        options: StartCaptureOptions,
+        stopped: Arc<AtomicBool>,
+    ) -> JoinHandle<()> {
+        runtime_handle.spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(2));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            interval.tick().await;
+
+            loop {
+                interval.tick().await;
+                if stopped.load(Ordering::Acquire) {
+                    break;
+                }
+
+                let stream = Arc::clone(&stream);
+                let options = options.clone();
+                let refresh = tokio::task::spawn_blocking(move || -> Result<()> {
+                    let content = shareable_content()?;
+                    let filter = content_filter(&content, &options)?;
+                    stream
+                        .lock()
+                        .map_err(|_| internal_error("ScreenCaptureKit stream lock was poisoned"))?
+                        .update_content_filter(&filter)
+                        .map_err(|error| {
+                            sck_error("failed to refresh ScreenCaptureKit display filter", error)
+                        })
+                })
+                .await;
+
+                match refresh {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "刷新 ScreenCaptureKit 浮层排除列表失败");
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "ScreenCaptureKit 浮层排除任务异常结束");
+                    }
+                }
+            }
+        })
     }
 
     struct LatestFrameDispatcher {
@@ -509,6 +576,9 @@ mod real {
                     id: window.window_id(),
                     pid: window.owning_application()?.process_id(),
                     title: window.title().unwrap_or_default(),
+                    registered_overlay: crate::overlay::macos::is_registered_overlay_window(
+                        window.window_id(),
+                    ),
                 })
             })
             .collect::<Vec<_>>();
@@ -659,16 +729,25 @@ mod real {
                     id: 1,
                     pid: 123,
                     title: "TAURI_SCREEN_CAPTURE_OVERLAY:7:tl".into(),
+                    registered_overlay: true,
                 },
                 FilterWindow {
                     id: 2,
                     pid: 123,
                     title: "设置".into(),
+                    registered_overlay: false,
                 },
                 FilterWindow {
                     id: 3,
                     pid: 456,
                     title: "文档".into(),
+                    registered_overlay: false,
+                },
+                FilterWindow {
+                    id: 4,
+                    pid: 123,
+                    title: String::new(),
+                    registered_overlay: true,
                 },
             ];
 

@@ -213,9 +213,13 @@ fn dispatch(session_id: u64, event: OverlayEvent) {
     if MainThreadMarker::new().is_none() {
         return;
     }
-    let result = match event_action(event) {
-        RefreshAction::Hide => super::host::hide_transient(session_id),
-        RefreshAction::Refresh => super::host::refresh(session_id),
+    let result = match event {
+        OverlayEvent::LeftMouseDragged => super::host::begin_drag(session_id),
+        OverlayEvent::LeftMouseUp => super::host::end_drag(session_id),
+        _ => match event_action(event) {
+            RefreshAction::Hide => super::host::hide_transient(session_id),
+            RefreshAction::Refresh => super::host::refresh(session_id),
+        },
     };
     if let Err(error) = result {
         tracing::debug!(%error, session_id, ?event, "macOS 浮层事件刷新失败");

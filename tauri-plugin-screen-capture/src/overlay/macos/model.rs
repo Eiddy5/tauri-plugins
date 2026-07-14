@@ -35,6 +35,7 @@ pub fn decide_window_overlay(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OrderedWindow {
     pub id: u32,
+    pub layer: i32,
     kind: OrderedWindowKind,
 }
 
@@ -47,22 +48,37 @@ enum OrderedWindowKind {
 
 impl OrderedWindow {
     pub const fn target(id: u32) -> Self {
+        Self::target_at_layer(id, 0)
+    }
+
+    pub const fn target_at_layer(id: u32, layer: i32) -> Self {
         Self {
             id,
+            layer,
             kind: OrderedWindowKind::Target,
         }
     }
 
     pub const fn panel(id: u32) -> Self {
+        Self::panel_at_layer(id, 0)
+    }
+
+    pub const fn panel_at_layer(id: u32, layer: i32) -> Self {
         Self {
             id,
+            layer,
             kind: OrderedWindowKind::Panel,
         }
     }
 
     pub const fn other(id: u32) -> Self {
+        Self::other_at_layer(id, 0)
+    }
+
+    pub const fn other_at_layer(id: u32, layer: i32) -> Self {
         Self {
             id,
+            layer,
             kind: OrderedWindowKind::Other,
         }
     }
@@ -82,11 +98,14 @@ pub fn verify_relative_order(windows: &[OrderedWindow], target_id: u32, panel_id
         return false;
     };
     let immediately_above = &windows[panel_start..target_index];
+    let target_layer = windows[target_index].layer;
 
     immediately_above.len() == panel_ids.len()
-        && immediately_above
-            .iter()
-            .all(|window| window.kind == OrderedWindowKind::Panel && panel_ids.contains(&window.id))
+        && immediately_above.iter().all(|window| {
+            window.kind == OrderedWindowKind::Panel
+                && window.layer == target_layer
+                && panel_ids.contains(&window.id)
+        })
         && panel_ids.iter().all(|panel_id| {
             immediately_above
                 .iter()

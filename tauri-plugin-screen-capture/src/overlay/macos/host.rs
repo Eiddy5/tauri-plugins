@@ -37,7 +37,7 @@ pub(crate) fn start(session_id: u64, target: OverlayTarget) -> Result<()> {
 pub(crate) fn show(session_id: u64) -> Result<()> {
     with_host(session_id, |host| {
         host.requested_visible = true;
-        host.observers.set_correction_paused(false);
+        host.observers.set_correction_paused(host.dragging);
         host.refresh()
     })
 }
@@ -58,6 +58,29 @@ pub(crate) fn refresh(session_id: u64) -> Result<()> {
 pub(crate) fn hide_transient(session_id: u64) -> Result<()> {
     with_host(session_id, |host| {
         host.hide_panels();
+        Ok(())
+    })
+}
+
+pub(crate) fn begin_drag(session_id: u64) -> Result<()> {
+    with_host(session_id, |host| {
+        if host.target.source_kind == CaptureSourceKind::Window {
+            host.dragging = true;
+            host.observers.set_correction_paused(true);
+            host.hide_panels();
+        }
+        Ok(())
+    })
+}
+
+pub(crate) fn end_drag(session_id: u64) -> Result<()> {
+    with_host(session_id, |host| {
+        if host.target.source_kind == CaptureSourceKind::Window {
+            host.dragging = false;
+            host.observers
+                .set_correction_paused(!host.requested_visible);
+            return host.refresh();
+        }
         Ok(())
     })
 }
@@ -87,6 +110,7 @@ struct OverlayHost {
     last_frame: Option<super::MacRect>,
     last_level: Option<i32>,
     panels_visible: bool,
+    dragging: bool,
 }
 
 impl OverlayHost {
@@ -99,11 +123,12 @@ impl OverlayHost {
             last_frame: None,
             last_level: None,
             panels_visible: false,
+            dragging: false,
         })
     }
 
     fn refresh(&mut self) -> Result<()> {
-        if !self.requested_visible {
+        if !self.requested_visible || self.dragging {
             self.hide_panels();
             return Ok(());
         }
@@ -116,7 +141,14 @@ impl OverlayHost {
 
     fn refresh_display(&mut self) -> Result<()> {
         let display_id = parse_source_id(&self.target.source_id, "display")?;
-        let frame = display_frame(display_id);
+        let Some(frame) = display_frame(display_id) else {
+            self.hide_panels();
+            return Err(Error::new(
+                CaptureErrorCode::SourceUnavailable,
+                "共享显示器已经断开或尺寸无效",
+                true,
+            ));
+        };
         if !needs_native_update(self.panels_visible, self.last_frame != Some(frame), true) {
             return Ok(());
         }
@@ -133,13 +165,20 @@ impl OverlayHost {
 
     fn refresh_window(&mut self) -> Result<()> {
         let target_id = parse_source_id(&self.target.source_id, "window")?;
-        let Some(geometry) = window_geometry(target_id)? else {
-            self.hide_panels();
-            return Err(Error::new(
-                CaptureErrorCode::SourceUnavailable,
-                "共享窗口已经关闭或不在当前用户空间",
-                true,
-            ));
+        let geometry = match window_geometry(target_id) {
+            Ok(Some(geometry)) => geometry,
+            Ok(None) => {
+                self.hide_panels();
+                return Err(Error::new(
+                    CaptureErrorCode::SourceUnavailable,
+                    "共享窗口已经关闭或不在当前用户空间",
+                    true,
+                ));
+            }
+            Err(error) => {
+                self.hide_panels();
+                return Err(error);
+            }
         };
         let OverlayDecision::Show { level, .. } = decide_window_overlay(&geometry.snapshot, true)
         else {
@@ -148,7 +187,13 @@ impl OverlayHost {
         };
 
         let panel_ids = self.panel_ids();
-        let current_order = ordered_windows(target_id, &panel_ids)?;
+        let current_order = match ordered_windows(target_id, &panel_ids) {
+            Ok(windows) => windows,
+            Err(error) => {
+                self.hide_panels();
+                return Err(error);
+            }
+        };
         let order_valid = verify_relative_order(&current_order, target_id, &panel_ids);
         let bounds_changed =
             self.last_frame != Some(geometry.frame) || self.last_level != Some(level);
@@ -162,7 +207,13 @@ impl OverlayHost {
             panel.order_above(target_id);
         }
 
-        let windows = ordered_windows(target_id, &panel_ids)?;
+        let windows = match ordered_windows(target_id, &panel_ids) {
+            Ok(windows) => windows,
+            Err(error) => {
+                self.hide_panels();
+                return Err(error);
+            }
+        };
         if !verify_relative_order(&windows, target_id, &panel_ids) {
             self.hide_panels();
             return Err(overlay_error("无法维持目标窗口的相对层级，已隐藏浮层"));

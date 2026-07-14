@@ -170,6 +170,64 @@ impl RunningCapture for ObservableRunningCapture {
 }
 
 #[derive(Debug)]
+struct FailingStopBackend {
+    counters: Arc<BackendLifecycleCounters>,
+}
+
+#[async_trait]
+impl CaptureBackend for FailingStopBackend {
+    async fn check_permission(&self) -> Result<PermissionStatus> {
+        Ok(PermissionStatus::Granted)
+    }
+
+    async fn request_permission(&self) -> Result<PermissionStatus> {
+        Ok(PermissionStatus::Granted)
+    }
+
+    async fn list_sources(
+        &self,
+        options: ListSourcesOptions,
+    ) -> Result<Vec<tauri_plugin_screen_capture::CaptureSource>> {
+        DummyCaptureBackend.list_sources(options).await
+    }
+
+    async fn start_capture(
+        &self,
+        _options: StartCaptureOptions,
+        _consumer: Box<dyn FrameConsumer>,
+    ) -> Result<Box<dyn RunningCapture>> {
+        Ok(Box::new(FailingStopRunningCapture {
+            counters: Arc::clone(&self.counters),
+        }))
+    }
+}
+
+#[derive(Debug)]
+struct FailingStopRunningCapture {
+    counters: Arc<BackendLifecycleCounters>,
+}
+
+#[async_trait]
+impl RunningCapture for FailingStopRunningCapture {
+    async fn pause(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn resume(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        self.counters.stops.fetch_add(1, Ordering::SeqCst);
+        Err(tauri_plugin_screen_capture::Error::new(
+            CaptureErrorCode::Internal,
+            "capture stop failed",
+            true,
+        ))
+    }
+}
+
+#[derive(Debug)]
 struct FinishingBackend {
     counters: Arc<BackendLifecycleCounters>,
     finish_sender: watch::Sender<Option<CaptureErrorPayload>>,
@@ -483,6 +541,33 @@ async fn state_keeps_session_consistent_when_overlay_lifecycle_calls_fail() {
     assert_eq!(overlays[0].hides.load(Ordering::SeqCst), 1);
     assert_eq!(overlays[0].shows.load(Ordering::SeqCst), 1);
     assert_eq!(overlays[0].stops.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn state_still_stops_overlay_and_removes_session_when_capture_stop_fails() {
+    let counters = Arc::new(BackendLifecycleCounters::default());
+    let backend = Arc::new(FailingStopBackend {
+        counters: Arc::clone(&counters),
+    });
+    let overlay_factory = Arc::new(OverlayProbeFactory::default());
+    let state = ScreenCaptureState::with_backend_and_overlay_factory(
+        backend,
+        Arc::clone(&overlay_factory) as Arc<dyn ShareOverlayFactory>,
+    );
+    let session = state.start_capture(start_options()).await.expect("start");
+
+    assert!(state.stop_capture(&session.session_id).await.is_err());
+    assert!(state
+        .get_capture_session(&session.session_id)
+        .await
+        .is_err());
+    assert_eq!(counters.stops.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        overlay_factory.overlay_counters()[0]
+            .stops
+            .load(Ordering::SeqCst),
+        1
+    );
 }
 
 #[tokio::test]
