@@ -13,7 +13,7 @@ use super::{
     events::{schedule_order_verification, EventObservers},
     needs_native_update,
     panel::CornerPanel,
-    verify_relative_order,
+    verify_panel_placements, visible_corner_panels,
     window_info::{display_frame, ordered_windows, window_geometry},
     OrderVerificationState, OverlayDecision,
 };
@@ -128,6 +128,7 @@ struct OverlayHost {
     last_frame: Option<super::MacRect>,
     last_level: Option<i32>,
     panels_visible: bool,
+    panel_visibility: [bool; 4],
     dragging: bool,
     order_verification: OrderVerificationState,
 }
@@ -143,6 +144,7 @@ impl OverlayHost {
             last_frame: None,
             last_level: None,
             panels_visible: false,
+            panel_visibility: [false; 4],
             dragging: false,
             order_verification: OrderVerificationState::default(),
         })
@@ -181,6 +183,7 @@ impl OverlayHost {
         self.last_frame = Some(frame);
         self.last_level = Some(NSStatusWindowLevel as i32);
         self.panels_visible = true;
+        self.panel_visibility = [true; 4];
         Ok(())
     }
 
@@ -215,22 +218,37 @@ impl OverlayHost {
                 return Err(error);
             }
         };
-        let order_valid = verify_relative_order(&current_order, target_id, &panel_ids);
-        let bounds_changed =
-            self.last_frame != Some(geometry.frame) || self.last_level != Some(level);
+        let panel_frames = corner_panel_frames(geometry.frame, 32.0);
+        let panel_visibility = visible_corner_panels(&current_order, target_id, &panel_frames);
+        let expected_panels = panel_ids
+            .into_iter()
+            .zip(panel_frames)
+            .zip(panel_visibility)
+            .filter_map(|((panel_id, frame), visible)| visible.then_some((panel_id, frame)))
+            .collect::<Vec<_>>();
+        let order_valid = self.panel_visibility == panel_visibility
+            && verify_panel_placements(&current_order, target_id, &expected_panels);
+        let bounds_changed = self.last_frame != Some(geometry.frame)
+            || self.last_level != Some(level)
+            || self.panel_visibility != panel_visibility;
         if !needs_native_update(self.panels_visible, bounds_changed, order_valid) {
             return Ok(());
         }
 
         self.apply_frames(geometry.frame);
-        for panel in &self.panels {
-            panel.set_level(level);
-            panel.order_above(target_id);
+        for (panel, visible) in self.panels.iter().zip(panel_visibility) {
+            if visible {
+                panel.set_level(level);
+                panel.order_above(target_id);
+            } else {
+                panel.hide();
+            }
         }
 
         self.last_frame = Some(geometry.frame);
         self.last_level = Some(level);
         self.panels_visible = true;
+        self.panel_visibility = panel_visibility;
         let generation = self.order_verification.request();
         schedule_order_verification(self.session_id, generation);
         Ok(())
@@ -259,7 +277,17 @@ impl OverlayHost {
                 return Err(error);
             }
         };
-        if verify_relative_order(&windows, target_id, &panel_ids) {
+        let Some(last_frame) = self.last_frame else {
+            self.hide_panels();
+            return Err(overlay_error("浮层缺少目标窗口边界"));
+        };
+        let expected_panels = panel_ids
+            .into_iter()
+            .zip(corner_panel_frames(last_frame, 32.0))
+            .zip(self.panel_visibility)
+            .filter_map(|((panel_id, frame), visible)| visible.then_some((panel_id, frame)))
+            .collect::<Vec<_>>();
+        if verify_panel_placements(&windows, target_id, &expected_panels) {
             return Ok(());
         }
 
@@ -279,6 +307,7 @@ impl OverlayHost {
             panel.hide();
         }
         self.panels_visible = false;
+        self.panel_visibility = [false; 4];
     }
 
     fn panel_ids(&self) -> [u32; 4] {
