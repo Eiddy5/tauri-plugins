@@ -2,8 +2,8 @@
 
 use tauri_plugin_screen_capture::overlay::macos::{
     corner_panel_frames, decide_window_overlay, event_action, needs_native_update,
-    verify_relative_order, MacRect, OrderedWindow, OverlayDecision, OverlayEvent, RefreshAction,
-    WindowSnapshot,
+    verify_relative_order, MacRect, OrderVerificationState, OrderedWindow, OverlayDecision,
+    OverlayEvent, RefreshAction, WindowSnapshot,
 };
 
 fn window(id: u32, layer: i32, order: usize, on_screen: bool) -> WindowSnapshot {
@@ -182,4 +182,26 @@ fn correction_timer_skips_unchanged_native_updates() {
     assert!(needs_native_update(false, false, true));
     assert!(needs_native_update(true, true, true));
     assert!(needs_native_update(true, false, false));
+}
+
+#[test]
+fn order_verification_is_deferred_and_coalesces_latest_generation() {
+    let mut state = OrderVerificationState::default();
+
+    assert!(state.request());
+    assert_eq!(state.pending_generation(), Some(1));
+    assert!(!state.request());
+    assert_eq!(state.pending_generation(), Some(2));
+    assert_eq!(state.take_pending(), Some(2));
+    assert_eq!(state.pending_generation(), None);
+}
+
+#[test]
+fn hidden_overlay_cancels_pending_order_verification() {
+    let mut state = OrderVerificationState::default();
+    state.request();
+
+    state.cancel();
+
+    assert_eq!(state.take_pending(), None);
 }
