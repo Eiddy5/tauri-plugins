@@ -227,6 +227,8 @@ cargo clippy --features macos-screencapturekit --all-targets -- -D warnings
 
 原生 ignored 测试需要在已登录的 macOS GUI session 中运行，并提前授予屏幕录制权限。
 
+具体真机步骤见 [macOS 浮层验收清单](../../macos-overlay-acceptance.md)。
+
 ## 性能预算
 
 必须通过 Instruments 测量 release build；不能仅凭使用 Core Animation 就认定性能合格。
