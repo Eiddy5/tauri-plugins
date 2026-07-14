@@ -5,7 +5,7 @@ use objc2_core_foundation::{
 };
 use objc2_core_graphics::{
     kCGNullWindowID, kCGWindowBounds, kCGWindowIsOnscreen, kCGWindowLayer, kCGWindowNumber,
-    CGDisplayBounds, CGMainDisplayID, CGRectMakeWithDictionaryRepresentation,
+    kCGWindowOwnerPID, CGDisplayBounds, CGMainDisplayID, CGRectMakeWithDictionaryRepresentation,
     CGWindowListCopyWindowInfo, CGWindowListOption,
 };
 use objc2_foundation::{NSNumber, NSString};
@@ -85,15 +85,31 @@ pub(crate) fn ordered_windows(target_id: u32, panel_ids: &[u32]) -> Result<Vec<O
         .filter_map(|row| {
             let id = number(&row, unsafe { kCGWindowNumber })?.as_i64()? as u32;
             let layer = number(&row, unsafe { kCGWindowLayer })?.as_i64()? as i32;
-            Some(if id == target_id {
-                OrderedWindow::target_at_layer(id, layer)
-            } else if panel_ids.contains(&id) {
-                OrderedWindow::panel_at_layer(id, layer)
-            } else {
-                OrderedWindow::other_at_layer(id, layer)
-            })
+            let owner_pid = number(&row, unsafe { kCGWindowOwnerPID })?.as_i64()? as u32;
+            let frame = appkit_rect(bounds(&row)?);
+            Some(ordered_window_from_fields(
+                id, layer, owner_pid, frame, target_id, panel_ids,
+            ))
         })
         .collect())
+}
+
+fn ordered_window_from_fields(
+    id: u32,
+    layer: i32,
+    owner_pid: u32,
+    frame: MacRect,
+    target_id: u32,
+    panel_ids: &[u32],
+) -> OrderedWindow {
+    let window = if id == target_id {
+        OrderedWindow::target_at_layer(id, layer)
+    } else if panel_ids.contains(&id) {
+        OrderedWindow::panel_at_layer(id, layer)
+    } else {
+        OrderedWindow::other_at_layer(id, layer)
+    };
+    window.with_owner_pid(owner_pid).with_frame(frame)
 }
 
 fn window_rows(
@@ -144,6 +160,7 @@ fn appkit_rect(rect: CGRect) -> MacRect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::overlay::macos::{corner_panel_frames, visible_corner_panels};
 
     #[test]
     fn selects_display_frame_by_legacy_screen_number() {
@@ -169,6 +186,38 @@ mod tests {
         assert_eq!(
             display_frame_from_candidates(1783228483, candidates),
             Some(expected)
+        );
+    }
+
+    #[test]
+    fn ordered_rows_preserve_owner_and_frame_for_sibling_visibility() {
+        let target_frame = MacRect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        };
+        let corners = corner_panel_frames(target_frame, 32.0);
+        let windows = [
+            ordered_window_from_fields(
+                7,
+                0,
+                42,
+                MacRect {
+                    x: 0.0,
+                    y: 80.0,
+                    width: 10.0,
+                    height: 10.0,
+                },
+                8,
+                &[],
+            ),
+            ordered_window_from_fields(8, 0, 42, target_frame, 8, &[]),
+        ];
+
+        assert_eq!(
+            visible_corner_panels(&windows, 8, &corners),
+            [false, true, true, true]
         );
     }
 }
