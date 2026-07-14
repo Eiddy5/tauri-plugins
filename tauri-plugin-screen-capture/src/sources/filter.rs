@@ -15,10 +15,13 @@ pub fn filter_sources(
     sources
         .into_iter()
         .filter_map(|mut source| {
-            let reason = filtered_reason(&source, options);
+            let reason = source
+                .filtered_reason
+                .take()
+                .or_else(|| filtered_reason(&source, options).map(str::to_string));
             match reason {
                 Some(reason) if options.debug_raw_sources => {
-                    source.filtered_reason = Some(reason.to_string());
+                    source.filtered_reason = Some(reason);
                     Some(source)
                 }
                 Some(_) => None,
