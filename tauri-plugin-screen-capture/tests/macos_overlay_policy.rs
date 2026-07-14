@@ -185,23 +185,40 @@ fn correction_timer_skips_unchanged_native_updates() {
 }
 
 #[test]
-fn order_verification_is_deferred_and_coalesces_latest_generation() {
+fn order_verification_only_accepts_latest_generation() {
     let mut state = OrderVerificationState::default();
 
-    assert!(state.request());
+    let stale_generation = state.request();
+    assert_eq!(stale_generation, 1);
     assert_eq!(state.pending_generation(), Some(1));
-    assert!(!state.request());
+    let current_generation = state.request();
+    assert_eq!(current_generation, 2);
     assert_eq!(state.pending_generation(), Some(2));
-    assert_eq!(state.take_pending(), Some(2));
+    assert!(!state.take_if_current(stale_generation));
+    assert_eq!(state.pending_generation(), Some(2));
+    assert!(state.take_if_current(current_generation));
     assert_eq!(state.pending_generation(), None);
 }
 
 #[test]
 fn hidden_overlay_cancels_pending_order_verification() {
     let mut state = OrderVerificationState::default();
-    state.request();
+    let canceled_generation = state.request();
 
     state.cancel();
 
-    assert_eq!(state.take_pending(), None);
+    assert!(!state.take_if_current(canceled_generation));
+    assert_eq!(state.pending_generation(), None);
+}
+
+#[test]
+fn stale_timer_cannot_consume_verification_requested_after_cancel() {
+    let mut state = OrderVerificationState::default();
+    let stale_generation = state.request();
+    state.cancel();
+    let current_generation = state.request();
+
+    assert!(!state.take_if_current(stale_generation));
+    assert_eq!(state.pending_generation(), Some(current_generation));
+    assert!(state.take_if_current(current_generation));
 }
