@@ -131,19 +131,22 @@ pub struct OrderVerificationState {
 }
 
 impl OrderVerificationState {
-    pub fn request(&mut self) -> bool {
+    pub fn request(&mut self) -> u64 {
         self.generation = self.generation.wrapping_add(1);
-        let should_schedule = self.pending_generation.is_none();
         self.pending_generation = Some(self.generation);
-        should_schedule
+        self.generation
     }
 
     pub const fn pending_generation(&self) -> Option<u64> {
         self.pending_generation
     }
 
-    pub fn take_pending(&mut self) -> Option<u64> {
-        self.pending_generation.take()
+    pub fn take_if_current(&mut self, generation: u64) -> bool {
+        if self.pending_generation != Some(generation) {
+            return false;
+        }
+        self.pending_generation = None;
+        true
     }
 
     pub fn cancel(&mut self) {

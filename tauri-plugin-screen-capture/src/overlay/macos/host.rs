@@ -62,11 +62,21 @@ pub(crate) fn hide_transient(session_id: u64) -> Result<()> {
     })
 }
 
-pub(crate) fn verify_pending_order(session_id: u64) {
-    let result = with_host(session_id, OverlayHost::verify_pending_order);
-    if let Err(error) = result {
-        tracing::debug!(%error, session_id, "macOS 浮层延迟层级校验失败");
-    }
+pub(crate) fn verify_pending_order(session_id: u64, generation: u64) {
+    let _ = with_host(session_id, |host| {
+        let target_id = host.target.source_id.clone();
+        let result = host.verify_pending_order(generation);
+        if let Err(error) = &result {
+            tracing::debug!(
+                %error,
+                session_id,
+                %target_id,
+                generation,
+                "macOS 浮层延迟层级校验失败"
+            );
+        }
+        result
+    });
 }
 
 pub(crate) fn begin_drag(session_id: u64) -> Result<()> {
@@ -221,16 +231,15 @@ impl OverlayHost {
         self.last_frame = Some(geometry.frame);
         self.last_level = Some(level);
         self.panels_visible = true;
-        if self.order_verification.request() {
-            schedule_order_verification(self.session_id);
-        }
+        let generation = self.order_verification.request();
+        schedule_order_verification(self.session_id, generation);
         Ok(())
     }
 
-    fn verify_pending_order(&mut self) -> Result<()> {
-        let Some(generation) = self.order_verification.take_pending() else {
+    fn verify_pending_order(&mut self, generation: u64) -> Result<()> {
+        if !self.order_verification.take_if_current(generation) {
             return Ok(());
-        };
+        }
         if !self.requested_visible || self.dragging || !self.panels_visible {
             return Ok(());
         }
@@ -255,9 +264,7 @@ impl OverlayHost {
         }
 
         self.hide_panels();
-        Err(overlay_error(format!(
-            "无法维持目标窗口 {target_id} 的相对层级，已隐藏浮层（校验代次 {generation}）"
-        )))
+        Err(overlay_error("无法维持目标窗口的相对层级，已隐藏浮层"))
     }
 
     fn apply_frames(&self, target: super::MacRect) {

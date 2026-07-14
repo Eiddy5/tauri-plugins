@@ -165,9 +165,9 @@ impl EventObservers {
     }
 }
 
-pub(crate) fn schedule_order_verification(session_id: u64) {
+pub(crate) fn schedule_order_verification(session_id: u64, generation: u64) {
     let block = RcBlock::new(move |_: NonNull<NSTimer>| {
-        super::host::verify_pending_order(session_id);
+        super::host::verify_pending_order(session_id, generation);
     });
     // SAFETY: The block captures only a numeric session ID and the scheduled timer fires on
     // the current main RunLoop. The RunLoop retains the one-shot timer until it fires.
