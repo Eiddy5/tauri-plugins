@@ -10,12 +10,12 @@ use crate::{
 
 use super::{
     corner_panel_frames, decide_window_overlay,
-    events::EventObservers,
+    events::{schedule_order_verification, EventObservers},
     needs_native_update,
     panel::CornerPanel,
     verify_relative_order,
     window_info::{display_frame, ordered_windows, window_geometry},
-    OverlayDecision,
+    OrderVerificationState, OverlayDecision,
 };
 
 thread_local! {
@@ -62,6 +62,13 @@ pub(crate) fn hide_transient(session_id: u64) -> Result<()> {
     })
 }
 
+pub(crate) fn verify_pending_order(session_id: u64) {
+    let result = with_host(session_id, OverlayHost::verify_pending_order);
+    if let Err(error) = result {
+        tracing::debug!(%error, session_id, "macOS 浮层延迟层级校验失败");
+    }
+}
+
 pub(crate) fn begin_drag(session_id: u64) -> Result<()> {
     with_host(session_id, |host| {
         if host.target.source_kind == CaptureSourceKind::Window {
@@ -103,6 +110,7 @@ fn with_host(
 }
 
 struct OverlayHost {
+    session_id: u64,
     target: OverlayTarget,
     panels: [CornerPanel; 4],
     requested_visible: bool,
@@ -111,11 +119,13 @@ struct OverlayHost {
     last_level: Option<i32>,
     panels_visible: bool,
     dragging: bool,
+    order_verification: OrderVerificationState,
 }
 
 impl OverlayHost {
     fn new(session_id: u64, target: OverlayTarget) -> Result<Self> {
         Ok(Self {
+            session_id,
             target,
             panels: CornerPanel::create_set(session_id)?,
             requested_visible: true,
@@ -124,6 +134,7 @@ impl OverlayHost {
             last_level: None,
             panels_visible: false,
             dragging: false,
+            order_verification: OrderVerificationState::default(),
         })
     }
 
@@ -207,6 +218,31 @@ impl OverlayHost {
             panel.order_above(target_id);
         }
 
+        self.last_frame = Some(geometry.frame);
+        self.last_level = Some(level);
+        self.panels_visible = true;
+        if self.order_verification.request() {
+            schedule_order_verification(self.session_id);
+        }
+        Ok(())
+    }
+
+    fn verify_pending_order(&mut self) -> Result<()> {
+        let Some(generation) = self.order_verification.take_pending() else {
+            return Ok(());
+        };
+        if !self.requested_visible || self.dragging || !self.panels_visible {
+            return Ok(());
+        }
+
+        let target_id = match parse_source_id(&self.target.source_id, "window") {
+            Ok(target_id) => target_id,
+            Err(error) => {
+                self.hide_panels();
+                return Err(error);
+            }
+        };
+        let panel_ids = self.panel_ids();
         let windows = match ordered_windows(target_id, &panel_ids) {
             Ok(windows) => windows,
             Err(error) => {
@@ -214,14 +250,14 @@ impl OverlayHost {
                 return Err(error);
             }
         };
-        if !verify_relative_order(&windows, target_id, &panel_ids) {
-            self.hide_panels();
-            return Err(overlay_error("无法维持目标窗口的相对层级，已隐藏浮层"));
+        if verify_relative_order(&windows, target_id, &panel_ids) {
+            return Ok(());
         }
-        self.last_frame = Some(geometry.frame);
-        self.last_level = Some(level);
-        self.panels_visible = true;
-        Ok(())
+
+        self.hide_panels();
+        Err(overlay_error(format!(
+            "无法维持目标窗口 {target_id} 的相对层级，已隐藏浮层（校验代次 {generation}）"
+        )))
     }
 
     fn apply_frames(&self, target: super::MacRect) {
@@ -231,6 +267,7 @@ impl OverlayHost {
     }
 
     fn hide_panels(&mut self) {
+        self.order_verification.cancel();
         for panel in &self.panels {
             panel.hide();
         }

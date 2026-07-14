@@ -165,6 +165,16 @@ impl EventObservers {
     }
 }
 
+pub(crate) fn schedule_order_verification(session_id: u64) {
+    let block = RcBlock::new(move |_: NonNull<NSTimer>| {
+        super::host::verify_pending_order(session_id);
+    });
+    // SAFETY: The block captures only a numeric session ID and the scheduled timer fires on
+    // the current main RunLoop. The RunLoop retains the one-shot timer until it fires.
+    let _timer =
+        unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.0, false, &block) };
+}
+
 impl Drop for EventObservers {
     fn drop(&mut self) {
         self.correction_timer.invalidate();
