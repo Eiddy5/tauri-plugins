@@ -5,15 +5,9 @@ pub fn is_macos_system_ui(app_name: &str, title: &str) -> bool {
         || matches!(title.as_str(), "dock" | "menu bar")
 }
 
-pub fn macos_window_filtered_reason(
-    is_on_screen: bool,
-    has_owning_application: bool,
-    has_title: bool,
-) -> Option<&'static str> {
+pub fn macos_window_filtered_reason(is_on_screen: bool, has_title: bool) -> Option<&'static str> {
     if !is_on_screen {
         Some("offScreen")
-    } else if !has_owning_application {
-        Some("missingOwner")
     } else if !has_title {
         Some("missingTitle")
     } else {
@@ -27,18 +21,11 @@ mod tests {
 
     #[test]
     fn classifies_non_user_macos_windows() {
+        assert_eq!(macos_window_filtered_reason(false, true), Some("offScreen"));
         assert_eq!(
-            macos_window_filtered_reason(true, false, true),
-            Some("missingOwner")
-        );
-        assert_eq!(
-            macos_window_filtered_reason(false, true, true),
-            Some("offScreen")
-        );
-        assert_eq!(
-            macos_window_filtered_reason(true, true, false),
+            macos_window_filtered_reason(true, false),
             Some("missingTitle")
         );
-        assert_eq!(macos_window_filtered_reason(true, true, true), None);
+        assert_eq!(macos_window_filtered_reason(true, true), None);
     }
 }
