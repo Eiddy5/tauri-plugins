@@ -88,6 +88,15 @@ let panels = panelFrames.map { frame -> NSPanel in
     panel.isOpaque = false
     panel.backgroundColor = .clear
     panel.ignoresMouseEvents = true
+    panel.collectionBehavior = [
+        .canJoinAllSpaces,
+        .fullScreenAuxiliary,
+        .transient,
+        .ignoresCycle,
+    ]
+    precondition(panel.collectionBehavior.contains(.transient))
+    precondition(panel.collectionBehavior.contains(.ignoresCycle))
+    precondition(!panel.collectionBehavior.contains(.stationary))
     panel.order(.above, relativeTo: target.windowNumber)
     return panel
 }
