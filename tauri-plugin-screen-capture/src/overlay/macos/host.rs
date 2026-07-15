@@ -13,8 +13,8 @@ use super::{
     events::{schedule_order_verification, EventObservers},
     needs_native_update,
     panel::CornerPanel,
-    verify_panel_placements, visible_corner_panels,
-    window_info::{display_frame, ordered_windows, window_geometry},
+    verify_lightweight_order, verify_panel_placements, visible_corner_panels,
+    window_info::{display_frame, ordered_windows, visible_window_ids, window_geometry},
     OrderVerificationState, OverlayDecision, WindowFrameAction, WindowFrameTracker,
 };
 
@@ -270,10 +270,25 @@ impl OverlayHost {
             return Ok(());
         }
 
-        match self
+        let mut action = self
             .window_frame_tracker
-            .observe_for_visibility(geometry.frame, self.panels_visible)
-        {
+            .observe_for_visibility(geometry.frame, self.panels_visible);
+        if action == WindowFrameAction::Keep && self.panels_visible {
+            let visible_panel_ids = self
+                .panels
+                .iter()
+                .zip(self.panel_visibility)
+                .filter_map(|(panel, visible)| visible.then_some(panel.window_id()))
+                .collect::<Vec<_>>();
+            let order_valid = visible_window_ids()
+                .map(|window_ids| {
+                    verify_lightweight_order(&window_ids, target_id, &visible_panel_ids)
+                })
+                .unwrap_or(false);
+            action = action.refresh_if_order_invalid(order_valid);
+        }
+
+        match action {
             WindowFrameAction::Keep => Ok(()),
             WindowFrameAction::Hide => {
                 self.hide_panels();

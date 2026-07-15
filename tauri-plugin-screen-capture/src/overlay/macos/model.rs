@@ -312,6 +312,15 @@ pub enum WindowFrameAction {
     Refresh,
 }
 
+impl WindowFrameAction {
+    pub const fn refresh_if_order_invalid(self, relative_order_valid: bool) -> Self {
+        match self {
+            Self::Keep if !relative_order_valid => Self::Refresh,
+            action => action,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WindowFrameTracker {
     last_frame: Option<super::MacRect>,
