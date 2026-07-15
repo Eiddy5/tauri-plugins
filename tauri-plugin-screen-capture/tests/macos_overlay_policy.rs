@@ -4,7 +4,7 @@ use tauri_plugin_screen_capture::overlay::macos::{
     corner_panel_frames, decide_window_overlay, event_action, needs_native_update,
     verify_panel_placements, verify_relative_order, visible_corner_panels, MacRect,
     OrderVerificationState, OrderedWindow, OverlayDecision, OverlayEvent, RefreshAction,
-    WindowSnapshot,
+    WindowFrameAction, WindowFrameTracker, WindowSnapshot, WINDOW_POSITION_POLL_INTERVAL,
 };
 
 fn window(id: u32, layer: i32, order: usize, on_screen: bool) -> WindowSnapshot {
@@ -216,6 +216,20 @@ fn same_owner_sibling_hides_only_the_overlapped_corner() {
 }
 
 #[test]
+fn same_owner_surface_inside_the_transparent_corner_area_keeps_the_corner_visible() {
+    let corners = corner_panel_frames(rect(0.0, 0.0, 100.0, 100.0), 32.0);
+    let transparent_center = rect(10.0, 78.0, 10.0, 10.0);
+    let windows = vec![
+        detailed_panel(11, 0, 9000, corners[0]),
+        detailed_other(7, 0, 42, transparent_center),
+        detailed_target(8, 0, 42, rect(0.0, 0.0, 100.0, 100.0)),
+    ];
+
+    assert_eq!(visible_corner_panels(&windows, 8, &corners), [true; 4]);
+    assert!(verify_panel_placements(&windows, 8, &[(11, corners[0])]));
+}
+
+#[test]
 fn different_owner_window_does_not_change_sibling_visibility() {
     let corners = corner_panel_frames(rect(0.0, 0.0, 100.0, 100.0), 32.0);
     let windows = vec![
@@ -238,21 +252,100 @@ fn touching_sibling_bounds_do_not_occlude_a_corner() {
 }
 
 #[test]
-fn drag_hides_immediately_and_mouse_up_refreshes_once() {
+fn first_window_frame_observation_keeps_the_visible_overlay() {
+    let mut tracker = WindowFrameTracker::default();
     assert_eq!(
-        event_action(OverlayEvent::LeftMouseDragged),
-        RefreshAction::Hide
+        tracker.observe(MacRect {
+            x: 10.0,
+            y: 20.0,
+            width: 800.0,
+            height: 600.0,
+        }),
+        WindowFrameAction::Keep
     );
+}
+
+#[test]
+fn changed_window_frame_hides_the_overlay_until_it_stabilizes() {
+    let initial = MacRect {
+        x: 10.0,
+        y: 20.0,
+        width: 800.0,
+        height: 600.0,
+    };
+    let moved = MacRect {
+        x: 30.0,
+        y: 40.0,
+        width: 900.0,
+        height: 700.0,
+    };
+    let mut tracker = WindowFrameTracker::default();
+
+    assert!(!tracker.is_moving());
+    assert_eq!(tracker.observe(initial), WindowFrameAction::Keep);
+    assert_eq!(tracker.observe(moved), WindowFrameAction::Hide);
+    assert!(tracker.is_moving());
+    assert_eq!(tracker.observe(moved), WindowFrameAction::Refresh);
+    assert!(!tracker.is_moving());
+    assert_eq!(tracker.observe(moved), WindowFrameAction::Keep);
+}
+
+#[test]
+fn every_new_frame_keeps_the_overlay_hidden_during_continuous_motion() {
+    let mut tracker = WindowFrameTracker::default();
+    let frame = |x| MacRect {
+        x,
+        y: 20.0,
+        width: 800.0,
+        height: 600.0,
+    };
+
+    assert_eq!(tracker.observe(frame(10.0)), WindowFrameAction::Keep);
+    assert_eq!(tracker.observe(frame(20.0)), WindowFrameAction::Hide);
+    assert_eq!(tracker.observe(frame(30.0)), WindowFrameAction::Hide);
+    assert_eq!(tracker.observe(frame(40.0)), WindowFrameAction::Hide);
+    assert_eq!(tracker.observe(frame(40.0)), WindowFrameAction::Refresh);
+}
+
+#[test]
+fn explicit_refresh_synchronizes_the_tracker_without_a_second_hide() {
+    let frame = |x| MacRect {
+        x,
+        y: 20.0,
+        width: 800.0,
+        height: 600.0,
+    };
+    let mut tracker = WindowFrameTracker::default();
+
+    assert_eq!(tracker.observe(frame(10.0)), WindowFrameAction::Keep);
+    assert_eq!(tracker.observe(frame(20.0)), WindowFrameAction::Hide);
+
+    tracker.synchronize(frame(20.0));
+
+    assert_eq!(tracker.observe(frame(20.0)), WindowFrameAction::Keep);
+}
+
+#[test]
+fn stable_frame_refreshes_when_the_overlay_was_hidden_for_minimize() {
+    let frame = MacRect {
+        x: 10.0,
+        y: 20.0,
+        width: 800.0,
+        height: 600.0,
+    };
+    let mut tracker = WindowFrameTracker::default();
+
+    tracker.synchronize(frame);
+
     assert_eq!(
-        event_action(OverlayEvent::LeftMouseUp),
-        RefreshAction::Refresh
+        tracker.observe_for_visibility(frame, false),
+        WindowFrameAction::Refresh
     );
 }
 
 #[test]
 fn workspace_and_display_changes_trigger_refresh() {
     for event in [
-        OverlayEvent::ApplicationActivated,
         OverlayEvent::ApplicationHidden,
         OverlayEvent::ApplicationTerminated,
         OverlayEvent::ActiveSpaceChanged,
@@ -261,6 +354,26 @@ fn workspace_and_display_changes_trigger_refresh() {
     ] {
         assert_eq!(event_action(event), RefreshAction::Refresh);
     }
+}
+
+#[test]
+fn application_activation_waits_for_window_server_ordering() {
+    assert_eq!(
+        event_action(OverlayEvent::ApplicationActivated),
+        RefreshAction::RefreshAfterWindowOrdering
+    );
+}
+
+#[test]
+fn window_position_timer_is_handled_by_target_frame_tracking() {
+    assert_eq!(
+        WINDOW_POSITION_POLL_INTERVAL,
+        std::time::Duration::from_millis(100)
+    );
+    assert_eq!(
+        event_action(OverlayEvent::WindowPositionTimer),
+        RefreshAction::TrackWindowFrame
+    );
 }
 
 #[test]

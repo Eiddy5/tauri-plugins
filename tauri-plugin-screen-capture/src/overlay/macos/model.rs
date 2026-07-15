@@ -151,11 +151,12 @@ pub fn visible_corner_panels(
     let Some(target_owner_pid) = target.owner_pid else {
         return [false; 4];
     };
-    if !target.frame.is_some_and(MacRect::is_valid) {
+    let Some(target_frame) = target.frame.filter(|frame| frame.is_valid()) else {
         return [false; 4];
-    }
+    };
 
     panel_frames.map(|panel_frame| {
+        let painted_segments = corner_painted_segments(target_frame, panel_frame);
         panel_frame.is_valid()
             && windows[..target_index].iter().all(|window| {
                 if window.kind != OrderedWindowKind::Other
@@ -164,9 +165,11 @@ pub fn visible_corner_panels(
                 {
                     return true;
                 }
-                window
-                    .frame
-                    .is_some_and(|frame| !rects_intersect(frame, panel_frame))
+                window.frame.is_some_and(|frame| {
+                    painted_segments
+                        .iter()
+                        .all(|segment| !rects_intersect(frame, *segment))
+                })
             })
     })
 }
@@ -186,12 +189,13 @@ pub fn verify_panel_placements(
     let Some(target_owner_pid) = target.owner_pid else {
         return false;
     };
-    if !target.frame.is_some_and(MacRect::is_valid)
-        || windows.iter().any(|window| {
-            window.kind == OrderedWindowKind::Panel
-                && !panels.iter().any(|(panel_id, _)| *panel_id == window.id)
-        })
-    {
+    let Some(target_frame) = target.frame.filter(|frame| frame.is_valid()) else {
+        return false;
+    };
+    if windows.iter().any(|window| {
+        window.kind == OrderedWindowKind::Panel
+            && !panels.iter().any(|(panel_id, _)| *panel_id == window.id)
+    }) {
         return false;
     }
 
@@ -199,6 +203,7 @@ pub fn verify_panel_placements(
         if !panel_frame.is_valid() {
             return false;
         }
+        let painted_segments = corner_painted_segments(target_frame, *panel_frame);
         let Some(panel_index) = windows
             .iter()
             .position(|window| window.id == *panel_id && window.kind == OrderedWindowKind::Panel)
@@ -221,13 +226,46 @@ pub fn verify_panel_placements(
                 OrderedWindowKind::Other => {
                     window.layer == target.layer
                         && window.owner_pid == Some(target_owner_pid)
-                        && window
-                            .frame
-                            .is_some_and(|frame| !rects_intersect(frame, *panel_frame))
+                        && window.frame.is_some_and(|frame| {
+                            painted_segments
+                                .iter()
+                                .all(|segment| !rects_intersect(frame, *segment))
+                        })
                 }
                 OrderedWindowKind::Target => false,
             })
     })
+}
+
+fn corner_painted_segments(target: MacRect, panel: MacRect) -> [MacRect; 2] {
+    let thickness = 4.0_f64.min(panel.width).min(panel.height);
+    let on_top = panel.y > target.y;
+    let on_right = panel.x > target.x;
+    let horizontal_y = if on_top {
+        panel.y + panel.height - thickness
+    } else {
+        panel.y
+    };
+    let vertical_x = if on_right {
+        panel.x + panel.width - thickness
+    } else {
+        panel.x
+    };
+
+    [
+        MacRect {
+            x: panel.x,
+            y: horizontal_y,
+            width: panel.width,
+            height: thickness,
+        },
+        MacRect {
+            x: vertical_x,
+            y: panel.y,
+            width: thickness,
+            height: panel.height,
+        },
+    ]
 }
 
 fn rects_intersect(first: MacRect, second: MacRect) -> bool {
@@ -245,6 +283,56 @@ pub const fn needs_native_update(
     relative_order_valid: bool,
 ) -> bool {
     !panels_visible || bounds_changed || !relative_order_valid
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WindowFrameAction {
+    Keep,
+    Hide,
+    Refresh,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WindowFrameTracker {
+    last_frame: Option<super::MacRect>,
+    moving: bool,
+}
+
+impl WindowFrameTracker {
+    pub const fn is_moving(&self) -> bool {
+        self.moving
+    }
+
+    pub fn synchronize(&mut self, frame: super::MacRect) {
+        self.last_frame = Some(frame);
+        self.moving = false;
+    }
+
+    pub fn observe(&mut self, frame: super::MacRect) -> WindowFrameAction {
+        let Some(last_frame) = self.last_frame.replace(frame) else {
+            return WindowFrameAction::Keep;
+        };
+        if last_frame != frame {
+            self.moving = true;
+            return WindowFrameAction::Hide;
+        }
+        if self.moving {
+            self.moving = false;
+            return WindowFrameAction::Refresh;
+        }
+        WindowFrameAction::Keep
+    }
+
+    pub fn observe_for_visibility(
+        &mut self,
+        frame: super::MacRect,
+        overlay_visible: bool,
+    ) -> WindowFrameAction {
+        match self.observe(frame) {
+            WindowFrameAction::Keep if !overlay_visible => WindowFrameAction::Refresh,
+            action => action,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

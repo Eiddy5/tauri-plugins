@@ -1,4 +1,4 @@
-use std::ptr::NonNull;
+use std::{ptr::NonNull, time::Duration};
 
 use block2::RcBlock;
 use objc2::{
@@ -7,22 +7,20 @@ use objc2::{
     MainThreadMarker,
 };
 use objc2_app_kit::{
-    NSApplicationDidChangeScreenParametersNotification, NSEvent, NSEventMask, NSEventType,
-    NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification,
-    NSWorkspaceDidActivateApplicationNotification, NSWorkspaceDidHideApplicationNotification,
-    NSWorkspaceDidTerminateApplicationNotification, NSWorkspaceDidWakeNotification,
-    NSWorkspaceWillSleepNotification,
+    NSApplicationDidChangeScreenParametersNotification, NSWorkspace,
+    NSWorkspaceActiveSpaceDidChangeNotification, NSWorkspaceDidActivateApplicationNotification,
+    NSWorkspaceDidHideApplicationNotification, NSWorkspaceDidTerminateApplicationNotification,
+    NSWorkspaceDidWakeNotification, NSWorkspaceWillSleepNotification,
 };
 use objc2_foundation::{
     NSDate, NSNotification, NSNotificationCenter, NSNotificationName, NSObjectProtocol, NSTimer,
 };
 
-use crate::{models::CaptureErrorCode, Error, Result};
+use crate::Result;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OverlayEvent {
-    LeftMouseDragged,
-    LeftMouseUp,
+    WindowPositionTimer,
     ApplicationActivated,
     ApplicationHidden,
     ApplicationTerminated,
@@ -37,14 +35,16 @@ pub enum OverlayEvent {
 pub enum RefreshAction {
     Hide,
     Refresh,
+    RefreshAfterWindowOrdering,
+    TrackWindowFrame,
 }
 
 pub const fn event_action(event: OverlayEvent) -> RefreshAction {
     match event {
-        OverlayEvent::LeftMouseDragged | OverlayEvent::SystemWillSleep => RefreshAction::Hide,
-        OverlayEvent::LeftMouseUp
-        | OverlayEvent::ApplicationActivated
-        | OverlayEvent::ApplicationHidden
+        OverlayEvent::SystemWillSleep => RefreshAction::Hide,
+        OverlayEvent::WindowPositionTimer => RefreshAction::TrackWindowFrame,
+        OverlayEvent::ApplicationActivated => RefreshAction::RefreshAfterWindowOrdering,
+        OverlayEvent::ApplicationHidden
         | OverlayEvent::ApplicationTerminated
         | OverlayEvent::ActiveSpaceChanged
         | OverlayEvent::ScreenParametersChanged
@@ -53,9 +53,12 @@ pub const fn event_action(event: OverlayEvent) -> RefreshAction {
     }
 }
 
+pub const WINDOW_POSITION_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const CORRECTION_INTERVAL: Duration = Duration::from_secs(2);
+
 pub(crate) struct EventObservers {
-    event_monitors: Vec<Retained<objc2::runtime::AnyObject>>,
     notification_tokens: Vec<NotificationToken>,
+    position_timer: Option<Retained<NSTimer>>,
     correction_timer: Retained<NSTimer>,
 }
 
@@ -65,33 +68,7 @@ struct NotificationToken {
 }
 
 impl EventObservers {
-    pub(crate) fn new(session_id: u64) -> Result<Self> {
-        let mask = NSEventMask::LeftMouseDragged | NSEventMask::LeftMouseUp;
-        let global_block = RcBlock::new(move |event: NonNull<NSEvent>| {
-            dispatch_mouse_event(session_id, event);
-        });
-        let global = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &global_block);
-
-        let local_block = RcBlock::new(move |event: NonNull<NSEvent>| {
-            dispatch_mouse_event(session_id, event);
-            event.as_ptr()
-        });
-        // SAFETY: Returning the same live event pointer preserves AppKit's local monitor contract.
-        let local =
-            unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &local_block) };
-        if global.is_none() || local.is_none() {
-            for monitor in global.iter().chain(local.iter()) {
-                // SAFETY: The object was returned by an NSEvent monitor API above.
-                unsafe { NSEvent::removeMonitor(monitor) };
-            }
-            return Err(Error::new(
-                CaptureErrorCode::Internal,
-                "无法安装 macOS 浮层鼠标事件监听器",
-                true,
-            ));
-        }
-        let event_monitors = global.into_iter().chain(local).collect();
-
+    pub(crate) fn new(session_id: u64, track_window_frame: bool) -> Result<Self> {
         let workspace_center = NSWorkspace::sharedWorkspace().notificationCenter();
         let default_center = NSNotificationCenter::defaultCenter();
         let notification_tokens = vec![
@@ -139,29 +116,57 @@ impl EventObservers {
             ),
         ];
 
-        let timer_block = RcBlock::new(move |_: NonNull<NSTimer>| {
+        let position_timer = track_window_frame.then(|| {
+            let block = RcBlock::new(move |_: NonNull<NSTimer>| {
+                dispatch(session_id, OverlayEvent::WindowPositionTimer);
+            });
+            // SAFETY: The block captures only a numeric session ID and runs on the main run loop.
+            let timer = unsafe {
+                NSTimer::scheduledTimerWithTimeInterval_repeats_block(
+                    WINDOW_POSITION_POLL_INTERVAL.as_secs_f64(),
+                    true,
+                    &block,
+                )
+            };
+            timer.setTolerance(0.01);
+            timer
+        });
+
+        let correction_block = RcBlock::new(move |_: NonNull<NSTimer>| {
             dispatch(session_id, OverlayEvent::CorrectionTimer);
         });
         // SAFETY: The block captures only a numeric session ID and runs on the main run loop.
         let correction_timer = unsafe {
-            NSTimer::scheduledTimerWithTimeInterval_repeats_block(2.0, true, &timer_block)
+            NSTimer::scheduledTimerWithTimeInterval_repeats_block(
+                CORRECTION_INTERVAL.as_secs_f64(),
+                true,
+                &correction_block,
+            )
         };
         correction_timer.setTolerance(0.5);
 
         Ok(Self {
-            event_monitors,
             notification_tokens,
+            position_timer,
             correction_timer,
         })
     }
 
-    pub(crate) fn set_correction_paused(&self, paused: bool) {
-        let next_fire = if paused {
+    pub(crate) fn set_paused(&self, paused: bool) {
+        let correction_fire = if paused {
             NSDate::distantFuture()
         } else {
-            NSDate::dateWithTimeIntervalSinceNow(2.0)
+            NSDate::dateWithTimeIntervalSinceNow(CORRECTION_INTERVAL.as_secs_f64())
         };
-        self.correction_timer.setFireDate(&next_fire);
+        self.correction_timer.setFireDate(&correction_fire);
+        if let Some(timer) = &self.position_timer {
+            let position_fire = if paused {
+                NSDate::distantFuture()
+            } else {
+                NSDate::dateWithTimeIntervalSinceNow(WINDOW_POSITION_POLL_INTERVAL.as_secs_f64())
+            };
+            timer.setFireDate(&position_fire);
+        }
     }
 }
 
@@ -175,13 +180,24 @@ pub(crate) fn schedule_order_verification(session_id: u64, generation: u64) {
         unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.0, false, &block) };
 }
 
+fn schedule_refresh_after_window_ordering(session_id: u64) {
+    let block = RcBlock::new(move |_: NonNull<NSTimer>| {
+        if let Err(error) = super::host::refresh(session_id) {
+            tracing::debug!(%error, session_id, "macOS 浮层聚焦后刷新失败");
+        }
+    });
+    // SAFETY: A zero-delay one-shot runs on the next main RunLoop turn, after AppKit finishes
+    // committing the activation event's Window Server ordering transaction.
+    let _timer =
+        unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.0, false, &block) };
+}
+
 impl Drop for EventObservers {
     fn drop(&mut self) {
-        self.correction_timer.invalidate();
-        for monitor in &self.event_monitors {
-            // SAFETY: Every object in event_monitors was returned by an NSEvent monitor API.
-            unsafe { NSEvent::removeMonitor(monitor) };
+        if let Some(timer) = &self.position_timer {
+            timer.invalidate();
         }
+        self.correction_timer.invalidate();
         for observer in &self.notification_tokens {
             let token: &ProtocolObject<dyn NSObjectProtocol> = &observer.token;
             let token: &AnyObject = token.as_ref();
@@ -208,28 +224,18 @@ fn observe(
     }
 }
 
-fn dispatch_mouse_event(session_id: u64, event: NonNull<NSEvent>) {
-    // SAFETY: AppKit guarantees the monitor callback's event pointer for the callback duration.
-    let event_type = unsafe { event.as_ref() }.r#type();
-    let event = if event_type == NSEventType::LeftMouseDragged {
-        OverlayEvent::LeftMouseDragged
-    } else {
-        OverlayEvent::LeftMouseUp
-    };
-    dispatch(session_id, event);
-}
-
 fn dispatch(session_id: u64, event: OverlayEvent) {
     if MainThreadMarker::new().is_none() {
         return;
     }
-    let result = match event {
-        OverlayEvent::LeftMouseDragged => super::host::begin_drag(session_id),
-        OverlayEvent::LeftMouseUp => super::host::end_drag(session_id),
-        _ => match event_action(event) {
-            RefreshAction::Hide => super::host::hide_transient(session_id),
-            RefreshAction::Refresh => super::host::refresh(session_id),
-        },
+    let result = match event_action(event) {
+        RefreshAction::Hide => super::host::hide_transient(session_id),
+        RefreshAction::Refresh => super::host::refresh(session_id),
+        RefreshAction::RefreshAfterWindowOrdering => {
+            schedule_refresh_after_window_ordering(session_id);
+            Ok(())
+        }
+        RefreshAction::TrackWindowFrame => super::host::track_window_frame(session_id),
     };
     if let Err(error) = result {
         tracing::debug!(%error, session_id, ?event, "macOS 浮层事件刷新失败");

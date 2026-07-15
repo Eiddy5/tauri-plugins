@@ -15,7 +15,7 @@ use super::{
     panel::CornerPanel,
     verify_panel_placements, visible_corner_panels,
     window_info::{display_frame, ordered_windows, window_geometry},
-    OrderVerificationState, OverlayDecision,
+    OrderVerificationState, OverlayDecision, WindowFrameAction, WindowFrameTracker,
 };
 
 thread_local! {
@@ -37,7 +37,7 @@ pub(crate) fn start(session_id: u64, target: OverlayTarget) -> Result<()> {
 pub(crate) fn show(session_id: u64) -> Result<()> {
     with_host(session_id, |host| {
         host.requested_visible = true;
-        host.observers.set_correction_paused(host.dragging);
+        host.observers.set_paused(false);
         host.refresh()
     })
 }
@@ -45,7 +45,7 @@ pub(crate) fn show(session_id: u64) -> Result<()> {
 pub(crate) fn hide(session_id: u64) -> Result<()> {
     with_host(session_id, |host| {
         host.requested_visible = false;
-        host.observers.set_correction_paused(true);
+        host.observers.set_paused(true);
         host.hide_panels();
         Ok(())
     })
@@ -60,6 +60,10 @@ pub(crate) fn hide_transient(session_id: u64) -> Result<()> {
         host.hide_panels();
         Ok(())
     })
+}
+
+pub(crate) fn track_window_frame(session_id: u64) -> Result<()> {
+    with_host(session_id, OverlayHost::track_window_frame)
 }
 
 pub(crate) fn verify_pending_order(session_id: u64, generation: u64) {
@@ -77,29 +81,6 @@ pub(crate) fn verify_pending_order(session_id: u64, generation: u64) {
         }
         result
     });
-}
-
-pub(crate) fn begin_drag(session_id: u64) -> Result<()> {
-    with_host(session_id, |host| {
-        if host.target.source_kind == CaptureSourceKind::Window {
-            host.dragging = true;
-            host.observers.set_correction_paused(true);
-            host.hide_panels();
-        }
-        Ok(())
-    })
-}
-
-pub(crate) fn end_drag(session_id: u64) -> Result<()> {
-    with_host(session_id, |host| {
-        if host.target.source_kind == CaptureSourceKind::Window {
-            host.dragging = false;
-            host.observers
-                .set_correction_paused(!host.requested_visible);
-            return host.refresh();
-        }
-        Ok(())
-    })
 }
 
 pub(crate) fn stop(session_id: u64) -> Result<()> {
@@ -129,29 +110,33 @@ struct OverlayHost {
     last_level: Option<i32>,
     panels_visible: bool,
     panel_visibility: [bool; 4],
-    dragging: bool,
+    window_frame_tracker: WindowFrameTracker,
     order_verification: OrderVerificationState,
 }
 
 impl OverlayHost {
     fn new(session_id: u64, target: OverlayTarget) -> Result<Self> {
+        let track_window_frame = target.source_kind == CaptureSourceKind::Window;
         Ok(Self {
             session_id,
             target,
             panels: CornerPanel::create_set(session_id)?,
             requested_visible: true,
-            observers: EventObservers::new(session_id)?,
+            observers: EventObservers::new(session_id, track_window_frame)?,
             last_frame: None,
             last_level: None,
             panels_visible: false,
             panel_visibility: [false; 4],
-            dragging: false,
+            window_frame_tracker: WindowFrameTracker::default(),
             order_verification: OrderVerificationState::default(),
         })
     }
 
     fn refresh(&mut self) -> Result<()> {
-        if !self.requested_visible || self.dragging {
+        if !self.requested_visible
+            || (self.target.source_kind == CaptureSourceKind::Window
+                && self.window_frame_tracker.is_moving())
+        {
             self.hide_panels();
             return Ok(());
         }
@@ -204,6 +189,14 @@ impl OverlayHost {
                 return Err(error);
             }
         };
+        self.refresh_window_geometry(target_id, geometry)
+    }
+
+    fn refresh_window_geometry(
+        &mut self,
+        target_id: u32,
+        geometry: super::window_info::WindowGeometry,
+    ) -> Result<()> {
         let OverlayDecision::Show { level, .. } = decide_window_overlay(&geometry.snapshot, true)
         else {
             self.hide_panels();
@@ -232,6 +225,7 @@ impl OverlayHost {
             || self.last_level != Some(level)
             || self.panel_visibility != panel_visibility;
         if !needs_native_update(self.panels_visible, bounds_changed, order_valid) {
+            self.window_frame_tracker.synchronize(geometry.frame);
             return Ok(());
         }
 
@@ -249,16 +243,51 @@ impl OverlayHost {
         self.last_level = Some(level);
         self.panels_visible = true;
         self.panel_visibility = panel_visibility;
+        self.window_frame_tracker.synchronize(geometry.frame);
         let generation = self.order_verification.request();
         schedule_order_verification(self.session_id, generation);
         Ok(())
+    }
+
+    fn track_window_frame(&mut self) -> Result<()> {
+        if self.target.source_kind != CaptureSourceKind::Window || !self.requested_visible {
+            return Ok(());
+        }
+        let target_id = parse_source_id(&self.target.source_id, "window")?;
+        let geometry = match window_geometry(target_id) {
+            Ok(Some(geometry)) => geometry,
+            Ok(None) => {
+                self.hide_panels();
+                return Ok(());
+            }
+            Err(error) => {
+                self.hide_panels();
+                return Err(error);
+            }
+        };
+        if decide_window_overlay(&geometry.snapshot, true) == OverlayDecision::Hide {
+            self.hide_panels();
+            return Ok(());
+        }
+
+        match self
+            .window_frame_tracker
+            .observe_for_visibility(geometry.frame, self.panels_visible)
+        {
+            WindowFrameAction::Keep => Ok(()),
+            WindowFrameAction::Hide => {
+                self.hide_panels();
+                Ok(())
+            }
+            WindowFrameAction::Refresh => self.refresh_window_geometry(target_id, geometry),
+        }
     }
 
     fn verify_pending_order(&mut self, generation: u64) -> Result<()> {
         if !self.order_verification.take_if_current(generation) {
             return Ok(());
         }
-        if !self.requested_visible || self.dragging || !self.panels_visible {
+        if !self.requested_visible || !self.panels_visible {
             return Ok(());
         }
 
