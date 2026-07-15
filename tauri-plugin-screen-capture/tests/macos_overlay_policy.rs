@@ -2,9 +2,10 @@
 
 use tauri_plugin_screen_capture::overlay::macos::{
     corner_panel_frames, decide_window_overlay, event_action, needs_native_update,
-    verify_panel_placements, verify_relative_order, visible_corner_panels, MacRect,
-    OrderVerificationState, OrderedWindow, OverlayDecision, OverlayEvent, RefreshAction,
-    WindowFrameAction, WindowFrameTracker, WindowSnapshot, WINDOW_POSITION_POLL_INTERVAL,
+    verify_lightweight_order, verify_panel_placements, verify_relative_order,
+    visible_corner_panels, MacRect, OrderVerificationState, OrderedWindow, OverlayDecision,
+    OverlayEvent, RefreshAction, WindowFrameAction, WindowFrameTracker, WindowSnapshot,
+    WINDOW_POSITION_POLL_INTERVAL,
 };
 
 fn window(id: u32, layer: i32, order: usize, on_screen: bool) -> WindowSnapshot {
@@ -176,6 +177,44 @@ fn verification_rejects_panel_on_a_different_window_server_layer() {
     ];
 
     assert!(!verify_relative_order(&windows, 42, &[11, 12, 13, 14]));
+}
+
+#[test]
+fn lightweight_order_accepts_a_contiguous_panel_group_immediately_above_target() {
+    assert!(verify_lightweight_order(
+        &[90, 13, 12, 11, 42, 7],
+        42,
+        &[11, 12, 13]
+    ));
+}
+
+#[test]
+fn lightweight_order_rejects_target_reordered_above_panels() {
+    assert!(!verify_lightweight_order(
+        &[90, 42, 13, 12, 11, 7],
+        42,
+        &[11, 12, 13]
+    ));
+}
+
+#[test]
+fn lightweight_order_rejects_an_intervening_window_or_missing_visible_panel() {
+    assert!(!verify_lightweight_order(
+        &[90, 13, 77, 12, 11, 42, 7],
+        42,
+        &[11, 12, 13]
+    ));
+    assert!(!verify_lightweight_order(
+        &[90, 13, 11, 42, 7],
+        42,
+        &[11, 12, 13]
+    ));
+}
+
+#[test]
+fn lightweight_order_allows_panels_hidden_by_visibility_policy() {
+    assert!(verify_lightweight_order(&[90, 42, 7], 42, &[]));
+    assert!(verify_lightweight_order(&[90, 13, 42, 7], 42, &[13]));
 }
 
 #[test]
