@@ -305,6 +305,22 @@ fn first_window_frame_observation_keeps_the_visible_overlay() {
 }
 
 #[test]
+fn stable_frame_escalates_to_refresh_when_lightweight_order_is_invalid() {
+    assert_eq!(
+        WindowFrameAction::Keep.refresh_if_order_invalid(false),
+        WindowFrameAction::Refresh
+    );
+    assert_eq!(
+        WindowFrameAction::Keep.refresh_if_order_invalid(true),
+        WindowFrameAction::Keep
+    );
+    assert_eq!(
+        WindowFrameAction::Hide.refresh_if_order_invalid(false),
+        WindowFrameAction::Hide
+    );
+}
+
+#[test]
 fn changed_window_frame_hides_the_overlay_until_it_stabilizes() {
     let initial = MacRect {
         x: 10.0,
