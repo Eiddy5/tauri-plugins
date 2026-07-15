@@ -1,12 +1,12 @@
 use objc2::MainThreadMarker;
 use objc2_app_kit::NSScreen;
 use objc2_core_foundation::{
-    CFBoolean, CFDictionary, CFNumber, CFString, CFType, CGRect, ConcreteType,
+    CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGRect, ConcreteType,
 };
 use objc2_core_graphics::{
     kCGNullWindowID, kCGWindowBounds, kCGWindowIsOnscreen, kCGWindowLayer, kCGWindowNumber,
     kCGWindowOwnerPID, CGDisplayBounds, CGMainDisplayID, CGRectMakeWithDictionaryRepresentation,
-    CGWindowListCopyWindowInfo, CGWindowListOption,
+    CGWindowListCopyWindowInfo, CGWindowListCreateDescriptionFromArray, CGWindowListOption,
 };
 use objc2_foundation::{NSNumber, NSString};
 
@@ -51,31 +51,59 @@ fn display_frame_from_candidates(
 }
 
 pub(crate) fn window_geometry(window_id: u32) -> Result<Option<WindowGeometry>> {
-    let rows = window_rows(CGWindowListOption::OptionAll)?;
-    Ok(rows.into_iter().enumerate().find_map(|(order, row)| {
-        let id = number(&row, unsafe { kCGWindowNumber })?.as_i64()? as u32;
-        if id != window_id {
-            return None;
-        }
-        let layer = number(&row, unsafe { kCGWindowLayer })?.as_i64()? as i32;
-        let on_screen = boolean(&row, unsafe { kCGWindowIsOnscreen })
-            .map(CFBoolean::as_bool)
-            .unwrap_or(false);
-        let frame = appkit_rect(bounds(&row)?);
-        if !frame.is_valid() {
-            return None;
-        }
-        Some(WindowGeometry {
-            snapshot: WindowSnapshot {
-                id,
-                layer,
-                order,
-                on_screen,
-                minimized: !on_screen,
-            },
-            frame,
-        })
+    let Some(row) = window_row(window_id)? else {
+        return Ok(None);
+    };
+    let Some(id) = number(&row, unsafe { kCGWindowNumber })
+        .and_then(CFNumber::as_i64)
+        .map(|id| id as u32)
+    else {
+        return Ok(None);
+    };
+    let Some(layer) = number(&row, unsafe { kCGWindowLayer })
+        .and_then(CFNumber::as_i64)
+        .map(|layer| layer as i32)
+    else {
+        return Ok(None);
+    };
+    let on_screen = boolean(&row, unsafe { kCGWindowIsOnscreen })
+        .map(CFBoolean::as_bool)
+        .unwrap_or(false);
+    let Some(frame) = bounds(&row)
+        .map(appkit_rect)
+        .filter(|frame| frame.is_valid())
+    else {
+        return Ok(None);
+    };
+
+    Ok(Some(WindowGeometry {
+        snapshot: WindowSnapshot {
+            id,
+            layer,
+            // A targeted description does not contain global Z-order. Full order is read only
+            // by ordered_windows() during the slower correction/reposition path.
+            order: 0,
+            on_screen,
+            minimized: !on_screen,
+        },
+        frame,
     }))
+}
+
+type WindowRow = CFRetained<CFDictionary<CFString, CFType>>;
+
+fn window_row(window_id: u32) -> Result<Option<WindowRow>> {
+    let window_id = CFNumber::new_i64(i64::from(window_id));
+    let window_ids = CFArray::from_objects(&[&*window_id]);
+    let typed_window_ids: &CFArray<CFNumber> = &window_ids;
+    let opaque_window_ids: &CFArray = typed_window_ids.as_ref();
+    // SAFETY: window_ids contains only CFNumber values representing CGWindowID values, exactly
+    // as required by CGWindowListCreateDescriptionFromArray.
+    let rows = unsafe { CGWindowListCreateDescriptionFromArray(Some(opaque_window_ids)) }
+        .ok_or_else(|| Error::new(CaptureErrorCode::Internal, "无法读取 macOS 目标窗口", true))?;
+    // SAFETY: CoreGraphics documents every returned array element as a window dictionary.
+    let rows = unsafe { rows.cast_unchecked::<CFDictionary<CFString, CFType>>() };
+    Ok(rows.iter().next())
 }
 
 pub(crate) fn ordered_windows(target_id: u32, panel_ids: &[u32]) -> Result<Vec<OrderedWindow>> {
@@ -112,9 +140,7 @@ fn ordered_window_from_fields(
     window.with_owner_pid(owner_pid).with_frame(frame)
 }
 
-fn window_rows(
-    option: CGWindowListOption,
-) -> Result<Vec<objc2_core_foundation::CFRetained<CFDictionary<CFString, CFType>>>> {
+fn window_rows(option: CGWindowListOption) -> Result<Vec<WindowRow>> {
     let rows = CGWindowListCopyWindowInfo(option, kCGNullWindowID)
         .ok_or_else(|| Error::new(CaptureErrorCode::Internal, "无法读取 macOS 窗口层级", true))?;
     // SAFETY: CGWindowListCopyWindowInfo documents every array element as a CFDictionary
@@ -219,5 +245,10 @@ mod tests {
             visible_corner_panels(&windows, 8, &corners),
             [false, true, true, true]
         );
+    }
+
+    #[test]
+    fn targeted_window_query_returns_no_row_for_an_invalid_id() {
+        assert!(window_row(u32::MAX).unwrap().is_none());
     }
 }

@@ -382,7 +382,9 @@ git add src/overlay/macos/mod.rs src/overlay/macos/window_info.rs src/overlay/ma
 git commit -m "feat: 实现 macOS 浮层边界与相对层级"
 ```
 
-### Task 5: 用事件驱动保持拖动、焦点与空间状态同步
+### Task 5: 用目标窗口采样保持移动、焦点与空间状态同步
+
+> 2026-07-15 调整：不再安装全局/本地鼠标 monitor。窗口几何以 100 ms 的目标 `CGWindowID` 精确查询驱动，首次变化隐藏、首次稳定样本恢复；2 秒 timer 只负责完整 Z-order 纠偏。
 
 **Files:**
 - Create: `src/overlay/macos/events.rs`
@@ -393,18 +395,29 @@ git commit -m "feat: 实现 macOS 浮层边界与相对层级"
 - [ ] **Step 1: 写失败测试**
 
 ```rust
-use tauri_plugin_screen_capture::overlay::macos::{event_action, OverlayEvent, RefreshAction};
+use tauri_plugin_screen_capture::overlay::macos::{
+    event_action, OverlayEvent, RefreshAction, WindowFrameAction, WindowFrameTracker,
+};
 
 #[test]
-fn drag_hides_immediately_and_mouse_up_refreshes_once() {
-    assert_eq!(event_action(OverlayEvent::LeftMouseDragged), RefreshAction::Hide);
-    assert_eq!(event_action(OverlayEvent::LeftMouseUp), RefreshAction::Refresh);
+fn window_position_timer_tracks_only_the_target_frame() {
+    assert_eq!(
+        event_action(OverlayEvent::WindowPositionTimer),
+        RefreshAction::TrackWindowFrame,
+    );
+}
+
+#[test]
+fn changed_frame_hides_until_the_first_stable_sample() {
+    let mut tracker = WindowFrameTracker::default();
+    assert_eq!(tracker.observe(initial), WindowFrameAction::Keep);
+    assert_eq!(tracker.observe(moved), WindowFrameAction::Hide);
+    assert_eq!(tracker.observe(moved), WindowFrameAction::Refresh);
 }
 
 #[test]
 fn workspace_and_display_changes_trigger_refresh() {
     for event in [
-        OverlayEvent::ApplicationActivated,
         OverlayEvent::ApplicationHidden,
         OverlayEvent::ApplicationTerminated,
         OverlayEvent::ActiveSpaceChanged,
@@ -413,6 +426,14 @@ fn workspace_and_display_changes_trigger_refresh() {
     ] {
         assert_eq!(event_action(event), RefreshAction::Refresh);
     }
+}
+
+#[test]
+fn application_activation_waits_for_window_server_ordering() {
+    assert_eq!(
+        event_action(OverlayEvent::ApplicationActivated),
+        RefreshAction::RefreshAfterWindowOrdering,
+    );
 }
 ```
 
@@ -424,7 +445,7 @@ Expected: FAIL，提示事件类型未定义。
 
 - [ ] **Step 3: 实现事件监听**
 
-全局与本地 `NSEvent` monitor 监听 `LeftMouseDragged | LeftMouseUp`；拖动先 `orderOut`，抬起统一刷新。`NSWorkspace.notificationCenter` 监听应用激活、隐藏、终止、活动 Space 变化、睡眠与唤醒；`NSNotificationCenter.defaultCenter` 监听 `NSApplicationDidChangeScreenParametersNotification`。
+窗口会话创建一个 100 ms `NSTimer`，通过 `CGWindowListCreateDescriptionFromArray` 只查询目标窗口。frame 首次变化时 `orderOut`；连续变化保持隐藏；首次稳定样本统一刷新几何和 Z-order。`NSWorkspace.notificationCenter` 监听应用激活、隐藏、终止、活动 Space 变化、睡眠与唤醒；应用激活安排到下一轮主 RunLoop 再刷新，避免抢在 Window Server 最终排序之前。`NSNotificationCenter.defaultCenter` 监听 `NSApplicationDidChangeScreenParametersNotification`。
 
 每个回调只调用：
 
@@ -432,11 +453,12 @@ Expected: FAIL，提示事件类型未定义。
 match event_action(event) {
     RefreshAction::Hide => registry_hide(session_id),
     RefreshAction::Refresh => registry_refresh(session_id),
-    RefreshAction::None => {}
+    RefreshAction::RefreshAfterWindowOrdering => schedule_refresh_after_window_ordering(session_id),
+    RefreshAction::TrackWindowFrame => registry_track_window_frame(session_id),
 }
 ```
 
-监听 token 保存在 `EventObservers`，Drop/stop 时逐个移除。不得使用 `CADisplayLink`；仅保留一个 2 秒纠偏计时器，且 bounds 和有序窗口 ID 未变化时不执行 frame/order 更新。
+observer token 和两个 timer 保存在 `EventObservers`，Drop/stop 时逐个移除或失效。不得使用 `CADisplayLink`；2 秒纠偏 timer 在窗口移动期间不得使 panel 提前重显，且 bounds 和有序窗口 ID 未变化时不执行 frame/order 更新。
 
 - [ ] **Step 4: 运行测试和编译**
 
@@ -581,6 +603,6 @@ git commit -m "fix: 修正 macOS 浮层验收问题"
 
 ## 自检结论
 
-- 设计覆盖：显示器与单窗口、四 `NSPanel`、CALayer 无持续渲染、主线程隔离、拖动隐藏、工作区/Space/睡眠事件、同层相对排序、自然遮挡、最小化/关闭隐藏、ScreenCaptureKit 排除、多会话 registry、性能目标和真机验收均有对应任务。
+- 设计覆盖：显示器与单窗口、四 `NSPanel`、CALayer 无持续渲染、主线程隔离、目标窗口采样与稳定后恢复、工作区/Space/睡眠事件、同层相对排序、自然遮挡、最小化/关闭隐藏、ScreenCaptureKit 排除、多会话 registry、性能目标和真机验收均有对应任务。
 - 占位符检查：计划不含 TBD/TODO/“稍后实现”等未定义工作；真机步骤明确列入 Task 7/8。
 - 类型一致性：统一使用 `WindowSnapshot`、`OverlayDecision`、`MacRect`、`OrderedWindow`、`MainThreadDispatcher`、`MacOsShareOverlayFactory` 和标题前缀 `TAURI_SCREEN_CAPTURE_OVERLAY:`。
