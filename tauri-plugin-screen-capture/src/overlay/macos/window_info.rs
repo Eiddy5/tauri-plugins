@@ -1,12 +1,13 @@
 use objc2::MainThreadMarker;
 use objc2_app_kit::NSScreen;
 use objc2_core_foundation::{
-    CFArray, CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGRect, ConcreteType,
+    CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGRect, ConcreteType,
 };
 use objc2_core_graphics::{
     kCGNullWindowID, kCGWindowBounds, kCGWindowIsOnscreen, kCGWindowLayer, kCGWindowNumber,
     kCGWindowOwnerPID, CGDisplayBounds, CGMainDisplayID, CGRectMakeWithDictionaryRepresentation,
-    CGWindowListCopyWindowInfo, CGWindowListCreateDescriptionFromArray, CGWindowListOption,
+    CGWindowListCopyWindowInfo, CGWindowListCreate, CGWindowListCreateDescriptionFromArray,
+    CGWindowListOption,
 };
 use objc2_foundation::{NSNumber, NSString};
 
@@ -93,13 +94,17 @@ pub(crate) fn window_geometry(window_id: u32) -> Result<Option<WindowGeometry>> 
 type WindowRow = CFRetained<CFDictionary<CFString, CFType>>;
 
 fn window_row(window_id: u32) -> Result<Option<WindowRow>> {
-    let window_id = CFNumber::new_i64(i64::from(window_id));
-    let window_ids = CFArray::from_objects(&[&*window_id]);
-    let typed_window_ids: &CFArray<CFNumber> = &window_ids;
-    let opaque_window_ids: &CFArray = typed_window_ids.as_ref();
-    // SAFETY: window_ids contains only CFNumber values representing CGWindowID values, exactly
-    // as required by CGWindowListCreateDescriptionFromArray.
-    let rows = unsafe { CGWindowListCreateDescriptionFromArray(Some(opaque_window_ids)) }
+    let window_ids = CGWindowListCreate(CGWindowListOption::OptionIncludingWindow, window_id)
+        .ok_or_else(|| {
+            Error::new(
+                CaptureErrorCode::Internal,
+                "无法构造 macOS 目标窗口查询",
+                true,
+            )
+        })?;
+    // SAFETY: CGWindowListCreate produced an array containing the requested CGWindowID in the
+    // exact representation required by CGWindowListCreateDescriptionFromArray.
+    let rows = unsafe { CGWindowListCreateDescriptionFromArray(Some(&window_ids)) }
         .ok_or_else(|| Error::new(CaptureErrorCode::Internal, "无法读取 macOS 目标窗口", true))?;
     // SAFETY: CoreGraphics documents every returned array element as a window dictionary.
     let rows = unsafe { rows.cast_unchecked::<CFDictionary<CFString, CFType>>() };
@@ -250,5 +255,16 @@ mod tests {
     #[test]
     fn targeted_window_query_returns_no_row_for_an_invalid_id() {
         assert!(window_row(u32::MAX).unwrap().is_none());
+    }
+
+    #[test]
+    fn targeted_window_query_returns_a_row_for_a_valid_on_screen_id() {
+        let rows = window_rows(CGWindowListOption::OptionOnScreenOnly).unwrap();
+        let window_id = rows
+            .iter()
+            .find_map(|row| number(row, unsafe { kCGWindowNumber })?.as_i64())
+            .expect("当前 GUI 会话应至少包含一个可见窗口") as u32;
+
+        assert!(window_row(window_id).unwrap().is_some());
     }
 }
