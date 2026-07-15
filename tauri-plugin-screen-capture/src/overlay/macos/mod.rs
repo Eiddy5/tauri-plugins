@@ -26,9 +26,9 @@ use super::{ShareOverlay, ShareOverlayFactory};
 
 pub use events::{event_action, OverlayEvent, RefreshAction, WINDOW_POSITION_POLL_INTERVAL};
 pub use model::{
-    decide_window_overlay, needs_native_update, verify_lightweight_order, verify_panel_placements,
-    verify_relative_order, visible_corner_panels, OrderVerificationState, OrderedWindow,
-    OverlayDecision, WindowFrameAction, WindowFrameTracker, WindowSnapshot,
+    decide_window_overlay, lightweight_order_span, needs_native_update, verify_lightweight_order,
+    verify_panel_placements, verify_relative_order, visible_corner_panels, OrderVerificationState,
+    OrderedWindow, OverlayDecision, WindowFrameAction, WindowFrameTracker, WindowSnapshot,
 };
 pub use panel::{corner_panel_frames, MacRect};
 

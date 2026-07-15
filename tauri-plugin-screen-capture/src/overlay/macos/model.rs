@@ -136,24 +136,54 @@ pub fn verify_relative_order(windows: &[OrderedWindow], target_id: u32, panel_id
             .all(|window| !panel_ids.contains(&window.id))
 }
 
-pub fn verify_lightweight_order(
-    window_ids: &[u32],
+pub fn lightweight_order_span(
+    windows: &[OrderedWindow],
     target_id: u32,
     visible_panel_ids: &[u32],
-) -> bool {
-    if visible_panel_ids.is_empty() {
-        return window_ids.contains(&target_id);
+) -> Option<Vec<u32>> {
+    let target_index = windows
+        .iter()
+        .position(|window| window.id == target_id && window.kind == OrderedWindowKind::Target)?;
+    let target = windows[target_index];
+    let span_start = if visible_panel_ids.is_empty() {
+        windows[..target_index]
+            .iter()
+            .position(|window| {
+                window.kind == OrderedWindowKind::Other
+                    && window.layer == target.layer
+                    && window.owner_pid == target.owner_pid
+            })
+            .unwrap_or(target_index)
+    } else {
+        visible_panel_ids
+            .iter()
+            .try_fold(target_index, |start, panel_id| {
+                let panel_index = windows.iter().position(|window| {
+                    window.id == *panel_id && window.kind == OrderedWindowKind::Panel
+                })?;
+                (panel_index < target_index).then_some(start.min(panel_index))
+            })?
+    };
+
+    Some(
+        windows[span_start..=target_index]
+            .iter()
+            .map(|window| window.id)
+            .collect(),
+    )
+}
+
+pub fn verify_lightweight_order(window_ids: &[u32], target_id: u32, expected_span: &[u32]) -> bool {
+    if expected_span.last() != Some(&target_id) {
+        return false;
     }
     let Some(target_index) = window_ids.iter().position(|id| *id == target_id) else {
         return false;
     };
-    let Some(panel_start) = target_index.checked_sub(visible_panel_ids.len()) else {
+    let Some(span_start) = (target_index + 1).checked_sub(expected_span.len()) else {
         return false;
     };
-    let panel_group = &window_ids[panel_start..target_index];
-    visible_panel_ids
-        .iter()
-        .all(|panel_id| panel_group.iter().filter(|id| *id == panel_id).count() == 1)
+    window_ids.get(span_start..=target_index) == Some(expected_span)
 }
 
 pub fn visible_corner_panels(

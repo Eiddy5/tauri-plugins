@@ -23,12 +23,35 @@ func visibleWindowIDs() -> [CGWindowID] {
     }
 }
 
-func orderIsValid(_ ids: [CGWindowID], target: CGWindowID, panels: [CGWindowID]) -> Bool {
-    guard let targetIndex = ids.firstIndex(of: target), targetIndex >= panels.count else {
+func orderSpan(
+    _ ids: [CGWindowID],
+    target: CGWindowID,
+    panels: [CGWindowID]
+) -> [CGWindowID]? {
+    guard let targetIndex = ids.firstIndex(of: target) else {
+        return nil
+    }
+    let panelIndexes = panels.compactMap { ids.firstIndex(of: $0) }
+    guard panelIndexes.count == panels.count,
+          let spanStart = panelIndexes.min(),
+          spanStart < targetIndex else {
+        return nil
+    }
+    return Array(ids[spanStart...targetIndex])
+}
+
+func orderMatches(
+    _ ids: [CGWindowID],
+    target: CGWindowID,
+    expectedSpan: [CGWindowID]
+) -> Bool {
+    guard expectedSpan.last == target,
+          let targetIndex = ids.firstIndex(of: target),
+          targetIndex + 1 >= expectedSpan.count else {
         return false
     }
-    let group = ids[(targetIndex - panels.count)..<targetIndex]
-    return panels.allSatisfy { panel in group.filter { $0 == panel }.count == 1 }
+    let spanStart = targetIndex + 1 - expectedSpan.count
+    return Array(ids[spanStart...targetIndex]) == expectedSpan
 }
 
 func advanceWindowServer() {
@@ -69,32 +92,54 @@ let panels = panelFrames.map { frame -> NSPanel in
     return panel
 }
 
+let sibling = NSWindow(
+    contentRect: NSRect(x: 220, y: 220, width: 120, height: 80),
+    styleMask: [.titled],
+    backing: .buffered,
+    defer: false
+)
+sibling.title = "macos-overlay-focus-probe-sibling"
+sibling.level = target.level
+sibling.order(.above, relativeTo: target.windowNumber)
+
 advanceWindowServer()
 let targetID = CGWindowID(target.windowNumber)
 let panelIDs = panels.map { CGWindowID($0.windowNumber) }
-precondition(
-    orderIsValid(visibleWindowIDs(), target: targetID, panels: panelIDs),
-    "initial panel order was not established"
-)
+let initialIDs = visibleWindowIDs()
+guard let cachedSpan = orderSpan(initialIDs, target: targetID, panels: panelIDs) else {
+    preconditionFailure("initial panel order was not established")
+}
+precondition(cachedSpan.contains(CGWindowID(sibling.windowNumber)))
+precondition(orderMatches(initialIDs, target: targetID, expectedSpan: cachedSpan))
 
 target.orderFrontRegardless()
 advanceWindowServer()
 precondition(
-    !orderIsValid(visibleWindowIDs(), target: targetID, panels: panelIDs),
+    !orderMatches(visibleWindowIDs(), target: targetID, expectedSpan: cachedSpan),
     "bringing the target forward did not reproduce panel order loss"
 )
 
 for panel in panels {
     panel.order(.above, relativeTo: target.windowNumber)
 }
+sibling.order(.above, relativeTo: target.windowNumber)
 advanceWindowServer()
+let repairedIDs = visibleWindowIDs()
+guard let repairedSpan = orderSpan(repairedIDs, target: targetID, panels: panelIDs) else {
+    preconditionFailure("relative panel reorder did not restore the invariant")
+}
 precondition(
-    orderIsValid(visibleWindowIDs(), target: targetID, panels: panelIDs),
+    repairedSpan.contains(CGWindowID(sibling.windowNumber)),
     "relative panel reorder did not restore the invariant"
 )
+advanceWindowServer()
+advanceWindowServer()
+advanceWindowServer()
+precondition(orderMatches(visibleWindowIDs(), target: targetID, expectedSpan: repairedSpan))
 
 for panel in panels {
     panel.close()
 }
+sibling.close()
 target.close()
-print("PASS: focus reorder reproduced and repaired")
+print("PASS: focus reorder reproduced, repaired, and stable with sibling")

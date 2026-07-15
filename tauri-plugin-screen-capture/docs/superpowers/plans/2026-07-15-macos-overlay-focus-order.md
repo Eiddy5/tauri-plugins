@@ -6,6 +6,8 @@
 
 **Architecture:** Add a pure order validator in `model.rs`, expose a lightweight CoreGraphics Window ID list in `window_info.rs`, then connect both to the `WindowPositionTimer` fast path in `host.rs`. Full window descriptions and native panel reordering remain in the existing correction path and run only when geometry or order is invalid.
 
+**Post-review correction:** The original contiguous-panel contract below was superseded during implementation. A fully validated order may legally contain same-owner sibling windows between panels and the target. The final implementation caches the exact validated `panel/sibling/target` span, compares that span in the 100 ms path, and rebuilds it after a full validation. This also provides a sibling anchor when all panels are hidden. The final regression tests and implementation, rather than the earlier contiguous-only snippets, are authoritative.
+
 **Tech Stack:** Rust, objc2 0.6, objc2-core-foundation 0.3, objc2-core-graphics 0.3, AppKit `NSPanel`, CoreGraphics Window Services, Cargo tests.
 
 Run every command below from `/Users/mac18/workspace/base_rust/tauri/tauri-plugins/tauri-plugin-screen-capture`.

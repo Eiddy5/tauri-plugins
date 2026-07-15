@@ -1,8 +1,8 @@
 #![cfg(target_os = "macos")]
 
 use tauri_plugin_screen_capture::overlay::macos::{
-    corner_panel_frames, decide_window_overlay, event_action, needs_native_update,
-    verify_lightweight_order, verify_panel_placements, verify_relative_order,
+    corner_panel_frames, decide_window_overlay, event_action, lightweight_order_span,
+    needs_native_update, verify_lightweight_order, verify_panel_placements, verify_relative_order,
     visible_corner_panels, MacRect, OrderVerificationState, OrderedWindow, OverlayDecision,
     OverlayEvent, RefreshAction, WindowFrameAction, WindowFrameTracker, WindowSnapshot,
     WINDOW_POSITION_POLL_INTERVAL,
@@ -184,7 +184,7 @@ fn lightweight_order_accepts_a_contiguous_panel_group_immediately_above_target()
     assert!(verify_lightweight_order(
         &[90, 13, 12, 11, 42, 7],
         42,
-        &[11, 12, 13]
+        &[13, 12, 11, 42]
     ));
 }
 
@@ -193,28 +193,48 @@ fn lightweight_order_rejects_target_reordered_above_panels() {
     assert!(!verify_lightweight_order(
         &[90, 42, 13, 12, 11, 7],
         42,
-        &[11, 12, 13]
+        &[13, 12, 11, 42]
     ));
 }
 
 #[test]
-fn lightweight_order_rejects_an_intervening_window_or_missing_visible_panel() {
+fn lightweight_order_accepts_a_cached_safe_sibling_between_panel_and_target() {
+    let windows = vec![
+        OrderedWindow::panel(11),
+        OrderedWindow::other(77).with_owner_pid(9),
+        OrderedWindow::target(42).with_owner_pid(9),
+    ];
+    let span = lightweight_order_span(&windows, 42, &[11]).unwrap();
+
+    assert_eq!(span, vec![11, 77, 42]);
+    assert!(verify_lightweight_order(&[90, 11, 77, 42, 7], 42, &span));
+}
+
+#[test]
+fn lightweight_order_rejects_an_unknown_intervening_window_or_missing_panel() {
     assert!(!verify_lightweight_order(
         &[90, 13, 77, 12, 11, 42, 7],
         42,
-        &[11, 12, 13]
+        &[13, 12, 11, 42]
     ));
     assert!(!verify_lightweight_order(
         &[90, 13, 11, 42, 7],
         42,
-        &[11, 12, 13]
+        &[13, 12, 11, 42]
     ));
 }
 
 #[test]
-fn lightweight_order_allows_panels_hidden_by_visibility_policy() {
-    assert!(verify_lightweight_order(&[90, 42, 7], 42, &[]));
-    assert!(verify_lightweight_order(&[90, 13, 42, 7], 42, &[13]));
+fn lightweight_order_detects_target_reorder_when_all_panels_are_hidden() {
+    let windows = vec![
+        OrderedWindow::other(77).with_owner_pid(9),
+        OrderedWindow::target(42).with_owner_pid(9),
+    ];
+    let span = lightweight_order_span(&windows, 42, &[]).unwrap();
+
+    assert_eq!(span, vec![77, 42]);
+    assert!(verify_lightweight_order(&[90, 77, 42, 7], 42, &span));
+    assert!(!verify_lightweight_order(&[90, 42, 77, 7], 42, &span));
 }
 
 #[test]
@@ -238,6 +258,10 @@ fn non_overlapping_same_owner_siblings_do_not_invalidate_panels() {
 
     assert_eq!(visible_corner_panels(&windows, 16303, &corners), [true; 4]);
     assert!(verify_panel_placements(&windows, 16303, &panels));
+    let visible_panel_ids = panels.map(|(panel_id, _)| panel_id);
+    let span = lightweight_order_span(&windows, 16303, &visible_panel_ids).unwrap();
+    let window_ids = windows.iter().map(|window| window.id).collect::<Vec<_>>();
+    assert!(verify_lightweight_order(&window_ids, 16303, &span));
 }
 
 #[test]

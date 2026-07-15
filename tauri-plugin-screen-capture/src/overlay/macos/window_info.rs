@@ -277,6 +277,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a logged-in macOS GUI session"]
     fn targeted_window_query_returns_a_row_for_a_valid_on_screen_id() {
         let rows = window_rows(CGWindowListOption::OptionOnScreenOnly).unwrap();
         let window_id = rows
@@ -288,6 +289,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a logged-in macOS GUI session"]
     fn lightweight_window_ids_include_a_valid_on_screen_window() {
         let rows = window_rows(CGWindowListOption::OptionOnScreenOnly).unwrap();
         let window_id = rows

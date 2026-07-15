@@ -11,7 +11,7 @@ use crate::{
 use super::{
     corner_panel_frames, decide_window_overlay,
     events::{schedule_order_verification, EventObservers},
-    needs_native_update,
+    lightweight_order_span, needs_native_update,
     panel::CornerPanel,
     verify_lightweight_order, verify_panel_placements, visible_corner_panels,
     window_info::{display_frame, ordered_windows, visible_window_ids, window_geometry},
@@ -110,6 +110,7 @@ struct OverlayHost {
     last_level: Option<i32>,
     panels_visible: bool,
     panel_visibility: [bool; 4],
+    lightweight_order_span: Option<Vec<u32>>,
     window_frame_tracker: WindowFrameTracker,
     order_verification: OrderVerificationState,
 }
@@ -127,6 +128,7 @@ impl OverlayHost {
             last_level: None,
             panels_visible: false,
             panel_visibility: [false; 4],
+            lightweight_order_span: None,
             window_frame_tracker: WindowFrameTracker::default(),
             order_verification: OrderVerificationState::default(),
         })
@@ -219,16 +221,23 @@ impl OverlayHost {
             .zip(panel_visibility)
             .filter_map(|((panel_id, frame), visible)| visible.then_some((panel_id, frame)))
             .collect::<Vec<_>>();
+        let visible_panel_ids = expected_panels
+            .iter()
+            .map(|(panel_id, _)| *panel_id)
+            .collect::<Vec<_>>();
         let order_valid = self.panel_visibility == panel_visibility
             && verify_panel_placements(&current_order, target_id, &expected_panels);
         let bounds_changed = self.last_frame != Some(geometry.frame)
             || self.last_level != Some(level)
             || self.panel_visibility != panel_visibility;
         if !needs_native_update(self.panels_visible, bounds_changed, order_valid) {
+            self.lightweight_order_span =
+                lightweight_order_span(&current_order, target_id, &visible_panel_ids);
             self.window_frame_tracker.synchronize(geometry.frame);
             return Ok(());
         }
 
+        self.lightweight_order_span = None;
         self.apply_frames(geometry.frame);
         for (panel, visible) in self.panels.iter().zip(panel_visibility) {
             if visible {
@@ -274,17 +283,12 @@ impl OverlayHost {
             .window_frame_tracker
             .observe_for_visibility(geometry.frame, self.panels_visible);
         if action == WindowFrameAction::Keep && self.panels_visible {
-            let visible_panel_ids = self
-                .panels
-                .iter()
-                .zip(self.panel_visibility)
-                .filter_map(|(panel, visible)| visible.then_some(panel.window_id()))
-                .collect::<Vec<_>>();
             let order_valid = visible_window_ids()
-                .map(|window_ids| {
-                    verify_lightweight_order(&window_ids, target_id, &visible_panel_ids)
-                })
-                .unwrap_or(false);
+                .ok()
+                .zip(self.lightweight_order_span.as_deref())
+                .is_some_and(|(window_ids, expected_span)| {
+                    verify_lightweight_order(&window_ids, target_id, expected_span)
+                });
             action = action.refresh_if_order_invalid(order_valid);
         }
 
@@ -332,6 +336,12 @@ impl OverlayHost {
             .filter_map(|((panel_id, frame), visible)| visible.then_some((panel_id, frame)))
             .collect::<Vec<_>>();
         if verify_panel_placements(&windows, target_id, &expected_panels) {
+            let visible_panel_ids = expected_panels
+                .iter()
+                .map(|(panel_id, _)| *panel_id)
+                .collect::<Vec<_>>();
+            self.lightweight_order_span =
+                lightweight_order_span(&windows, target_id, &visible_panel_ids);
             return Ok(());
         }
 
@@ -347,6 +357,7 @@ impl OverlayHost {
 
     fn hide_panels(&mut self) {
         self.order_verification.cancel();
+        self.lightweight_order_span = None;
         for panel in &self.panels {
             panel.hide();
         }
