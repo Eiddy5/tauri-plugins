@@ -1,0 +1,46 @@
+<h2>点击共享窗口时，overlay 为什么会短暂沉到下面？</h2>
+<p class="subtitle">截图中的绿色尾部说明 panel 仍然存在，但目标窗口被点击后发生了新的 Window Server 排序。</p>
+
+<div class="mockup">
+  <div class="mockup-header">当前时序</div>
+  <div class="mockup-body">
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;text-align:center">
+      <div><div class="label">T0</div><h3>正常</h3><p>panel 紧邻目标窗口之上</p></div>
+      <div><div class="label">T1</div><h3>点击聚焦</h3><p>目标窗口被重新排到 panel 前面</p></div>
+      <div><div class="label">T1 + 100ms</div><h3>未发现</h3><p>位置采样只看 frame，frame 未变所以保持现状</p></div>
+      <div><div class="label">最长约 2.5s</div><h3>低频纠正</h3><p>层级检查发现失序并重新 orderAbove</p></div>
+    </div>
+  </div>
+</div>
+
+<h2>修复方向</h2>
+<p class="subtitle">点击一个方案。推荐 A：公开 API、无需额外授权、延迟稳定在 100ms 内。</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>轻量 Z-order 采样（推荐）</h3>
+      <p>复用现有 100ms timer，只读取公开 CGWindow ID 顺序；发现目标与 panel 失序时才读取完整信息并修复。无需辅助功能或输入监控授权。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>全局鼠标事件触发</h3>
+      <p>监听 mouseDown，在下一轮 RunLoop 检查并修复。事件驱动开销低，但点击来源过滤和系统授权行为更容易受 macOS 版本影响。</p>
+    </div>
+  </div>
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>Accessibility AXObserver</h3>
+      <p>监听目标窗口聚焦/移动事件，时效最好；但必须引导用户到系统设置授予辅助功能权限，部署与审核成本最高。</p>
+    </div>
+  </div>
+</div>
+
+<div class="pros-cons">
+  <div class="pros"><h4>A 的生产优势</h4><ul><li>不依赖私有 CGS</li><li>不监听用户输入</li><li>沿用当前 timer 生命周期</li><li>只有失序时走完整纠正路径</li></ul></div>
+  <div class="cons"><h4>A 的边界</h4><ul><li>最坏约 100ms 后恢复，而非同一点击帧</li><li>需用真实窗口回归测试验证 Window ID 顺序</li></ul></div>
+</div>
