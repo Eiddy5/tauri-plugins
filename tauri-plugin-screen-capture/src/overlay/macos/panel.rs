@@ -65,6 +65,13 @@ pub fn corner_panel_frames(target: MacRect, corner_length: f64) -> [MacRect; 4] 
     ]
 }
 
+fn corner_panel_collection_behavior() -> NSWindowCollectionBehavior {
+    NSWindowCollectionBehavior::CanJoinAllSpaces
+        | NSWindowCollectionBehavior::FullScreenAuxiliary
+        | NSWindowCollectionBehavior::Transient
+        | NSWindowCollectionBehavior::IgnoresCycle
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Corner {
     TopLeft,
@@ -154,11 +161,7 @@ impl CornerPanel {
         panel.setBecomesKeyOnlyIfNeeded(true);
         panel.setExcludedFromWindowsMenu(true);
         panel.setBackgroundColor(Some(&NSColor::clearColor()));
-        panel.setCollectionBehavior(
-            NSWindowCollectionBehavior::CanJoinAllSpaces
-                | NSWindowCollectionBehavior::FullScreenAuxiliary
-                | NSWindowCollectionBehavior::Stationary,
-        );
+        panel.setCollectionBehavior(corner_panel_collection_behavior());
         panel.setTitle(&NSString::from_str(&format!(
             "{OVERLAY_WINDOW_TITLE_PREFIX}{session_id}:{}",
             corner.title_suffix()
@@ -247,4 +250,21 @@ fn ns_rect(rect: MacRect) -> NSRect {
         NSPoint::new(rect.x, rect.y),
         NSSize::new(rect.width, rect.height),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn corner_panels_are_transient_and_do_not_participate_in_window_management() {
+        let behavior = corner_panel_collection_behavior();
+
+        assert!(behavior.contains(NSWindowCollectionBehavior::CanJoinAllSpaces));
+        assert!(behavior.contains(NSWindowCollectionBehavior::FullScreenAuxiliary));
+        assert!(behavior.contains(NSWindowCollectionBehavior::Transient));
+        assert!(behavior.contains(NSWindowCollectionBehavior::IgnoresCycle));
+        assert!(!behavior.contains(NSWindowCollectionBehavior::Stationary));
+        assert!(!behavior.contains(NSWindowCollectionBehavior::Managed));
+    }
 }
