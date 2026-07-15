@@ -277,6 +277,54 @@ await stopCapture(session.sessionId)
 peerConnection.close()
 ```
 
+### 监听会话被动结束
+
+捕获源被关闭、断开或平台捕获发生运行时错误时，插件会停止捕获与发布、清理 overlay、移除会话，然后发送一次 `screen-capture://session-ended` 事件。主动调用 `stopCapture()` 不会发送该事件。
+
+```ts
+interface CaptureSessionEndedEvent {
+  sessionId: string
+  error: {
+    code: string
+    message: string
+    recoverable: boolean
+    details?: unknown
+  }
+}
+```
+
+应在启动捕获前注册监听器。收到事件时，后端会话已经被移除，不要再次调用 `stopCapture()`；只需释放前端持有的 WebRTC、Agora、视频元素和统计轮询资源，再向用户显示错误提示。
+
+```ts
+import {
+  onCaptureSessionEnded,
+  startCapture,
+} from 'tauri-plugin-screen-capture-api'
+
+let session: Awaited<ReturnType<typeof startCapture>> | null = null
+let peerConnection: RTCPeerConnection | null = null
+
+const unlistenSessionEnded = await onCaptureSessionEnded(({ payload }) => {
+  if (payload.sessionId !== session?.sessionId) return
+
+  session = null
+  peerConnection?.close()
+  peerConnection = null
+
+  window.alert(payload.error.message)
+})
+
+session = await startCapture({
+  sourceId: source.id,
+  sourceKind: source.kind,
+})
+
+// 在页面或组件销毁回调中移除监听器：
+// unlistenSessionEnded()
+```
+
+窗口共享源关闭时，Windows 和 macOS 都会收到 `sourceUnavailable / 被共享窗口已关闭`。平台原始原因保存在 `error.details.reason`，用于日志和诊断。
+
 ## JavaScript API
 
 | API | 返回值 | 说明 |
@@ -291,6 +339,7 @@ peerConnection.close()
 | `stopCapture(sessionId)` | `Promise<void>` | 停止并释放会话资源 |
 | `getCaptureSession(sessionId)` | `Promise<CaptureSession>` | 获取会话状态和最近错误 |
 | `getCaptureStats(sessionId)` | `Promise<CaptureStats>` | 获取捕获、发布、丢帧、码率和后端统计 |
+| `onCaptureSessionEnded(handler)` | `Promise<UnlistenFn>` | 监听会话因捕获源关闭或运行时错误而被动结束 |
 | `createWebRtcOffer(sessionId)` | `Promise<WebRtcOffer>` | 获取原生 WebRTC peer 的 SDP offer |
 | `acceptWebRtcAnswer(sessionId, answer)` | `Promise<void>` | 提交 WebView peer 的 SDP answer |
 | `addWebRtcIceCandidate(sessionId, candidate)` | `Promise<void>` | 提交 WebView peer 的 ICE candidate |
