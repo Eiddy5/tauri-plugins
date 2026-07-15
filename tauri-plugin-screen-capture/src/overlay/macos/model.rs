@@ -1,4 +1,4 @@
-use super::MacRect;
+use super::{MacRect, OverlayPanelLayout};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WindowSnapshot {
@@ -104,66 +104,18 @@ impl OrderedWindow {
     }
 }
 
-pub fn verify_relative_order(windows: &[OrderedWindow], target_id: u32, panel_ids: &[u32]) -> bool {
-    if panel_ids.is_empty() {
-        return false;
-    }
-    let Some(target_index) = windows
-        .iter()
-        .position(|window| window.id == target_id && window.kind == OrderedWindowKind::Target)
-    else {
-        return false;
-    };
-    let Some(panel_start) = target_index.checked_sub(panel_ids.len()) else {
-        return false;
-    };
-    let immediately_above = &windows[panel_start..target_index];
-    let target_layer = windows[target_index].layer;
-
-    immediately_above.len() == panel_ids.len()
-        && immediately_above.iter().all(|window| {
-            window.kind == OrderedWindowKind::Panel
-                && window.layer == target_layer
-                && panel_ids.contains(&window.id)
-        })
-        && panel_ids.iter().all(|panel_id| {
-            immediately_above
-                .iter()
-                .any(|window| window.id == *panel_id)
-        })
-        && windows[..panel_start]
-            .iter()
-            .all(|window| !panel_ids.contains(&window.id))
-}
-
 pub fn lightweight_order_span(
     windows: &[OrderedWindow],
     target_id: u32,
-    visible_panel_ids: &[u32],
+    panel_id: u32,
 ) -> Option<Vec<u32>> {
     let target_index = windows
         .iter()
         .position(|window| window.id == target_id && window.kind == OrderedWindowKind::Target)?;
-    let target = windows[target_index];
-    let span_start = if visible_panel_ids.is_empty() {
-        windows[..target_index]
-            .iter()
-            .position(|window| {
-                window.kind == OrderedWindowKind::Other
-                    && window.layer == target.layer
-                    && window.owner_pid == target.owner_pid
-            })
-            .unwrap_or(target_index)
-    } else {
-        visible_panel_ids
-            .iter()
-            .try_fold(target_index, |start, panel_id| {
-                let panel_index = windows.iter().position(|window| {
-                    window.id == *panel_id && window.kind == OrderedWindowKind::Panel
-                })?;
-                (panel_index < target_index).then_some(start.min(panel_index))
-            })?
-    };
+    let panel_index = windows
+        .iter()
+        .position(|window| window.id == panel_id && window.kind == OrderedWindowKind::Panel)?;
+    let span_start = (panel_index < target_index).then_some(panel_index)?;
 
     Some(
         windows[span_start..=target_index]
@@ -186,7 +138,7 @@ pub fn verify_lightweight_order(window_ids: &[u32], target_id: u32, expected_spa
     window_ids.get(span_start..=target_index) == Some(expected_span)
 }
 
-pub fn visible_corner_panels(
+pub fn visible_corner_layers(
     windows: &[OrderedWindow],
     target_id: u32,
     panel_frames: &[MacRect; 4],
@@ -224,10 +176,12 @@ pub fn visible_corner_panels(
     })
 }
 
-pub fn verify_panel_placements(
+pub fn verify_overlay_panel_placement(
     windows: &[OrderedWindow],
     target_id: u32,
-    panels: &[(u32, MacRect)],
+    panel_id: u32,
+    layout: &OverlayPanelLayout,
+    corner_visibility: [bool; 4],
 ) -> bool {
     let Some(target_index) = windows
         .iter()
@@ -242,49 +196,49 @@ pub fn verify_panel_placements(
     let Some(target_frame) = target.frame.filter(|frame| frame.is_valid()) else {
         return false;
     };
-    if windows.iter().any(|window| {
-        window.kind == OrderedWindowKind::Panel
-            && !panels.iter().any(|(panel_id, _)| *panel_id == window.id)
-    }) {
+    if !layout.panel_frame.is_valid()
+        || layout.panel_frame != target_frame
+        || windows
+            .iter()
+            .any(|window| window.kind == OrderedWindowKind::Panel && window.id != panel_id)
+    {
         return false;
     }
 
-    panels.iter().all(|(panel_id, panel_frame)| {
-        if !panel_frame.is_valid() {
-            return false;
-        }
-        let painted_segments = corner_painted_segments(target_frame, *panel_frame);
-        let Some(panel_index) = windows
-            .iter()
-            .position(|window| window.id == *panel_id && window.kind == OrderedWindowKind::Panel)
-        else {
-            return false;
-        };
-        if panel_index >= target_index || windows[panel_index].layer != target.layer {
-            return false;
-        }
+    let Some(panel_index) = windows
+        .iter()
+        .position(|window| window.id == panel_id && window.kind == OrderedWindowKind::Panel)
+    else {
+        return false;
+    };
+    let panel = windows[panel_index];
+    if panel_index >= target_index
+        || panel.layer != target.layer
+        || panel.frame != Some(layout.panel_frame)
+    {
+        return false;
+    }
 
-        windows[(panel_index + 1)..target_index]
-            .iter()
-            .all(|window| match window.kind {
-                OrderedWindowKind::Panel => {
-                    panels
+    let visible_segments = layout
+        .corner_frames
+        .iter()
+        .zip(corner_visibility)
+        .filter(|(_, visible)| *visible)
+        .flat_map(|(corner, _)| corner_painted_segments(target_frame, *corner));
+    let visible_segments = visible_segments.collect::<Vec<_>>();
+
+    windows[(panel_index + 1)..target_index]
+        .iter()
+        .all(|window| {
+            window.kind == OrderedWindowKind::Other
+                && window.layer == target.layer
+                && window.owner_pid == Some(target_owner_pid)
+                && window.frame.is_some_and(|frame| {
+                    visible_segments
                         .iter()
-                        .any(|(expected_id, _)| *expected_id == window.id)
-                        && window.layer == target.layer
-                }
-                OrderedWindowKind::Other => {
-                    window.layer == target.layer
-                        && window.owner_pid == Some(target_owner_pid)
-                        && window.frame.is_some_and(|frame| {
-                            painted_segments
-                                .iter()
-                                .all(|segment| !rects_intersect(frame, *segment))
-                        })
-                }
-                OrderedWindowKind::Target => false,
-            })
-    })
+                        .all(|segment| !rects_intersect(frame, *segment))
+                })
+        })
 }
 
 fn corner_painted_segments(target: MacRect, panel: MacRect) -> [MacRect; 2] {
@@ -328,11 +282,11 @@ fn rects_intersect(first: MacRect, second: MacRect) -> bool {
 }
 
 pub const fn needs_native_update(
-    panels_visible: bool,
+    panel_visible: bool,
     bounds_changed: bool,
     relative_order_valid: bool,
 ) -> bool {
-    !panels_visible || bounds_changed || !relative_order_valid
+    !panel_visible || bounds_changed || !relative_order_valid
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

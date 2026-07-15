@@ -1,10 +1,10 @@
 #![cfg(target_os = "macos")]
 
 use tauri_plugin_screen_capture::overlay::macos::{
-    corner_panel_frames, decide_window_overlay, event_action, lightweight_order_span,
-    needs_native_update, verify_lightweight_order, verify_panel_placements, verify_relative_order,
-    visible_corner_panels, MacRect, OrderVerificationState, OrderedWindow, OverlayDecision,
-    OverlayEvent, RefreshAction, WindowFrameAction, WindowFrameTracker, WindowSnapshot,
+    decide_window_overlay, event_action, lightweight_order_span, needs_native_update,
+    verify_lightweight_order, verify_overlay_panel_placement, visible_corner_layers, MacRect,
+    OrderVerificationState, OrderedWindow, OverlayDecision, OverlayEvent, OverlayPanelLayout,
+    RefreshAction, WindowFrameAction, WindowFrameTracker, WindowSnapshot,
     WINDOW_POSITION_POLL_INTERVAL,
 };
 
@@ -80,20 +80,22 @@ fn overlay_hides_for_minimized_target() {
 }
 
 #[test]
-fn four_corner_panels_only_allocate_corner_squares() {
-    let frames = corner_panel_frames(
-        MacRect {
-            x: 10.0,
-            y: 20.0,
-            width: 800.0,
-            height: 600.0,
-        },
-        32.0,
-    );
+fn single_overlay_panel_uses_target_frame_and_four_corner_layers() {
+    let target = MacRect {
+        x: 10.0,
+        y: 20.0,
+        width: 800.0,
+        height: 600.0,
+    };
+    let OverlayPanelLayout {
+        panel_frame,
+        corner_frames,
+    } = OverlayPanelLayout::new(target, 32.0);
 
-    assert_eq!(frames.len(), 4);
+    assert_eq!(panel_frame, target);
+    assert_eq!(corner_frames.len(), 4);
     assert_eq!(
-        frames[0],
+        corner_frames[0],
         MacRect {
             x: 10.0,
             y: 588.0,
@@ -102,7 +104,7 @@ fn four_corner_panels_only_allocate_corner_squares() {
         }
     );
     assert_eq!(
-        frames[3],
+        corner_frames[3],
         MacRect {
             x: 778.0,
             y: 20.0,
@@ -138,63 +140,58 @@ fn overlay_rejects_empty_or_non_finite_bounds() {
 }
 
 #[test]
-fn verification_accepts_four_panels_immediately_above_target() {
+fn verification_accepts_single_panel_immediately_above_target() {
+    let target = rect(0.0, 0.0, 100.0, 100.0);
+    let layout = OverlayPanelLayout::new(target, 32.0);
     let windows = vec![
         OrderedWindow::other(90),
-        OrderedWindow::panel(14),
-        OrderedWindow::panel(13),
-        OrderedWindow::panel(12),
-        OrderedWindow::panel(11),
-        OrderedWindow::target(42),
+        detailed_panel(11, 0, 9000, target),
+        detailed_target(42, 0, 9, target),
         OrderedWindow::other(7),
     ];
 
-    assert!(verify_relative_order(&windows, 42, &[11, 12, 13, 14]));
+    assert!(verify_overlay_panel_placement(
+        &windows, 42, 11, &layout, [true; 4],
+    ));
 }
 
 #[test]
-fn verification_rejects_a_panel_promoted_above_an_existing_cover_window() {
+fn verification_rejects_panel_promoted_above_a_foreign_cover_window() {
+    let target = rect(0.0, 0.0, 100.0, 100.0);
+    let layout = OverlayPanelLayout::new(target, 32.0);
     let windows = vec![
-        OrderedWindow::panel(11),
-        OrderedWindow::other(90),
-        OrderedWindow::panel(14),
-        OrderedWindow::panel(13),
-        OrderedWindow::panel(12),
-        OrderedWindow::target(42),
+        detailed_panel(11, 0, 9000, target),
+        detailed_other(90, 0, 99, target),
+        detailed_target(42, 0, 9, target),
     ];
 
-    assert!(!verify_relative_order(&windows, 42, &[11, 12, 13, 14]));
+    assert!(!verify_overlay_panel_placement(
+        &windows, 42, 11, &layout, [true; 4],
+    ));
 }
 
 #[test]
 fn verification_rejects_panel_on_a_different_window_server_layer() {
+    let target = rect(0.0, 0.0, 100.0, 100.0);
+    let layout = OverlayPanelLayout::new(target, 32.0);
     let windows = vec![
-        OrderedWindow::panel_at_layer(14, 0),
-        OrderedWindow::panel_at_layer(13, 0),
-        OrderedWindow::panel_at_layer(12, 0),
-        OrderedWindow::panel_at_layer(11, 1),
-        OrderedWindow::target_at_layer(42, 0),
+        detailed_panel(11, 1, 9000, target),
+        detailed_target(42, 0, 9, target),
     ];
 
-    assert!(!verify_relative_order(&windows, 42, &[11, 12, 13, 14]));
+    assert!(!verify_overlay_panel_placement(
+        &windows, 42, 11, &layout, [true; 4],
+    ));
 }
 
 #[test]
-fn lightweight_order_accepts_a_contiguous_panel_group_immediately_above_target() {
-    assert!(verify_lightweight_order(
-        &[90, 13, 12, 11, 42, 7],
-        42,
-        &[13, 12, 11, 42]
-    ));
+fn lightweight_order_accepts_single_panel_immediately_above_target() {
+    assert!(verify_lightweight_order(&[90, 11, 42, 7], 42, &[11, 42]));
 }
 
 #[test]
 fn lightweight_order_rejects_target_reordered_above_panels() {
-    assert!(!verify_lightweight_order(
-        &[90, 42, 13, 12, 11, 7],
-        42,
-        &[13, 12, 11, 42]
-    ));
+    assert!(!verify_lightweight_order(&[90, 42, 11, 7], 42, &[11, 42]));
 }
 
 #[test]
@@ -204,7 +201,7 @@ fn lightweight_order_accepts_a_cached_safe_sibling_between_panel_and_target() {
         OrderedWindow::other(77).with_owner_pid(9),
         OrderedWindow::target(42).with_owner_pid(9),
     ];
-    let span = lightweight_order_span(&windows, 42, &[11]).unwrap();
+    let span = lightweight_order_span(&windows, 42, 11).unwrap();
 
     assert_eq!(span, vec![11, 77, 42]);
     assert!(verify_lightweight_order(&[90, 11, 77, 42, 7], 42, &span));
@@ -213,105 +210,113 @@ fn lightweight_order_accepts_a_cached_safe_sibling_between_panel_and_target() {
 #[test]
 fn lightweight_order_rejects_an_unknown_intervening_window_or_missing_panel() {
     assert!(!verify_lightweight_order(
-        &[90, 13, 77, 12, 11, 42, 7],
+        &[90, 11, 77, 42, 7],
         42,
-        &[13, 12, 11, 42]
+        &[11, 42]
     ));
-    assert!(!verify_lightweight_order(
-        &[90, 13, 11, 42, 7],
-        42,
-        &[13, 12, 11, 42]
-    ));
-}
-
-#[test]
-fn lightweight_order_detects_target_reorder_when_all_panels_are_hidden() {
     let windows = vec![
         OrderedWindow::other(77).with_owner_pid(9),
         OrderedWindow::target(42).with_owner_pid(9),
     ];
-    let span = lightweight_order_span(&windows, 42, &[]).unwrap();
-
-    assert_eq!(span, vec![77, 42]);
-    assert!(verify_lightweight_order(&[90, 77, 42, 7], 42, &span));
-    assert!(!verify_lightweight_order(&[90, 42, 77, 7], 42, &span));
+    assert!(lightweight_order_span(&windows, 42, 11).is_none());
 }
 
 #[test]
-fn non_overlapping_same_owner_siblings_do_not_invalidate_panels() {
-    let corners = corner_panel_frames(rect(0.0, 0.0, 2560.0, 1440.0), 32.0);
+fn non_overlapping_same_owner_siblings_do_not_invalidate_the_panel() {
+    let target = rect(0.0, 0.0, 2560.0, 1440.0);
+    let layout = OverlayPanelLayout::new(target, 32.0);
     let windows = vec![
-        detailed_panel(11, 0, 9000, corners[0]),
-        detailed_panel(12, 0, 9000, corners[1]),
-        detailed_panel(13, 0, 9000, corners[2]),
-        detailed_panel(14, 0, 9000, corners[3]),
+        detailed_panel(11, 0, 9000, target),
         detailed_other(16818, 0, 36957, rect(48.0, 2.0, 2464.0, 1386.0)),
         detailed_other(18571, 0, 36957, rect(49.0, 458.0, 11.0, 64.0)),
-        detailed_target(16303, 0, 36957, rect(0.0, 0.0, 2560.0, 1440.0)),
-    ];
-    let panels = [
-        (11, corners[0]),
-        (12, corners[1]),
-        (13, corners[2]),
-        (14, corners[3]),
+        detailed_target(16303, 0, 36957, target),
     ];
 
-    assert_eq!(visible_corner_panels(&windows, 16303, &corners), [true; 4]);
-    assert!(verify_panel_placements(&windows, 16303, &panels));
-    let visible_panel_ids = panels.map(|(panel_id, _)| panel_id);
-    let span = lightweight_order_span(&windows, 16303, &visible_panel_ids).unwrap();
+    let visibility = visible_corner_layers(&windows, 16303, &layout.corner_frames);
+    assert_eq!(visibility, [true; 4]);
+    assert!(verify_overlay_panel_placement(
+        &windows, 16303, 11, &layout, visibility,
+    ));
+    let span = lightweight_order_span(&windows, 16303, 11).unwrap();
     let window_ids = windows.iter().map(|window| window.id).collect::<Vec<_>>();
     assert!(verify_lightweight_order(&window_ids, 16303, &span));
 }
 
 #[test]
 fn same_owner_sibling_hides_only_the_overlapped_corner() {
-    let corners = corner_panel_frames(rect(0.0, 0.0, 100.0, 100.0), 32.0);
+    let layout = OverlayPanelLayout::new(rect(0.0, 0.0, 100.0, 100.0), 32.0);
     let windows = vec![
         detailed_other(7, 0, 42, rect(0.0, 80.0, 10.0, 10.0)),
         detailed_target(8, 0, 42, rect(0.0, 0.0, 100.0, 100.0)),
     ];
 
     assert_eq!(
-        visible_corner_panels(&windows, 8, &corners),
+        visible_corner_layers(&windows, 8, &layout.corner_frames),
         [false, true, true, true]
     );
 }
 
 #[test]
+fn single_panel_keeps_safe_sibling_below_it_and_hides_only_the_covered_corner_layer() {
+    let target = rect(0.0, 0.0, 100.0, 100.0);
+    let layout = OverlayPanelLayout::new(target, 32.0);
+    let windows = vec![
+        detailed_panel(11, 0, 9000, layout.panel_frame),
+        detailed_other(7, 0, 42, rect(0.0, 80.0, 10.0, 10.0)),
+        detailed_target(8, 0, 42, target),
+    ];
+    let visibility = visible_corner_layers(&windows, 8, &layout.corner_frames);
+
+    assert_eq!(visibility, [false, true, true, true]);
+    assert!(verify_overlay_panel_placement(
+        &windows, 8, 11, &layout, visibility,
+    ));
+}
+
+#[test]
 fn same_owner_surface_inside_the_transparent_corner_area_keeps_the_corner_visible() {
-    let corners = corner_panel_frames(rect(0.0, 0.0, 100.0, 100.0), 32.0);
+    let target = rect(0.0, 0.0, 100.0, 100.0);
+    let layout = OverlayPanelLayout::new(target, 32.0);
     let transparent_center = rect(10.0, 78.0, 10.0, 10.0);
     let windows = vec![
-        detailed_panel(11, 0, 9000, corners[0]),
+        detailed_panel(11, 0, 9000, target),
         detailed_other(7, 0, 42, transparent_center),
-        detailed_target(8, 0, 42, rect(0.0, 0.0, 100.0, 100.0)),
+        detailed_target(8, 0, 42, target),
     ];
 
-    assert_eq!(visible_corner_panels(&windows, 8, &corners), [true; 4]);
-    assert!(verify_panel_placements(&windows, 8, &[(11, corners[0])]));
+    let visibility = visible_corner_layers(&windows, 8, &layout.corner_frames);
+    assert_eq!(visibility, [true; 4]);
+    assert!(verify_overlay_panel_placement(
+        &windows, 8, 11, &layout, visibility,
+    ));
 }
 
 #[test]
 fn different_owner_window_does_not_change_sibling_visibility() {
-    let corners = corner_panel_frames(rect(0.0, 0.0, 100.0, 100.0), 32.0);
+    let layout = OverlayPanelLayout::new(rect(0.0, 0.0, 100.0, 100.0), 32.0);
     let windows = vec![
         detailed_other(7, 0, 99, rect(0.0, 80.0, 10.0, 10.0)),
         detailed_target(8, 0, 42, rect(0.0, 0.0, 100.0, 100.0)),
     ];
 
-    assert_eq!(visible_corner_panels(&windows, 8, &corners), [true; 4]);
+    assert_eq!(
+        visible_corner_layers(&windows, 8, &layout.corner_frames),
+        [true; 4]
+    );
 }
 
 #[test]
 fn touching_sibling_bounds_do_not_occlude_a_corner() {
-    let corners = corner_panel_frames(rect(0.0, 0.0, 100.0, 100.0), 32.0);
+    let layout = OverlayPanelLayout::new(rect(0.0, 0.0, 100.0, 100.0), 32.0);
     let windows = vec![
         detailed_other(7, 0, 42, rect(32.0, 80.0, 10.0, 10.0)),
         detailed_target(8, 0, 42, rect(0.0, 0.0, 100.0, 100.0)),
     ];
 
-    assert_eq!(visible_corner_panels(&windows, 8, &corners), [true; 4]);
+    assert_eq!(
+        visible_corner_layers(&windows, 8, &layout.corner_frames),
+        [true; 4]
+    );
 }
 
 #[test]

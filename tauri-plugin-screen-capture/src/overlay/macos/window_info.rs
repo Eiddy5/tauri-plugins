@@ -1,5 +1,5 @@
 use objc2::MainThreadMarker;
-use objc2_app_kit::NSScreen;
+use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication, NSScreen};
 use objc2_core_foundation::{
     CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGRect, ConcreteType,
 };
@@ -89,6 +89,34 @@ pub(crate) fn window_geometry(window_id: u32) -> Result<Option<WindowGeometry>> 
         },
         frame,
     }))
+}
+
+pub(crate) fn window_owner_pid(window_id: u32) -> Result<Option<u32>> {
+    let Some(row) = window_row(window_id)? else {
+        return Ok(None);
+    };
+    Ok(number(&row, unsafe { kCGWindowOwnerPID })
+        .and_then(CFNumber::as_i64)
+        .and_then(|pid| u32::try_from(pid).ok()))
+}
+
+pub(crate) fn activate_window_owner(window_id: u32) -> Result<bool> {
+    let Some(owner_pid) = window_owner_pid(window_id)? else {
+        return Ok(false);
+    };
+    let Ok(owner_pid) = i32::try_from(owner_pid) else {
+        return Ok(false);
+    };
+    let Some(application) =
+        NSRunningApplication::runningApplicationWithProcessIdentifier(owner_pid)
+    else {
+        return Ok(false);
+    };
+
+    #[allow(deprecated)]
+    let activated =
+        application.activateWithOptions(NSApplicationActivationOptions::ActivateIgnoringOtherApps);
+    Ok(activated)
 }
 
 type WindowRow = CFRetained<CFDictionary<CFString, CFType>>;
@@ -210,7 +238,7 @@ fn appkit_rect(rect: CGRect) -> MacRect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::overlay::macos::{corner_panel_frames, visible_corner_panels};
+    use crate::overlay::macos::{visible_corner_layers, OverlayPanelLayout};
 
     #[test]
     fn selects_display_frame_by_legacy_screen_number() {
@@ -247,7 +275,7 @@ mod tests {
             width: 100.0,
             height: 100.0,
         };
-        let corners = corner_panel_frames(target_frame, 32.0);
+        let layout = OverlayPanelLayout::new(target_frame, 32.0);
         let windows = [
             ordered_window_from_fields(
                 7,
@@ -266,7 +294,7 @@ mod tests {
         ];
 
         assert_eq!(
-            visible_corner_panels(&windows, 8, &corners),
+            visible_corner_layers(&windows, 8, &layout.corner_frames),
             [false, true, true, true]
         );
     }
@@ -274,6 +302,11 @@ mod tests {
     #[test]
     fn targeted_window_query_returns_no_row_for_an_invalid_id() {
         assert!(window_row(u32::MAX).unwrap().is_none());
+    }
+
+    #[test]
+    fn targeted_window_owner_query_returns_none_for_an_invalid_id() {
+        assert!(window_owner_pid(u32::MAX).unwrap().is_none());
     }
 
     #[test]

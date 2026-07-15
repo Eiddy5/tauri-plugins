@@ -3,6 +3,7 @@ import {
   checkPermission,
   getCaptureStats,
   listSources,
+  onCaptureSessionEnded,
   pauseCapture,
   requestPermission,
   resumeCapture,
@@ -178,7 +179,7 @@ elements.refresh.addEventListener("click", refreshSources)
 elements.start.addEventListener("click", start)
 elements.pause.addEventListener("click", pause)
 elements.resume.addEventListener("click", resume)
-elements.stop.addEventListener("click", stop)
+elements.stop.addEventListener("click", () => void stop())
 elements.quality.addEventListener("change", () => {
   if (!Object.hasOwn(captureQualityPresets, elements.quality.value)) return
   state.captureQuality = elements.quality.value
@@ -208,6 +209,13 @@ for (const input of elements.agoraFields) {
     persistAgoraConfig(input.dataset.agoraField, input.value)
   })
 }
+
+void onCaptureSessionEnded(({ payload }) => {
+  if (payload.sessionId !== state.session?.sessionId) return
+  void handleCaptureSessionEnded(payload)
+}).catch((error) => {
+  console.error("[screen-capture] failed to listen for session ended events", error)
+})
 
 render()
 
@@ -334,7 +342,12 @@ async function resume() {
   await updateStats()
 }
 
-async function stop() {
+async function handleCaptureSessionEnded(event) {
+  await stop({ stopBackend: false })
+  window.alert(event.error.message || "被共享窗口已关闭")
+}
+
+async function stop({ stopBackend = true } = {}) {
   const activeSession = state.session
   state.session = null
   state.stats = null
@@ -354,7 +367,7 @@ async function stop() {
   state.peerConnection = null
   elements.video.srcObject = null
 
-  if (activeSession) {
+  if (activeSession && stopBackend) {
     try {
       await stopCapture(activeSession.sessionId)
     } catch (err) {

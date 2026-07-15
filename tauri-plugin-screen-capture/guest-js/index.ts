@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import { listen, type Event, type UnlistenFn } from '@tauri-apps/api/event'
 
 export type CaptureSourceKind = 'display' | 'window'
 export type PublisherKind = 'webRtcLoopback' | 'agora'
@@ -82,6 +83,13 @@ export interface CaptureSession {
   lastError?: CaptureErrorPayload | null
 }
 
+export interface CaptureSessionEndedEvent {
+  sessionId: string
+  error: CaptureErrorPayload
+}
+
+export const CAPTURE_SESSION_ENDED_EVENT = 'screen-capture://session-ended'
+
 export interface CaptureStats {
   framesCaptured: number
   framesPublished: number
@@ -147,6 +155,12 @@ export function getCaptureSession(sessionId: string) {
 
 export function getCaptureStats(sessionId: string) {
   return invoke<CaptureStats>(command('get_capture_stats'), { sessionId })
+}
+
+export function onCaptureSessionEnded(
+  handler: (event: Event<CaptureSessionEndedEvent>) => void,
+): Promise<UnlistenFn> {
+  return listen<CaptureSessionEndedEvent>(CAPTURE_SESSION_ENDED_EVENT, handler)
 }
 
 export function createWebRtcOffer(sessionId: string) {

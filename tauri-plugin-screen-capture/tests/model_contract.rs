@@ -1,5 +1,7 @@
 use tauri_plugin_screen_capture::*;
 
+use tauri_plugin_screen_capture::capture::CaptureFinishReason;
+
 #[test]
 fn list_sources_options_defaults_are_safe_for_user_ui() {
     let options = ListSourcesOptions::default();
@@ -89,6 +91,20 @@ fn capture_error_serializes_stable_code() {
     let json = serde_json::to_value(error).expect("serialize error payload");
     assert_eq!(json["code"], "permissionDenied");
     assert_eq!(json["recoverable"], true);
+}
+
+#[test]
+fn source_closed_finish_reason_builds_the_shared_window_error() {
+    let error = CaptureFinishReason::source_closed("native source closed")
+        .into_error_payload(CaptureSourceKind::Window);
+
+    assert_eq!(error.code, CaptureErrorCode::SourceUnavailable);
+    assert_eq!(error.message, "被共享窗口已关闭");
+    assert!(error.recoverable);
+    assert_eq!(
+        error.details,
+        Some(serde_json::json!({ "reason": "native source closed" }))
+    );
 }
 
 #[test]

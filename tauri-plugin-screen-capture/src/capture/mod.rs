@@ -10,12 +10,48 @@ use tokio::sync::watch;
 
 use crate::{
     models::{
-        CaptureErrorPayload, CaptureSource, CaptureStats, ListSourcesOptions, PermissionStatus,
-        StartCaptureOptions,
+        CaptureErrorCode, CaptureErrorPayload, CaptureSource, CaptureSourceKind, CaptureStats,
+        ListSourcesOptions, PermissionStatus, StartCaptureOptions,
     },
     pipeline::frame::VideoFrame,
     Result,
 };
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum CaptureFinishReason {
+    SourceClosed { reason: String },
+    Error(CaptureErrorPayload),
+}
+
+impl CaptureFinishReason {
+    pub fn source_closed(reason: impl Into<String>) -> Self {
+        Self::SourceClosed {
+            reason: reason.into(),
+        }
+    }
+
+    pub fn error(error: CaptureErrorPayload) -> Self {
+        Self::Error(error)
+    }
+
+    pub fn into_error_payload(self, source_kind: CaptureSourceKind) -> CaptureErrorPayload {
+        match self {
+            Self::SourceClosed { reason } => {
+                let message = match source_kind {
+                    CaptureSourceKind::Window => "被共享窗口已关闭",
+                    CaptureSourceKind::Display => "被共享屏幕已断开",
+                };
+                CaptureErrorPayload {
+                    code: CaptureErrorCode::SourceUnavailable,
+                    message: message.to_string(),
+                    recoverable: true,
+                    details: Some(serde_json::json!({ "reason": reason })),
+                }
+            }
+            Self::Error(error) => error,
+        }
+    }
+}
 
 pub use dummy::{unsupported_backend_error, DummyCaptureBackend};
 #[cfg(target_os = "macos")]
@@ -62,7 +98,7 @@ pub trait RunningCapture: Send + Sync {
     async fn resume(&self) -> Result<()>;
     async fn stop(&self) -> Result<()>;
 
-    fn finish_receiver(&self) -> Option<watch::Receiver<Option<CaptureErrorPayload>>> {
+    fn finish_receiver(&self) -> Option<watch::Receiver<Option<CaptureFinishReason>>> {
         None
     }
 

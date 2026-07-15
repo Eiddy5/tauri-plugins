@@ -9,13 +9,16 @@ use crate::{
 };
 
 use super::{
-    corner_panel_frames, decide_window_overlay,
+    decide_window_overlay,
     events::{schedule_order_verification, EventObservers},
     lightweight_order_span, needs_native_update,
-    panel::CornerPanel,
-    verify_lightweight_order, verify_panel_placements, visible_corner_panels,
-    window_info::{display_frame, ordered_windows, visible_window_ids, window_geometry},
-    OrderVerificationState, OverlayDecision, WindowFrameAction, WindowFrameTracker,
+    panel::OverlayPanel,
+    verify_lightweight_order, verify_overlay_panel_placement, visible_corner_layers,
+    window_info::{
+        activate_window_owner, display_frame, ordered_windows, visible_window_ids, window_geometry,
+    },
+    OrderVerificationState, OverlayDecision, OverlayPanelLayout, WindowFrameAction,
+    WindowFrameTracker,
 };
 
 thread_local! {
@@ -26,6 +29,20 @@ pub(crate) fn start(session_id: u64, target: OverlayTarget) -> Result<()> {
     HOSTS.with_borrow_mut(|hosts| {
         if hosts.contains_key(&session_id) {
             return Err(overlay_error("macOS 浮层会话已经启动"));
+        }
+        match activate_startup_target_with(&target, activate_window_owner) {
+            Ok(Some(false)) => tracing::debug!(
+                session_id,
+                source_id = %target.source_id,
+                "macOS 共享启动时未能激活目标窗口所属应用"
+            ),
+            Err(error) => tracing::debug!(
+                %error,
+                session_id,
+                source_id = %target.source_id,
+                "macOS 共享启动时读取目标窗口所属应用失败"
+            ),
+            Ok(Some(true) | None) => {}
         }
         let mut host = OverlayHost::new(session_id, target)?;
         host.refresh()?;
@@ -46,7 +63,7 @@ pub(crate) fn hide(session_id: u64) -> Result<()> {
     with_host(session_id, |host| {
         host.requested_visible = false;
         host.observers.set_paused(true);
-        host.hide_panels();
+        host.hide_panel();
         Ok(())
     })
 }
@@ -57,7 +74,7 @@ pub(crate) fn refresh(session_id: u64) -> Result<()> {
 
 pub(crate) fn hide_transient(session_id: u64) -> Result<()> {
     with_host(session_id, |host| {
-        host.hide_panels();
+        host.hide_panel();
         Ok(())
     })
 }
@@ -100,16 +117,33 @@ fn with_host(
     })
 }
 
+fn startup_activation_target(target: &OverlayTarget) -> Result<Option<u32>> {
+    match target.source_kind {
+        CaptureSourceKind::Window => parse_source_id(&target.source_id, "window").map(Some),
+        CaptureSourceKind::Display => Ok(None),
+    }
+}
+
+fn activate_startup_target_with(
+    target: &OverlayTarget,
+    activate: impl FnOnce(u32) -> Result<bool>,
+) -> Result<Option<bool>> {
+    let Some(window_id) = startup_activation_target(target)? else {
+        return Ok(None);
+    };
+    activate(window_id).map(Some)
+}
+
 struct OverlayHost {
     session_id: u64,
     target: OverlayTarget,
-    panels: [CornerPanel; 4],
+    panel: OverlayPanel,
     requested_visible: bool,
     observers: EventObservers,
     last_frame: Option<super::MacRect>,
     last_level: Option<i32>,
-    panels_visible: bool,
-    panel_visibility: [bool; 4],
+    panel_visible: bool,
+    corner_visibility: [bool; 4],
     lightweight_order_span: Option<Vec<u32>>,
     window_frame_tracker: WindowFrameTracker,
     order_verification: OrderVerificationState,
@@ -121,13 +155,13 @@ impl OverlayHost {
         Ok(Self {
             session_id,
             target,
-            panels: CornerPanel::create_set(session_id)?,
+            panel: OverlayPanel::new(session_id)?,
             requested_visible: true,
             observers: EventObservers::new(session_id, track_window_frame)?,
             last_frame: None,
             last_level: None,
-            panels_visible: false,
-            panel_visibility: [false; 4],
+            panel_visible: false,
+            corner_visibility: [false; 4],
             lightweight_order_span: None,
             window_frame_tracker: WindowFrameTracker::default(),
             order_verification: OrderVerificationState::default(),
@@ -139,7 +173,7 @@ impl OverlayHost {
             || (self.target.source_kind == CaptureSourceKind::Window
                 && self.window_frame_tracker.is_moving())
         {
-            self.hide_panels();
+            self.hide_panel();
             return Ok(());
         }
 
@@ -152,25 +186,23 @@ impl OverlayHost {
     fn refresh_display(&mut self) -> Result<()> {
         let display_id = parse_source_id(&self.target.source_id, "display")?;
         let Some(frame) = display_frame(display_id) else {
-            self.hide_panels();
+            self.hide_panel();
             return Err(Error::new(
                 CaptureErrorCode::SourceUnavailable,
                 "共享显示器已经断开或尺寸无效",
                 true,
             ));
         };
-        if !needs_native_update(self.panels_visible, self.last_frame != Some(frame), true) {
+        if !needs_native_update(self.panel_visible, self.last_frame != Some(frame), true) {
             return Ok(());
         }
-        self.apply_frames(frame);
-        for panel in &self.panels {
-            panel.set_level(NSStatusWindowLevel as i32);
-            panel.order_front();
-        }
+        self.panel.update_frame(frame, [true; 4]);
+        self.panel.set_level(NSStatusWindowLevel as i32);
+        self.panel.order_front();
         self.last_frame = Some(frame);
         self.last_level = Some(NSStatusWindowLevel as i32);
-        self.panels_visible = true;
-        self.panel_visibility = [true; 4];
+        self.panel_visible = true;
+        self.corner_visibility = [true; 4];
         Ok(())
     }
 
@@ -179,7 +211,7 @@ impl OverlayHost {
         let geometry = match window_geometry(target_id) {
             Ok(Some(geometry)) => geometry,
             Ok(None) => {
-                self.hide_panels();
+                self.hide_panel();
                 return Err(Error::new(
                     CaptureErrorCode::SourceUnavailable,
                     "共享窗口已经关闭或不在当前用户空间",
@@ -187,7 +219,7 @@ impl OverlayHost {
                 ));
             }
             Err(error) => {
-                self.hide_panels();
+                self.hide_panel();
                 return Err(error);
             }
         };
@@ -201,57 +233,49 @@ impl OverlayHost {
     ) -> Result<()> {
         let OverlayDecision::Show { level, .. } = decide_window_overlay(&geometry.snapshot, true)
         else {
-            self.hide_panels();
+            self.hide_panel();
             return Ok(());
         };
 
-        let panel_ids = self.panel_ids();
-        let current_order = match ordered_windows(target_id, &panel_ids) {
+        let panel_id = self.panel.window_id();
+        let current_order = match ordered_windows(target_id, &[panel_id]) {
             Ok(windows) => windows,
             Err(error) => {
-                self.hide_panels();
+                self.hide_panel();
                 return Err(error);
             }
         };
-        let panel_frames = corner_panel_frames(geometry.frame, 32.0);
-        let panel_visibility = visible_corner_panels(&current_order, target_id, &panel_frames);
-        let expected_panels = panel_ids
-            .into_iter()
-            .zip(panel_frames)
-            .zip(panel_visibility)
-            .filter_map(|((panel_id, frame), visible)| visible.then_some((panel_id, frame)))
-            .collect::<Vec<_>>();
-        let visible_panel_ids = expected_panels
-            .iter()
-            .map(|(panel_id, _)| *panel_id)
-            .collect::<Vec<_>>();
-        let order_valid = self.panel_visibility == panel_visibility
-            && verify_panel_placements(&current_order, target_id, &expected_panels);
+        let layout = OverlayPanelLayout::new(geometry.frame, 32.0);
+        let corner_visibility =
+            visible_corner_layers(&current_order, target_id, &layout.corner_frames);
+        let order_valid = self.corner_visibility == corner_visibility
+            && verify_overlay_panel_placement(
+                &current_order,
+                target_id,
+                panel_id,
+                &layout,
+                corner_visibility,
+            );
         let bounds_changed = self.last_frame != Some(geometry.frame)
             || self.last_level != Some(level)
-            || self.panel_visibility != panel_visibility;
-        if !needs_native_update(self.panels_visible, bounds_changed, order_valid) {
+            || self.corner_visibility != corner_visibility;
+        if !needs_native_update(self.panel_visible, bounds_changed, order_valid) {
             self.lightweight_order_span =
-                lightweight_order_span(&current_order, target_id, &visible_panel_ids);
+                lightweight_order_span(&current_order, target_id, panel_id);
             self.window_frame_tracker.synchronize(geometry.frame);
             return Ok(());
         }
 
         self.lightweight_order_span = None;
-        self.apply_frames(geometry.frame);
-        for (panel, visible) in self.panels.iter().zip(panel_visibility) {
-            if visible {
-                panel.set_level(level);
-                panel.order_above(target_id);
-            } else {
-                panel.hide();
-            }
-        }
+        self.panel
+            .update_frame(layout.panel_frame, corner_visibility);
+        self.panel.set_level(level);
+        self.panel.order_above(target_id);
 
         self.last_frame = Some(geometry.frame);
         self.last_level = Some(level);
-        self.panels_visible = true;
-        self.panel_visibility = panel_visibility;
+        self.panel_visible = true;
+        self.corner_visibility = corner_visibility;
         self.window_frame_tracker.synchronize(geometry.frame);
         let generation = self.order_verification.request();
         schedule_order_verification(self.session_id, generation);
@@ -266,23 +290,23 @@ impl OverlayHost {
         let geometry = match window_geometry(target_id) {
             Ok(Some(geometry)) => geometry,
             Ok(None) => {
-                self.hide_panels();
+                self.hide_panel();
                 return Ok(());
             }
             Err(error) => {
-                self.hide_panels();
+                self.hide_panel();
                 return Err(error);
             }
         };
         if decide_window_overlay(&geometry.snapshot, true) == OverlayDecision::Hide {
-            self.hide_panels();
+            self.hide_panel();
             return Ok(());
         }
 
         let mut action = self
             .window_frame_tracker
-            .observe_for_visibility(geometry.frame, self.panels_visible);
-        if action == WindowFrameAction::Keep && self.panels_visible {
+            .observe_for_visibility(geometry.frame, self.panel_visible);
+        if action == WindowFrameAction::Keep && self.panel_visible {
             let order_valid = visible_window_ids()
                 .ok()
                 .zip(self.lightweight_order_span.as_deref())
@@ -295,7 +319,7 @@ impl OverlayHost {
         match action {
             WindowFrameAction::Keep => Ok(()),
             WindowFrameAction::Hide => {
-                self.hide_panels();
+                self.hide_panel();
                 Ok(())
             }
             WindowFrameAction::Refresh => self.refresh_window_geometry(target_id, geometry),
@@ -306,67 +330,54 @@ impl OverlayHost {
         if !self.order_verification.take_if_current(generation) {
             return Ok(());
         }
-        if !self.requested_visible || !self.panels_visible {
+        if !self.requested_visible || !self.panel_visible {
             return Ok(());
         }
 
         let target_id = match parse_source_id(&self.target.source_id, "window") {
             Ok(target_id) => target_id,
             Err(error) => {
-                self.hide_panels();
+                self.hide_panel();
                 return Err(error);
             }
         };
-        let panel_ids = self.panel_ids();
-        let windows = match ordered_windows(target_id, &panel_ids) {
+        let panel_id = self.panel.window_id();
+        let windows = match ordered_windows(target_id, &[panel_id]) {
             Ok(windows) => windows,
             Err(error) => {
-                self.hide_panels();
+                self.hide_panel();
                 return Err(error);
             }
         };
         let Some(last_frame) = self.last_frame else {
-            self.hide_panels();
+            self.hide_panel();
             return Err(overlay_error("浮层缺少目标窗口边界"));
         };
-        let expected_panels = panel_ids
-            .into_iter()
-            .zip(corner_panel_frames(last_frame, 32.0))
-            .zip(self.panel_visibility)
-            .filter_map(|((panel_id, frame), visible)| visible.then_some((panel_id, frame)))
-            .collect::<Vec<_>>();
-        if verify_panel_placements(&windows, target_id, &expected_panels) {
-            let visible_panel_ids = expected_panels
-                .iter()
-                .map(|(panel_id, _)| *panel_id)
-                .collect::<Vec<_>>();
-            self.lightweight_order_span =
-                lightweight_order_span(&windows, target_id, &visible_panel_ids);
+        let layout = OverlayPanelLayout::new(last_frame, 32.0);
+        let corner_visibility = visible_corner_layers(&windows, target_id, &layout.corner_frames);
+        if corner_visibility == self.corner_visibility
+            && verify_overlay_panel_placement(
+                &windows,
+                target_id,
+                panel_id,
+                &layout,
+                corner_visibility,
+            )
+        {
+            self.lightweight_order_span = lightweight_order_span(&windows, target_id, panel_id);
             return Ok(());
         }
 
-        self.hide_panels();
+        self.hide_panel();
         Err(overlay_error("无法维持目标窗口的相对层级，已隐藏浮层"))
     }
 
-    fn apply_frames(&self, target: super::MacRect) {
-        for (panel, frame) in self.panels.iter().zip(corner_panel_frames(target, 32.0)) {
-            panel.update_frame(frame);
-        }
-    }
-
-    fn hide_panels(&mut self) {
+    fn hide_panel(&mut self) {
         self.order_verification.cancel();
         self.lightweight_order_span = None;
-        for panel in &self.panels {
-            panel.hide();
-        }
-        self.panels_visible = false;
-        self.panel_visibility = [false; 4];
-    }
-
-    fn panel_ids(&self) -> [u32; 4] {
-        self.panels.each_ref().map(CornerPanel::window_id)
+        self.panel.hide();
+        self.panel_visible = false;
+        self.corner_visibility = [false; 4];
     }
 }
 
@@ -386,4 +397,54 @@ fn parse_source_id(source_id: &str, expected_kind: &str) -> Result<u32> {
 
 fn overlay_error(message: impl Into<String>) -> Error {
     Error::new(CaptureErrorCode::Internal, message, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    #[test]
+    fn only_window_sharing_requests_startup_application_activation() {
+        let window = OverlayTarget {
+            source_id: "window:42".to_owned(),
+            source_kind: CaptureSourceKind::Window,
+        };
+        let display = OverlayTarget {
+            source_id: "display:7".to_owned(),
+            source_kind: CaptureSourceKind::Display,
+        };
+
+        assert_eq!(startup_activation_target(&window).unwrap(), Some(42));
+        assert_eq!(startup_activation_target(&display).unwrap(), None);
+    }
+
+    #[test]
+    fn startup_activation_calls_the_window_activator_once_and_skips_displays() {
+        let window = OverlayTarget {
+            source_id: "window:42".to_owned(),
+            source_kind: CaptureSourceKind::Window,
+        };
+        let display = OverlayTarget {
+            source_id: "display:7".to_owned(),
+            source_kind: CaptureSourceKind::Display,
+        };
+        let calls = Cell::new(0);
+        let activate = |window_id| {
+            assert_eq!(window_id, 42);
+            calls.set(calls.get() + 1);
+            Ok(false)
+        };
+
+        assert_eq!(
+            activate_startup_target_with(&window, activate).unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            activate_startup_target_with(&display, |_| panic!("显示器共享不应激活应用")).unwrap(),
+            None
+        );
+        assert_eq!(calls.get(), 1);
+    }
 }

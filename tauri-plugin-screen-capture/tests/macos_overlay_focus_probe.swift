@@ -26,15 +26,12 @@ func visibleWindowIDs() -> [CGWindowID] {
 func orderSpan(
     _ ids: [CGWindowID],
     target: CGWindowID,
-    panels: [CGWindowID]
+    panel: CGWindowID
 ) -> [CGWindowID]? {
     guard let targetIndex = ids.firstIndex(of: target) else {
         return nil
     }
-    let panelIndexes = panels.compactMap { ids.firstIndex(of: $0) }
-    guard panelIndexes.count == panels.count,
-          let spanStart = panelIndexes.min(),
-          spanStart < targetIndex else {
+    guard let spanStart = ids.firstIndex(of: panel), spanStart < targetIndex else {
         return nil
     }
     return Array(ids[spanStart...targetIndex])
@@ -71,35 +68,66 @@ target.title = "macos-overlay-focus-probe-target"
 target.level = .normal
 target.orderFrontRegardless()
 
-let panelFrames = [
-    NSRect(x: 120, y: 408, width: 32, height: 32),
-    NSRect(x: 568, y: 408, width: 32, height: 32),
-    NSRect(x: 120, y: 120, width: 32, height: 32),
-    NSRect(x: 568, y: 120, width: 32, height: 32),
+let panel = NSPanel(
+    contentRect: target.frame,
+    styleMask: [.borderless, .nonactivatingPanel],
+    backing: .buffered,
+    defer: false
+)
+panel.level = target.level
+panel.isOpaque = false
+panel.hasShadow = false
+panel.isFloatingPanel = false
+panel.hidesOnDeactivate = false
+panel.backgroundColor = .clear
+panel.ignoresMouseEvents = true
+panel.collectionBehavior = [
+    .canJoinAllSpaces,
+    .fullScreenAuxiliary,
+    .stationary,
 ]
-let panels = panelFrames.map { frame -> NSPanel in
-    let panel = NSPanel(
-        contentRect: frame,
-        styleMask: [.borderless, .nonactivatingPanel],
-        backing: .buffered,
-        defer: false
+precondition(panel.collectionBehavior.contains(.stationary))
+precondition(!panel.collectionBehavior.contains(.transient))
+
+let overlayView = NSView(frame: NSRect(origin: .zero, size: target.frame.size))
+overlayView.wantsLayer = true
+let rootLayer = CALayer()
+rootLayer.frame = overlayView.bounds
+overlayView.layer = rootLayer
+panel.contentView = overlayView
+
+let markerLength: CGFloat = 32
+let markerThickness: CGFloat = 4
+let width = target.frame.width
+let height = target.frame.height
+let cornerFrames = [
+    CGRect(x: 0, y: height - markerLength, width: markerLength, height: markerLength),
+    CGRect(x: width - markerLength, y: height - markerLength, width: markerLength, height: markerLength),
+    CGRect(x: 0, y: 0, width: markerLength, height: markerLength),
+    CGRect(x: width - markerLength, y: 0, width: markerLength, height: markerLength),
+]
+for (index, corner) in cornerFrames.enumerated() {
+    let horizontal = CALayer()
+    horizontal.backgroundColor = NSColor.systemGreen.cgColor
+    horizontal.frame = CGRect(
+        x: corner.minX,
+        y: index < 2 ? corner.maxY - markerThickness : corner.minY,
+        width: markerLength,
+        height: markerThickness
     )
-    panel.level = target.level
-    panel.isOpaque = false
-    panel.backgroundColor = .clear
-    panel.ignoresMouseEvents = true
-    panel.collectionBehavior = [
-        .canJoinAllSpaces,
-        .fullScreenAuxiliary,
-        .transient,
-        .ignoresCycle,
-    ]
-    precondition(panel.collectionBehavior.contains(.transient))
-    precondition(panel.collectionBehavior.contains(.ignoresCycle))
-    precondition(!panel.collectionBehavior.contains(.stationary))
-    panel.order(.above, relativeTo: target.windowNumber)
-    return panel
+    rootLayer.addSublayer(horizontal)
+
+    let vertical = CALayer()
+    vertical.backgroundColor = NSColor.systemGreen.cgColor
+    vertical.frame = CGRect(
+        x: index % 2 == 0 ? corner.minX : corner.maxX - markerThickness,
+        y: corner.minY,
+        width: markerThickness,
+        height: markerLength
+    )
+    rootLayer.addSublayer(vertical)
 }
+panel.order(.above, relativeTo: target.windowNumber)
 
 let sibling = NSWindow(
     contentRect: NSRect(x: 220, y: 220, width: 120, height: 80),
@@ -113,9 +141,9 @@ sibling.order(.above, relativeTo: target.windowNumber)
 
 advanceWindowServer()
 let targetID = CGWindowID(target.windowNumber)
-let panelIDs = panels.map { CGWindowID($0.windowNumber) }
+let panelID = CGWindowID(panel.windowNumber)
 let initialIDs = visibleWindowIDs()
-guard let cachedSpan = orderSpan(initialIDs, target: targetID, panels: panelIDs) else {
+guard let cachedSpan = orderSpan(initialIDs, target: targetID, panel: panelID) else {
     preconditionFailure("initial panel order was not established")
 }
 precondition(cachedSpan.contains(CGWindowID(sibling.windowNumber)))
@@ -128,13 +156,11 @@ precondition(
     "bringing the target forward did not reproduce panel order loss"
 )
 
-for panel in panels {
-    panel.order(.above, relativeTo: target.windowNumber)
-}
+panel.order(.above, relativeTo: target.windowNumber)
 sibling.order(.above, relativeTo: target.windowNumber)
 advanceWindowServer()
 let repairedIDs = visibleWindowIDs()
-guard let repairedSpan = orderSpan(repairedIDs, target: targetID, panels: panelIDs) else {
+guard let repairedSpan = orderSpan(repairedIDs, target: targetID, panel: panelID) else {
     preconditionFailure("relative panel reorder did not restore the invariant")
 }
 precondition(
@@ -146,9 +172,7 @@ advanceWindowServer()
 advanceWindowServer()
 precondition(orderMatches(visibleWindowIDs(), target: targetID, expectedSpan: repairedSpan))
 
-for panel in panels {
-    panel.close()
-}
+panel.close()
 sibling.close()
 target.close()
-print("PASS: focus reorder reproduced, repaired, and stable with sibling")
+print("PASS: single overlay panel focus reorder reproduced, repaired, and stable with sibling")

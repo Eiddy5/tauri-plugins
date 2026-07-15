@@ -6,10 +6,13 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tauri_plugin_screen_capture::{
-    capture::{CaptureBackend, DummyCaptureBackend, FrameConsumer, RunningCapture},
+    capture::{
+        CaptureBackend, CaptureFinishReason, DummyCaptureBackend, FrameConsumer, RunningCapture,
+    },
     overlay::ShareOverlayFactory,
-    CaptureErrorCode, CaptureErrorPayload, CaptureSourceKind, CaptureStatus, ListSourcesOptions,
-    PermissionStatus, Result, ScreenCaptureState, StartCaptureOptions,
+    CaptureErrorCode, CaptureErrorPayload, CaptureEventSink, CaptureSessionEndedEvent,
+    CaptureSourceKind, CaptureStatus, ListSourcesOptions, PermissionStatus, Result,
+    ScreenCaptureState, StartCaptureOptions,
 };
 use tokio::sync::watch;
 
@@ -87,6 +90,18 @@ struct OverlayProbeFactory {
     creates: AtomicUsize,
     overlays: Mutex<Vec<Arc<OverlayLifecycleCounters>>>,
     fail_lifecycle_calls: bool,
+}
+
+#[derive(Debug, Default)]
+struct CaptureEventProbe {
+    ended: Mutex<Vec<CaptureSessionEndedEvent>>,
+}
+
+impl CaptureEventSink for CaptureEventProbe {
+    fn emit_session_ended(&self, event: CaptureSessionEndedEvent) -> Result<()> {
+        self.ended.lock().expect("events lock").push(event);
+        Ok(())
+    }
 }
 
 impl OverlayProbeFactory {
@@ -230,7 +245,7 @@ impl RunningCapture for FailingStopRunningCapture {
 #[derive(Debug)]
 struct FinishingBackend {
     counters: Arc<BackendLifecycleCounters>,
-    finish_sender: watch::Sender<Option<CaptureErrorPayload>>,
+    finish_sender: watch::Sender<Option<CaptureFinishReason>>,
 }
 
 #[async_trait]
@@ -266,7 +281,7 @@ impl CaptureBackend for FinishingBackend {
 #[derive(Debug)]
 struct FinishingRunningCapture {
     counters: Arc<BackendLifecycleCounters>,
-    finish_receiver: watch::Receiver<Option<CaptureErrorPayload>>,
+    finish_receiver: watch::Receiver<Option<CaptureFinishReason>>,
 }
 
 #[async_trait]
@@ -284,7 +299,7 @@ impl RunningCapture for FinishingRunningCapture {
         Ok(())
     }
 
-    fn finish_receiver(&self) -> Option<watch::Receiver<Option<CaptureErrorPayload>>> {
+    fn finish_receiver(&self) -> Option<watch::Receiver<Option<CaptureFinishReason>>> {
         Some(self.finish_receiver.clone())
     }
 }
@@ -594,12 +609,7 @@ async fn state_removes_session_when_running_capture_finishes_after_source_closes
         .expect("start");
 
     finish_sender
-        .send(Some(CaptureErrorPayload {
-            code: CaptureErrorCode::SourceUnavailable,
-            message: "window closed".to_string(),
-            recoverable: true,
-            details: None,
-        }))
+        .send(Some(CaptureFinishReason::source_closed("window closed")))
         .expect("send finish");
 
     tokio::time::timeout(Duration::from_secs(1), async {
@@ -621,6 +631,62 @@ async fn state_removes_session_when_running_capture_finishes_after_source_closes
     let overlays = overlay_factory.overlay_counters();
     assert_eq!(overlays.len(), 1);
     assert_eq!(overlays[0].stops.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn state_emits_one_session_ended_event_when_the_shared_window_closes() {
+    let counters = Arc::new(BackendLifecycleCounters::default());
+    let (finish_sender, _) = watch::channel(None);
+    let backend = Arc::new(FinishingBackend {
+        counters,
+        finish_sender: finish_sender.clone(),
+    });
+    let overlay_factory = Arc::new(OverlayProbeFactory::default());
+    let event_sink = Arc::new(CaptureEventProbe::default());
+    let state = ScreenCaptureState::with_backend_overlay_factory_and_event_sink(
+        backend,
+        overlay_factory,
+        Arc::clone(&event_sink) as Arc<dyn CaptureEventSink>,
+    );
+    let session = state
+        .start_capture(StartCaptureOptions {
+            source_id: "dummy-window-1".to_string(),
+            source_kind: CaptureSourceKind::Window,
+            ..start_options()
+        })
+        .await
+        .expect("start");
+    let payload = CaptureErrorPayload {
+        code: CaptureErrorCode::SourceUnavailable,
+        message: "被共享窗口已关闭".to_string(),
+        recoverable: true,
+        details: Some(serde_json::json!({ "reason": "native window closed" })),
+    };
+
+    finish_sender
+        .send(Some(CaptureFinishReason::source_closed(
+            "native window closed",
+        )))
+        .expect("send finish");
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if event_sink.ended.lock().expect("events lock").len() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("session ended event");
+
+    assert_eq!(
+        *event_sink.ended.lock().expect("events lock"),
+        vec![CaptureSessionEndedEvent {
+            session_id: session.session_id,
+            error: payload,
+        }]
+    );
 }
 
 #[tokio::test]
