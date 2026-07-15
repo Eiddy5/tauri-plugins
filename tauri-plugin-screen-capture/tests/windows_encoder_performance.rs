@@ -1,10 +1,16 @@
 #![cfg(windows)]
 
-use std::{sync::Arc, time::Instant};
+use std::{mem::size_of, sync::Arc, time::Instant};
 
 use tauri_plugin_screen_capture::{
     pipeline::frame::VideoFrame, webrtc::h264_encoder::H264Encoder, PixelFormat,
 };
+use windows::Win32::System::{
+    ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX},
+    Threading::GetCurrentProcess,
+};
+
+const MIB: usize = 1024 * 1024;
 
 #[test]
 #[ignore = "CPU/GPU dependent Windows performance benchmark"]
@@ -58,6 +64,73 @@ fn h264_encoder_sustains_realtime_1080p60_input() {
     assert!(
         encoded * 100 >= frame_count as usize * 95,
         "expected at least 95% of input frames to produce H264 access units, got {encoded}/{frame_count}"
+    );
+}
+
+#[test]
+#[ignore = "requires a Windows Media Foundation hardware H264 encoder"]
+fn h264_encoder_private_memory_stabilizes_after_warmup() {
+    let width = 1920;
+    let height = 1080;
+    let fps = 60;
+    let mut encoder = H264Encoder::new(width, height, fps).expect("create Windows H264 encoder");
+    assert!(
+        encoder.backend_name().starts_with("media-foundation"),
+        "memory regression requires Media Foundation, got {}",
+        encoder.backend_name()
+    );
+    let pixels = Arc::<[u8]>::from(vec![32u8; width as usize * height as usize * 4]);
+
+    for index in 0..90 {
+        let _ = encoder
+            .encode_frame(&VideoFrame {
+                width,
+                height,
+                pixel_format: PixelFormat::Bgra,
+                timestamp_ns: index * 1_000_000_000 / u64::from(fps),
+                data: Arc::clone(&pixels),
+            })
+            .expect("warm up Windows H264 encoder");
+    }
+
+    let private_before = current_process_private_bytes();
+    let measured_frames = 360u64;
+    let mut encoded = 0usize;
+    for index in 90..90 + measured_frames {
+        if encoder
+            .encode_frame(&VideoFrame {
+                width,
+                height,
+                pixel_format: PixelFormat::Bgra,
+                timestamp_ns: index * 1_000_000_000 / u64::from(fps),
+                data: Arc::clone(&pixels),
+            })
+            .expect("encode Windows frame during memory probe")
+            .is_some()
+        {
+            encoded += 1;
+        }
+    }
+    let private_after = current_process_private_bytes();
+    let private_growth = private_after.saturating_sub(private_before);
+
+    eprintln!(
+        "WINDOWS_ENCODER_MEMORY frames={} encoded={} before_mb={:.2} after_mb={:.2} growth_mb={:.2}",
+        measured_frames,
+        encoded,
+        private_before as f64 / MIB as f64,
+        private_after as f64 / MIB as f64,
+        private_growth as f64 / MIB as f64,
+    );
+
+    assert!(
+        encoded * 100 >= measured_frames as usize * 95,
+        "expected at least 95% of frames to produce H264 output, got {encoded}/{measured_frames}"
+    );
+    assert!(
+        private_growth <= 128 * MIB,
+        "expected private memory growth <= 128 MiB after warmup, got {:.2} MiB",
+        private_growth as f64 / MIB as f64
     );
 }
 
@@ -122,4 +195,20 @@ fn annex_b_nal_types(data: &[u8]) -> Vec<u8> {
         offset += start_len;
     }
     types
+}
+
+fn current_process_private_bytes() -> usize {
+    let mut counters = PROCESS_MEMORY_COUNTERS_EX {
+        cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+        ..Default::default()
+    };
+    let success = unsafe {
+        K32GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            (&mut counters as *mut PROCESS_MEMORY_COUNTERS_EX).cast::<PROCESS_MEMORY_COUNTERS>(),
+            size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+        )
+    };
+    assert!(success.as_bool(), "query current process memory counters");
+    counters.PrivateUsage
 }

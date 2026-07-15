@@ -39,6 +39,33 @@ pub(crate) struct MediaFoundationH264Encoder {
     gpu_surface_input: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputSampleAllocation {
+    MftProvided,
+    CallerProvided { buffer_size: u32, alignment: u32 },
+}
+
+fn output_sample_allocation(
+    stream_flags: u32,
+    buffer_size: u32,
+    alignment: u32,
+) -> Result<OutputSampleAllocation> {
+    let mft_allocation_flags =
+        (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0) as u32;
+    if stream_flags & mft_allocation_flags != 0 {
+        return Ok(OutputSampleAllocation::MftProvided);
+    }
+    if buffer_size == 0 {
+        return Err(mf_error(
+            "Media Foundation output stream requires caller samples but reported cbSize=0",
+        ));
+    }
+    Ok(OutputSampleAllocation::CallerProvided {
+        buffer_size,
+        alignment,
+    })
+}
+
 unsafe impl Send for MediaFoundationH264Encoder {}
 
 impl MediaFoundationH264Encoder {
@@ -289,14 +316,27 @@ impl MediaFoundationH264Encoder {
 
     fn take_output(&self) -> Result<Option<Vec<u8>>> {
         let info = unsafe { self.transform().GetOutputStreamInfo(0) }.map_err(map_windows_error)?;
-        let sample = unsafe { MFCreateSample() }.map_err(map_windows_error)?;
-        let buffer = unsafe { MFCreateMemoryBuffer(info.cbSize.max(1024 * 1024)) }
-            .map_err(map_windows_error)?;
-        unsafe { sample.AddBuffer(&buffer) }.map_err(map_windows_error)?;
+        let sample = match output_sample_allocation(info.dwFlags, info.cbSize, info.cbAlignment)? {
+            OutputSampleAllocation::MftProvided => None,
+            OutputSampleAllocation::CallerProvided {
+                buffer_size,
+                alignment,
+            } => {
+                let sample = unsafe { MFCreateSample() }.map_err(map_windows_error)?;
+                let buffer = if alignment == 0 {
+                    unsafe { MFCreateMemoryBuffer(buffer_size) }.map_err(map_windows_error)?
+                } else {
+                    unsafe { MFCreateAlignedMemoryBuffer(buffer_size, alignment) }
+                        .map_err(map_windows_error)?
+                };
+                unsafe { sample.AddBuffer(&buffer) }.map_err(map_windows_error)?;
+                Some(sample)
+            }
+        };
 
         let mut output = MFT_OUTPUT_DATA_BUFFER {
             dwStreamID: 0,
-            pSample: ManuallyDrop::new(Some(sample)),
+            pSample: ManuallyDrop::new(sample),
             dwStatus: 0,
             pEvents: ManuallyDrop::new(None),
         };
@@ -609,7 +649,46 @@ fn mf_error(message: impl Into<String>) -> Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_h264, pack_ratio, recommended_screen_share_bitrate};
+    use super::{
+        normalize_h264, output_sample_allocation, pack_ratio, recommended_screen_share_bitrate,
+        OutputSampleAllocation,
+    };
+    use windows::Win32::Media::MediaFoundation::{
+        MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
+    };
+
+    #[test]
+    fn mft_owned_output_samples_do_not_allocate_caller_buffers() {
+        assert_eq!(
+            output_sample_allocation(MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32, 0, 0,).unwrap(),
+            OutputSampleAllocation::MftProvided
+        );
+    }
+
+    #[test]
+    fn optional_mft_output_allocation_prefers_mft_owned_samples() {
+        assert_eq!(
+            output_sample_allocation(MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0 as u32, 4096, 15,)
+                .unwrap(),
+            OutputSampleAllocation::MftProvided
+        );
+    }
+
+    #[test]
+    fn caller_owned_output_samples_preserve_buffer_requirements() {
+        assert_eq!(
+            output_sample_allocation(0, 65_536, 31).unwrap(),
+            OutputSampleAllocation::CallerProvided {
+                buffer_size: 65_536,
+                alignment: 31,
+            }
+        );
+    }
+
+    #[test]
+    fn caller_owned_output_samples_require_a_nonzero_buffer_size() {
+        assert!(output_sample_allocation(0, 0, 0).is_err());
+    }
 
     #[test]
     fn ratio_attributes_use_media_foundation_packing() {
