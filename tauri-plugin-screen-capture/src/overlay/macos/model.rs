@@ -136,6 +136,26 @@ pub fn verify_relative_order(windows: &[OrderedWindow], target_id: u32, panel_id
             .all(|window| !panel_ids.contains(&window.id))
 }
 
+pub fn verify_lightweight_order(
+    window_ids: &[u32],
+    target_id: u32,
+    visible_panel_ids: &[u32],
+) -> bool {
+    if visible_panel_ids.is_empty() {
+        return window_ids.contains(&target_id);
+    }
+    let Some(target_index) = window_ids.iter().position(|id| *id == target_id) else {
+        return false;
+    };
+    let Some(panel_start) = target_index.checked_sub(visible_panel_ids.len()) else {
+        return false;
+    };
+    let panel_group = &window_ids[panel_start..target_index];
+    visible_panel_ids
+        .iter()
+        .all(|panel_id| panel_group.iter().filter(|id| *id == panel_id).count() == 1)
+}
+
 pub fn visible_corner_panels(
     windows: &[OrderedWindow],
     target_id: u32,
