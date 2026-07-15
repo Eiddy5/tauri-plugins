@@ -111,6 +111,25 @@ fn window_row(window_id: u32) -> Result<Option<WindowRow>> {
     Ok(rows.iter().next())
 }
 
+pub(crate) fn visible_window_ids() -> Result<Vec<u32>> {
+    let windows = CGWindowListCreate(CGWindowListOption::OptionOnScreenOnly, kCGNullWindowID)
+        .ok_or_else(|| {
+            Error::new(
+                CaptureErrorCode::Internal,
+                "无法读取 macOS 可见窗口顺序",
+                true,
+            )
+        })?;
+
+    Ok((0..windows.count())
+        .map(|index| {
+            // SAFETY: CGWindowListCreate returns pointer-encoded CGWindowID entries, and the
+            // index is within the array's reported count. The pointer value is not dereferenced.
+            (unsafe { windows.value_at_index(index) }) as usize as u32
+        })
+        .collect())
+}
+
 pub(crate) fn ordered_windows(target_id: u32, panel_ids: &[u32]) -> Result<Vec<OrderedWindow>> {
     let rows = window_rows(CGWindowListOption::OptionOnScreenOnly)?;
     Ok(rows
@@ -266,5 +285,16 @@ mod tests {
             .expect("当前 GUI 会话应至少包含一个可见窗口") as u32;
 
         assert!(window_row(window_id).unwrap().is_some());
+    }
+
+    #[test]
+    fn lightweight_window_ids_include_a_valid_on_screen_window() {
+        let rows = window_rows(CGWindowListOption::OptionOnScreenOnly).unwrap();
+        let window_id = rows
+            .iter()
+            .find_map(|row| number(row, unsafe { kCGWindowNumber })?.as_i64())
+            .expect("当前 GUI 会话应至少包含一个可见窗口") as u32;
+
+        assert!(visible_window_ids().unwrap().contains(&window_id));
     }
 }
