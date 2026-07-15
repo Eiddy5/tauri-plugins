@@ -27,10 +27,10 @@ use super::{ShareOverlay, ShareOverlayFactory};
 pub use events::{event_action, OverlayEvent, RefreshAction, WINDOW_POSITION_POLL_INTERVAL};
 pub use model::{
     decide_window_overlay, lightweight_order_span, needs_native_update, verify_lightweight_order,
-    verify_panel_placements, verify_relative_order, visible_corner_panels, OrderVerificationState,
-    OrderedWindow, OverlayDecision, WindowFrameAction, WindowFrameTracker, WindowSnapshot,
+    verify_overlay_panel_placement, visible_corner_layers, OrderVerificationState, OrderedWindow,
+    OverlayDecision, WindowFrameAction, WindowFrameTracker, WindowSnapshot,
 };
-pub use panel::{corner_panel_frames, MacRect};
+pub use panel::{MacRect, OverlayPanelLayout};
 
 static OVERLAY_WINDOW_IDS: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
 

@@ -264,3 +264,12 @@ pub struct CaptureErrorPayload {
     pub recoverable: bool,
     pub details: Option<serde_json::Value>,
 }
+
+pub const CAPTURE_SESSION_ENDED_EVENT: &str = "screen-capture://session-ended";
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureSessionEndedEvent {
+    pub session_id: String,
+    pub error: CaptureErrorPayload,
+}

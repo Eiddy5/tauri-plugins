@@ -45,7 +45,7 @@ use windows_capture::{
 };
 
 use crate::{
-    capture::{FrameConsumer, RunningCapture},
+    capture::{CaptureFinishReason, FrameConsumer, RunningCapture},
     error::Error,
     models::{
         CaptureErrorCode, CaptureSource, CaptureSourceKind, ListSourcesOptions, PixelFormat,
@@ -139,7 +139,7 @@ struct WindowsRunningCapture {
     control: Mutex<Option<WindowsCaptureControl>>,
     paused: Arc<AtomicBool>,
     task: JoinHandle<()>,
-    finish_sender: watch::Sender<Option<crate::models::CaptureErrorPayload>>,
+    finish_sender: watch::Sender<Option<CaptureFinishReason>>,
     telemetry: Arc<CaptureIngressTelemetry>,
 }
 
@@ -165,9 +165,7 @@ impl RunningCapture for WindowsRunningCapture {
         self.stop_capture()
     }
 
-    fn finish_receiver(
-        &self,
-    ) -> Option<watch::Receiver<Option<crate::models::CaptureErrorPayload>>> {
+    fn finish_receiver(&self) -> Option<watch::Receiver<Option<CaptureFinishReason>>> {
         Some(self.finish_sender.subscribe())
     }
 
@@ -216,7 +214,7 @@ impl Drop for WindowsRunningCapture {
 
 struct WindowsCaptureHandler {
     frame_sender: mpsc::Sender<CapturedFrame>,
-    finish_sender: watch::Sender<Option<crate::models::CaptureErrorPayload>>,
+    finish_sender: watch::Sender<Option<CaptureFinishReason>>,
     paused: Arc<AtomicBool>,
     output_size: Option<(u32, u32)>,
     telemetry: Arc<CaptureIngressTelemetry>,
@@ -228,7 +226,7 @@ struct WindowsCaptureHandler {
 
 struct WindowsCaptureFlags {
     frame_sender: mpsc::Sender<CapturedFrame>,
-    finish_sender: watch::Sender<Option<crate::models::CaptureErrorPayload>>,
+    finish_sender: watch::Sender<Option<CaptureFinishReason>>,
     paused: Arc<AtomicBool>,
     output_size: Option<(u32, u32)>,
     telemetry: Arc<CaptureIngressTelemetry>,
@@ -333,7 +331,9 @@ impl GraphicsCaptureApiHandler for WindowsCaptureHandler {
             }
             Ok(None) => {}
             Err(error) => {
-                let _ = self.finish_sender.send(Some(error.payload()));
+                let _ = self
+                    .finish_sender
+                    .send(Some(CaptureFinishReason::error(error.payload())));
                 return Err(error.to_string());
             }
         }
@@ -341,12 +341,11 @@ impl GraphicsCaptureApiHandler for WindowsCaptureHandler {
     }
 
     fn on_closed(&mut self) -> std::result::Result<(), Self::Error> {
-        let error = Error::new(
-            CaptureErrorCode::SourceUnavailable,
-            "Windows capture source was closed",
-            true,
-        );
-        let _ = self.finish_sender.send(Some(error.payload()));
+        let _ = self
+            .finish_sender
+            .send(Some(CaptureFinishReason::source_closed(
+                "Windows Graphics Capture source closed",
+            )));
         Ok(())
     }
 }
@@ -450,7 +449,7 @@ fn start_windows_capture(
     options: &StartCaptureOptions,
     paused: Arc<AtomicBool>,
     frame_sender: mpsc::Sender<CapturedFrame>,
-    finish_sender: watch::Sender<Option<crate::models::CaptureErrorPayload>>,
+    finish_sender: watch::Sender<Option<CaptureFinishReason>>,
     telemetry: Arc<CaptureIngressTelemetry>,
     gpu_surfaces_requested: bool,
 ) -> Result<WindowsCaptureControl> {

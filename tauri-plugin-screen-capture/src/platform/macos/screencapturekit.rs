@@ -1,5 +1,5 @@
 use crate::{
-    capture::{FrameConsumer, RunningCapture},
+    capture::{CaptureFinishReason, FrameConsumer, RunningCapture},
     error::Error,
     models::{CaptureErrorCode, CaptureSource, ListSourcesOptions, StartCaptureOptions},
     Result,
@@ -25,10 +25,14 @@ mod real {
         shareable_content::{SCDisplay, SCWindow},
         stream::delegate_trait::StreamCallbacks,
     };
-    use tokio::{runtime::Handle, sync::Notify, task::JoinHandle};
+    use tokio::{
+        runtime::Handle,
+        sync::{watch, Notify},
+        task::JoinHandle,
+    };
 
     use super::*;
-    use crate::models::{CaptureSourceKind, PixelFormat};
+    use crate::models::{CaptureErrorPayload, CaptureSourceKind, PixelFormat};
     use crate::pipeline::frame::VideoFrame;
     use crate::platform::macos::window_filter::macos_window_filtered_reason;
     use crate::sources::{filter_sources, thumbnails::encode_png_base64, SourceFilterOptions};
@@ -213,15 +217,53 @@ mod real {
             )
         })?;
         let dispatcher = LatestFrameDispatcher::new(Arc::from(consumer), runtime_handle.clone());
+        let (finish_sender, _) = watch::channel(None);
         let delegate = StreamCallbacks::new()
-            .on_error(|error| {
-                tracing::error!(?error, "ScreenCaptureKit stream error");
+            .on_error({
+                let finish_sender = finish_sender.clone();
+                let source_kind = options.source_kind;
+                move |error| {
+                    tracing::error!(?error, "ScreenCaptureKit stream error");
+                    notify_stream_finished(
+                        &finish_sender,
+                        CaptureFinishReason::error(stream_error_payload(
+                            source_kind,
+                            format!("{error:?}"),
+                        )),
+                    );
+                }
             })
-            .on_stop(|error| {
-                if let Some(error) = error {
-                    tracing::error!(%error, "ScreenCaptureKit stream stopped");
-                } else {
-                    tracing::debug!("ScreenCaptureKit stream stopped");
+            .on_stop({
+                let finish_sender = finish_sender.clone();
+                let source_kind = options.source_kind;
+                move |error| {
+                    if let Some(error) = error {
+                        tracing::error!(%error, "ScreenCaptureKit stream stopped");
+                        notify_stream_finished(
+                            &finish_sender,
+                            CaptureFinishReason::error(stream_error_payload(
+                                source_kind,
+                                error.to_string(),
+                            )),
+                        );
+                    } else {
+                        tracing::debug!("ScreenCaptureKit stream stopped");
+                    }
+                }
+            })
+            .on_inactive({
+                let finish_sender = finish_sender.clone();
+                let source_kind = options.source_kind;
+                move || {
+                    if source_kind == CaptureSourceKind::Window {
+                        tracing::debug!("ScreenCaptureKit shared window became inactive");
+                        notify_stream_finished(
+                            &finish_sender,
+                            CaptureFinishReason::source_closed(
+                                "ScreenCaptureKit shared window became inactive",
+                            ),
+                        );
+                    }
                 }
             });
         let mut stream = SCStream::new_with_delegate(&filter, &config, delegate);
@@ -296,6 +338,7 @@ mod real {
             filter_worker,
             worker_stopped,
             worker_notify: dispatcher.handle.notify,
+            finish_sender,
         }))
     }
 
@@ -305,6 +348,7 @@ mod real {
         filter_worker: Option<JoinHandle<()>>,
         worker_stopped: Arc<AtomicBool>,
         worker_notify: Arc<Notify>,
+        finish_sender: watch::Sender<Option<CaptureFinishReason>>,
     }
 
     #[async_trait]
@@ -332,6 +376,10 @@ mod real {
                 .map_err(|_| internal_error("ScreenCaptureKit stream lock was poisoned"))?
                 .stop_capture()
                 .map_err(|err| sck_error("failed to stop ScreenCaptureKit stream", err))
+        }
+
+        fn finish_receiver(&self) -> Option<watch::Receiver<Option<CaptureFinishReason>>> {
+            Some(self.finish_sender.subscribe())
         }
     }
 
@@ -612,6 +660,36 @@ mod real {
         Skipped(FrameSkipReason),
     }
 
+    fn stream_error_payload(
+        source_kind: CaptureSourceKind,
+        reason: impl Into<String>,
+    ) -> CaptureErrorPayload {
+        let reason = reason.into();
+        let message = match source_kind {
+            CaptureSourceKind::Window => "窗口共享已意外停止",
+            CaptureSourceKind::Display => "屏幕共享已意外停止",
+        };
+        CaptureErrorPayload {
+            code: CaptureErrorCode::CaptureRuntimeFailed,
+            message: message.to_string(),
+            recoverable: true,
+            details: Some(serde_json::json!({ "reason": reason })),
+        }
+    }
+
+    fn notify_stream_finished(
+        sender: &watch::Sender<Option<CaptureFinishReason>>,
+        reason: CaptureFinishReason,
+    ) {
+        sender.send_if_modified(|current| {
+            if current.is_some() {
+                return false;
+            }
+            *current = Some(reason);
+            true
+        });
+    }
+
     fn video_frame_from_sample(sample: CMSampleBuffer) -> FrameConversion {
         let frame_status = sample.frame_status();
         if matches!(frame_status, Some(status) if !status.has_content()) {
@@ -726,6 +804,31 @@ mod real {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn stream_error_remains_distinct_from_a_closed_window() {
+            assert_eq!(
+                stream_error_payload(CaptureSourceKind::Window, "stream stopped"),
+                CaptureErrorPayload {
+                    code: CaptureErrorCode::CaptureRuntimeFailed,
+                    message: "窗口共享已意外停止".to_string(),
+                    recoverable: true,
+                    details: Some(serde_json::json!({ "reason": "stream stopped" })),
+                }
+            );
+        }
+
+        #[test]
+        fn stream_finish_notification_keeps_only_the_first_error() {
+            let (sender, receiver) = watch::channel(None);
+            let first = CaptureFinishReason::source_closed("window closed");
+            let second = CaptureFinishReason::source_closed("duplicate stop");
+
+            notify_stream_finished(&sender, first.clone());
+            notify_stream_finished(&sender, second);
+
+            assert_eq!(*receiver.borrow(), Some(first));
+        }
 
         #[test]
         fn keeps_current_process_non_overlay_windows_as_exceptions() {

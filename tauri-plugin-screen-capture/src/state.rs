@@ -9,10 +9,10 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::{
-    capture::{CaptureBackend, RunningCapture},
+    capture::{CaptureBackend, CaptureFinishReason, RunningCapture},
     error::Error,
     models::{
-        Capabilities, CaptureErrorCode, CaptureErrorPayload, CaptureSession, CaptureSource,
+        Capabilities, CaptureErrorCode, CaptureSession, CaptureSessionEndedEvent, CaptureSource,
         CaptureStats, CaptureStatus, ListSourcesOptions, PermissionStatus, PublisherKind,
         StartCaptureOptions, WebRtcAnswer, WebRtcIceCandidate, WebRtcOffer,
     },
@@ -34,10 +34,24 @@ struct SessionRecord {
     webrtc_signaling: Option<Arc<WebRtcSignalingState>>,
 }
 
+pub trait CaptureEventSink: Send + Sync {
+    fn emit_session_ended(&self, event: CaptureSessionEndedEvent) -> Result<()>;
+}
+
+#[derive(Debug, Default)]
+struct NoopCaptureEventSink;
+
+impl CaptureEventSink for NoopCaptureEventSink {
+    fn emit_session_ended(&self, _event: CaptureSessionEndedEvent) -> Result<()> {
+        Ok(())
+    }
+}
+
 pub struct ScreenCaptureState {
     backend: Arc<dyn CaptureBackend>,
     overlay_factory: Arc<dyn ShareOverlayFactory>,
     publisher_factory: Arc<dyn CapturePublisherFactory>,
+    event_sink: Arc<dyn CaptureEventSink>,
     sessions: Arc<Mutex<HashMap<String, SessionRecord>>>,
 }
 
@@ -63,6 +77,7 @@ impl ScreenCaptureState {
             backend,
             Arc::new(DefaultShareOverlayFactory),
             Arc::new(DefaultPublisherFactory),
+            Arc::new(NoopCaptureEventSink),
         )
     }
 
@@ -71,6 +86,7 @@ impl ScreenCaptureState {
             default_backend(),
             Arc::new(DefaultShareOverlayFactory),
             publisher_factory,
+            Arc::new(NoopCaptureEventSink),
         )
     }
 
@@ -82,6 +98,7 @@ impl ScreenCaptureState {
             backend,
             Arc::new(SharedShareOverlayFactory { overlay }),
             Arc::new(DefaultPublisherFactory),
+            Arc::new(NoopCaptureEventSink),
         )
     }
 
@@ -93,17 +110,33 @@ impl ScreenCaptureState {
             backend,
             overlay_factory,
             Arc::new(DefaultPublisherFactory),
+            Arc::new(NoopCaptureEventSink),
         )
     }
 
-    pub(crate) fn with_overlay_factory_and_publisher_factory(
+    pub fn with_backend_overlay_factory_and_event_sink(
+        backend: Arc<dyn CaptureBackend>,
+        overlay_factory: Arc<dyn ShareOverlayFactory>,
+        event_sink: Arc<dyn CaptureEventSink>,
+    ) -> Self {
+        Self::with_backend_overlay_and_publisher_factory(
+            backend,
+            overlay_factory,
+            Arc::new(DefaultPublisherFactory),
+            event_sink,
+        )
+    }
+
+    pub(crate) fn with_overlay_publisher_and_event_sink(
         overlay_factory: Arc<dyn ShareOverlayFactory>,
         publisher_factory: Option<Arc<dyn CapturePublisherFactory>>,
+        event_sink: Arc<dyn CaptureEventSink>,
     ) -> Self {
         Self::with_backend_overlay_and_publisher_factory(
             default_backend(),
             overlay_factory,
             publisher_factory.unwrap_or_else(|| Arc::new(DefaultPublisherFactory)),
+            event_sink,
         )
     }
 
@@ -111,11 +144,13 @@ impl ScreenCaptureState {
         backend: Arc<dyn CaptureBackend>,
         overlay_factory: Arc<dyn ShareOverlayFactory>,
         publisher_factory: Arc<dyn CapturePublisherFactory>,
+        event_sink: Arc<dyn CaptureEventSink>,
     ) -> Self {
         Self {
             backend,
             overlay_factory,
             publisher_factory,
+            event_sink,
             sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -209,6 +244,7 @@ impl ScreenCaptureState {
                 Arc::clone(&self.sessions),
                 session.session_id.clone(),
                 finish_receiver,
+                Arc::clone(&self.event_sink),
             );
         }
 
@@ -449,14 +485,16 @@ fn invalid_session_error() -> Error {
 fn spawn_capture_finish_monitor(
     sessions: Arc<Mutex<HashMap<String, SessionRecord>>>,
     session_id: String,
-    finish_receiver: watch::Receiver<Option<CaptureErrorPayload>>,
+    finish_receiver: watch::Receiver<Option<CaptureFinishReason>>,
+    event_sink: Arc<dyn CaptureEventSink>,
 ) {
     tokio::spawn(async move {
         let finish = wait_for_capture_finish(finish_receiver).await;
         let record = sessions.lock().await.remove(&session_id);
 
         if let Some(record) = record {
-            if let Some(payload) = finish {
+            let error = finish.map(|reason| reason.into_error_payload(record.session.source_kind));
+            if let Some(payload) = &error {
                 eprintln!(
                     "[screen-capture] capture session {} finished: {}",
                     session_id, payload.message
@@ -474,13 +512,20 @@ fn spawn_capture_finish_monitor(
             if let Err(error) = record.overlay.stop().await {
                 eprintln!("[screen-capture] failed to stop overlay for finished capture: {error}");
             }
+            if let Some(error) = error {
+                if let Err(emit_error) =
+                    event_sink.emit_session_ended(CaptureSessionEndedEvent { session_id, error })
+                {
+                    eprintln!("[screen-capture] failed to emit session ended event: {emit_error}");
+                }
+            }
         }
     });
 }
 
 async fn wait_for_capture_finish(
-    mut finish_receiver: watch::Receiver<Option<CaptureErrorPayload>>,
-) -> Option<CaptureErrorPayload> {
+    mut finish_receiver: watch::Receiver<Option<CaptureFinishReason>>,
+) -> Option<CaptureFinishReason> {
     loop {
         if let Some(payload) = finish_receiver.borrow().clone() {
             return Some(payload);

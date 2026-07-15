@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use tauri::{
     plugin::{Builder as TauriPluginBuilder, TauriPlugin},
-    Manager, Runtime,
+    AppHandle, Emitter, Manager, Runtime,
 };
 
 pub use models::*;
@@ -25,7 +25,25 @@ pub mod webrtc;
 
 pub use error::{Error, Result};
 use publisher::CapturePublisherFactory;
-pub use state::ScreenCaptureState;
+pub use state::{CaptureEventSink, ScreenCaptureState};
+
+struct TauriCaptureEventSink<R: Runtime> {
+    app: AppHandle<R>,
+}
+
+impl<R: Runtime> CaptureEventSink for TauriCaptureEventSink<R> {
+    fn emit_session_ended(&self, event: CaptureSessionEndedEvent) -> Result<()> {
+        self.app
+            .emit(CAPTURE_SESSION_ENDED_EVENT, event)
+            .map_err(|error| {
+                Error::new(
+                    CaptureErrorCode::Internal,
+                    format!("failed to emit capture session ended event: {error}"),
+                    true,
+                )
+            })
+    }
+}
 
 #[cfg(desktop)]
 use desktop::ScreenCapture;
@@ -97,9 +115,12 @@ impl Builder {
                 #[cfg(not(target_os = "macos"))]
                 let overlay_factory: Arc<dyn overlay::ShareOverlayFactory> =
                     Arc::new(overlay::DefaultShareOverlayFactory);
-                let state = ScreenCaptureState::with_overlay_factory_and_publisher_factory(
+                let event_sink: Arc<dyn CaptureEventSink> =
+                    Arc::new(TauriCaptureEventSink { app: app.clone() });
+                let state = ScreenCaptureState::with_overlay_publisher_and_event_sink(
                     overlay_factory,
                     publisher_factory.clone(),
+                    event_sink,
                 );
                 app.manage(state);
                 Ok(())
