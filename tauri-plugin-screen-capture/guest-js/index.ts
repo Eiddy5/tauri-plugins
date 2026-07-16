@@ -215,13 +215,31 @@ export interface AnnotationController {
   redo(): Promise<void>
 }
 
-export function createAnnotationController(sessionId: string): AnnotationController {
+export interface AnnotationControllerOptions {
+  /** Output video dimensions used for pixel-accurate eraser hit testing. */
+  videoWidth?: number
+  videoHeight?: number
+}
+
+export function createAnnotationController(
+  sessionId: string,
+  options: AnnotationControllerOptions = {},
+): AnnotationController {
   let current: AnnotationDocument = { visible: false, elements: [] }
   let draftBase: AnnotationDocument | null = null
   const undoStack: AnnotationDocument[] = []
   const redoStack: AnnotationDocument[] = []
   let pendingWrite: AnnotationDocument | null = null
   let flushPromise: Promise<void> | null = null
+  const videoWidth = Math.max(1, options.videoWidth ?? 1)
+  const videoHeight = Math.max(1, options.videoHeight ?? 1)
+  const shorterDimension = Math.min(videoWidth, videoHeight)
+  const scaleX = videoWidth / shorterDimension
+  const scaleY = videoHeight / shorterDimension
+  const toPixelAspect = (point: AnnotationPoint): AnnotationPoint => ({
+    x: point.x * scaleX,
+    y: point.y * scaleY,
+  })
 
   const snapshot = (document: AnnotationDocument): AnnotationDocument => ({
     visible: document.visible,
@@ -283,13 +301,18 @@ export function createAnnotationController(sessionId: string): AnnotationControl
   }
 
   const elementSegments = (element: AnnotationElement): [AnnotationPoint, AnnotationPoint][] => {
-    const [start, end] = element.points
-    if (!start) return []
+    const [rawStart, rawEnd] = element.points
+    if (!rawStart) return []
+    const start = toPixelAspect(rawStart)
     if (element.kind === 'pen') {
       if (element.points.length === 1) return [[start, start]]
-      return element.points.slice(1).map((point, index) => [element.points[index], point])
+      return element.points
+        .map(toPixelAspect)
+        .slice(1)
+        .map((point, index, points) => [index === 0 ? start : points[index - 1], point])
     }
-    if (!end) return []
+    if (!rawEnd) return []
+    const end = toPixelAspect(rawEnd)
     if (element.kind === 'rectangle') {
       const topRight = { x: end.x, y: start.y }
       const bottomLeft = { x: start.x, y: end.y }
@@ -301,16 +324,40 @@ export function createAnnotationController(sessionId: string): AnnotationControl
       ]
     }
     if (element.kind === 'ellipse') {
-      const center = { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 }
-      const radiusX = Math.abs(end.x - start.x) / 2
-      const radiusY = Math.abs(end.y - start.y) / 2
+      const center = { x: (rawStart.x + rawEnd.x) / 2, y: (rawStart.y + rawEnd.y) / 2 }
+      const radiusX = Math.abs(rawEnd.x - rawStart.x) / 2
+      const radiusY = Math.abs(rawEnd.y - rawStart.y) / 2
       const points = Array.from({ length: 37 }, (_, index) => {
         const angle = (index / 36) * Math.PI * 2
-        return { x: center.x + radiusX * Math.cos(angle), y: center.y + radiusY * Math.sin(angle) }
+        return toPixelAspect({
+          x: center.x + radiusX * Math.cos(angle),
+          y: center.y + radiusY * Math.sin(angle),
+        })
       })
       return points.slice(1).map((candidate, index) => [points[index], candidate])
     }
+    if (element.kind === 'arrow') {
+      const deltaX = end.x - start.x
+      const deltaY = end.y - start.y
+      const angle = Math.atan2(deltaY, deltaX)
+      const maximumLength = 0.12
+      const minimumLength = Math.min(element.width * 2, maximumLength)
+      const headLength = Math.max(
+        minimumLength,
+        Math.min(maximumLength, Math.hypot(deltaX, deltaY) * 0.25),
+      )
+      const headPoints = [2.6, -2.6].map((offset) => ({
+        x: end.x + headLength * Math.cos(angle + offset),
+        y: end.y + headLength * Math.sin(angle + offset),
+      }))
+      return [[start, end], ...headPoints.map((point): [AnnotationPoint, AnnotationPoint] => [end, point])]
+    }
     return [[start, end]]
+  }
+
+  const updateDraft = (element: AnnotationElement) => {
+    if (!draftBase) draftBase = snapshot(current)
+    return publish(upsert(current, element))
   }
 
   return {
@@ -331,12 +378,10 @@ export function createAnnotationController(sessionId: string): AnnotationControl
       return publish({ ...current, visible })
     },
     beginElement(element) {
-      if (!draftBase) draftBase = snapshot(current)
-      return publish(upsert(current, element))
+      return updateDraft(element)
     },
     updateElement(element) {
-      if (!draftBase) draftBase = snapshot(current)
-      return publish(upsert(current, element))
+      return updateDraft(element)
     },
     commitElement(element) {
       const before = draftBase ?? snapshot(current)
@@ -345,10 +390,12 @@ export function createAnnotationController(sessionId: string): AnnotationControl
       return publish(upsert(current, element))
     },
     eraseAt(point, radius = 0.02) {
+      const hitPoint = toPixelAspect(point)
       const element = [...current.elements].reverse().find((candidate) =>
         elementSegments(candidate).some(
           ([start, end]) =>
-            pointDistanceToSegment(point, start, end) <= radius + candidate.width / 2,
+            pointDistanceToSegment(hitPoint, start, end) <=
+            radius + Math.max(candidate.width / 2, 1 / shorterDimension),
         ),
       )
       if (!element) return flushPromise ?? Promise.resolve()

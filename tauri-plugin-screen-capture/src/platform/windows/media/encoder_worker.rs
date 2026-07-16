@@ -454,7 +454,9 @@ fn run_encoder(
             if cadence.on_captured_frame() {
                 force_keyframe.store(true, Ordering::Release);
             }
-            repeated_timestamp_ns = frame.timestamp_ns();
+            repeated_timestamp_ns =
+                next_captured_timestamp(repeated_timestamp_ns, frame.timestamp_ns());
+            let frame = frame.with_timestamp(repeated_timestamp_ns);
             last_frame = Some(frame.clone());
             frame
         } else {
@@ -539,6 +541,10 @@ fn run_encoder(
         }
         next_repeat_at = next_repeat_deadline(next_repeat_at, Instant::now(), frame_period);
     }
+}
+
+fn next_captured_timestamp(previous_timestamp_ns: u64, captured_timestamp_ns: u64) -> u64 {
+    captured_timestamp_ns.max(previous_timestamp_ns.saturating_add(1))
 }
 
 fn next_repeat_deadline(previous: Instant, now: Instant, period: Duration) -> Instant {
@@ -695,8 +701,8 @@ fn worker_start_error(error: impl std::fmt::Display) -> crate::Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        block_on_transport_timeout, should_drop_until_idr, EncoderInput, LatestSlot, OrderedSlot,
-        SlotWait,
+        block_on_transport_timeout, next_captured_timestamp, should_drop_until_idr, EncoderInput,
+        LatestSlot, OrderedSlot, SlotWait,
     };
     use crate::webrtc::track::EncodedVideoSample;
     use crate::{pipeline::frame::VideoFrame, PixelFormat};
@@ -728,6 +734,13 @@ mod tests {
             panic!("expected CPU frame");
         };
         assert_eq!(frame.timestamp_ns, 2);
+    }
+
+    #[test]
+    fn captured_frame_timestamp_stays_monotonic_after_static_repeats() {
+        assert_eq!(next_captured_timestamp(1_000, 900), 1_001);
+        assert_eq!(next_captured_timestamp(1_000, 1_500), 1_500);
+        assert_eq!(next_captured_timestamp(u64::MAX, 1), u64::MAX);
     }
 
     #[test]

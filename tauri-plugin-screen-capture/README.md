@@ -225,7 +225,10 @@ const session = await startCapture({
   annotations: { enabled: true },
 })
 
-const annotations = createAnnotationController(session.sessionId)
+const annotations = createAnnotationController(session.sessionId, {
+  videoWidth: 1920,
+  videoHeight: 1080,
+})
 await annotations.setVisible(true)
 
 const stroke: AnnotationElement = {

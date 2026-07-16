@@ -33,6 +33,14 @@ struct SlowPublisher {
     supports_gpu_surfaces: bool,
 }
 
+#[derive(Debug, Default)]
+struct BlockingFirstPublisher {
+    pushes: AtomicUsize,
+    first_started: tokio::sync::Notify,
+    release_first: tokio::sync::Notify,
+    frames: tokio::sync::Mutex<Vec<VideoFrame>>,
+}
+
 impl SlowPublisher {
     fn new(delay: Duration) -> Self {
         Self {
@@ -49,6 +57,16 @@ impl SlowPublisher {
     }
 }
 
+async fn wait_for_published_frames(publisher: &SlowPublisher, count: usize) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while publisher.frames.lock().await.len() < count {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("expected frames were published");
+}
+
 #[async_trait]
 impl CapturePublisher for SlowPublisher {
     fn supports_gpu_surfaces(&self) -> bool {
@@ -63,6 +81,38 @@ impl CapturePublisher for SlowPublisher {
         tokio::time::sleep(self.delay).await;
         self.frames.lock().await.push(frame);
         self.pushes.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn pause(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn resume(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn stats(&self) -> Result<CaptureStats> {
+        Ok(CaptureStats::default())
+    }
+}
+
+#[async_trait]
+impl CapturePublisher for BlockingFirstPublisher {
+    async fn start(&self, _options: StartCaptureOptions) -> Result<()> {
+        Ok(())
+    }
+
+    async fn push_frame(&self, frame: VideoFrame) -> Result<()> {
+        if self.pushes.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.first_started.notify_one();
+            self.release_first.notified().await;
+        }
+        self.frames.lock().await.push(frame);
         Ok(())
     }
 
@@ -166,13 +216,7 @@ async fn annotation_enabled_pipeline_composites_the_document_before_publishing()
     };
     pipeline.push_frame(black_frame).await.expect("push frame");
 
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while publisher.frames.lock().await.is_empty() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("annotated frame published");
+    wait_for_published_frames(&publisher, 1).await;
 
     let frames = publisher.frames.lock().await;
     let center = (5 * 10 + 5) * 4;
@@ -192,13 +236,7 @@ async fn updating_annotations_republishes_the_latest_static_capture_frame() {
         data: Arc::from([0_u8; 400]),
     };
     pipeline.push_frame(black_frame).await.expect("push frame");
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while publisher.frames.lock().await.is_empty() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("initial frame published");
+    wait_for_published_frames(&publisher, 1).await;
 
     pipeline
         .set_annotation_document(AnnotationDocument {
@@ -222,16 +260,74 @@ async fn updating_annotations_republishes_the_latest_static_capture_frame() {
         .await
         .expect("set annotation document");
 
+    wait_for_published_frames(&publisher, 2).await;
+    let frames = publisher.frames.lock().await;
+    let center = (5 * 10 + 5) * 4;
+    assert_eq!(&frames[1].data[center..center + 4], &[0, 0, 255, 255]);
+    assert!(frames[1].timestamp_ns > frames[0].timestamp_ns);
+}
+
+#[tokio::test]
+async fn annotation_refresh_cannot_be_followed_by_an_older_queued_frame() {
+    let publisher = Arc::new(BlockingFirstPublisher::default());
+    let pipeline = Arc::new(CapturePipeline::new_with_annotations(publisher.clone()));
+    pipeline
+        .push_frame(VideoFrame {
+            width: 10,
+            height: 10,
+            pixel_format: PixelFormat::Bgra,
+            timestamp_ns: 1,
+            data: Arc::from([0_u8; 400]),
+        })
+        .await
+        .expect("push initial frame");
+    tokio::time::timeout(Duration::from_secs(1), publisher.first_started.notified())
+        .await
+        .expect("first publish started");
+
+    let update_pipeline = Arc::clone(&pipeline);
+    let update = tokio::spawn(async move {
+        update_pipeline
+            .set_annotation_document(AnnotationDocument {
+                visible: true,
+                elements: vec![AnnotationElement {
+                    id: "ordered-line".to_string(),
+                    kind: AnnotationElementKind::Line,
+                    points: vec![
+                        AnnotationPoint { x: 0.1, y: 0.5 },
+                        AnnotationPoint { x: 0.9, y: 0.5 },
+                    ],
+                    color: AnnotationColor {
+                        red: 255,
+                        green: 0,
+                        blue: 0,
+                        alpha: 255,
+                    },
+                    width: 0.1,
+                }],
+            })
+            .await
+    });
+    tokio::task::yield_now().await;
+    publisher.release_first.notify_one();
+    update
+        .await
+        .expect("annotation update task")
+        .expect("annotation refresh");
+
     tokio::time::timeout(Duration::from_secs(1), async {
         while publisher.frames.lock().await.len() < 2 {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("annotation update replayed latest frame");
+    .expect("both frames published");
     let frames = publisher.frames.lock().await;
     let center = (5 * 10 + 5) * 4;
-    assert_eq!(&frames[1].data[center..center + 4], &[0, 0, 255, 255]);
+    assert_eq!(
+        &frames.last().expect("latest frame").data[center..center + 4],
+        &[0, 0, 255, 255]
+    );
 }
 
 #[tokio::test]
@@ -277,13 +373,7 @@ async fn annotation_pipeline_renders_every_supported_element_kind() {
             .await
             .expect("push shape frame");
 
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while publisher.frames.lock().await.is_empty() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("shape frame published");
+        wait_for_published_frames(&publisher, 1).await;
         let frames = publisher.frames.lock().await;
         assert!(
             frames[0]
@@ -359,13 +449,7 @@ async fn translucent_annotation_blends_each_element_once_per_pixel() {
         })
         .await
         .expect("push frame");
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while publisher.frames.lock().await.is_empty() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("translucent frame published");
+    wait_for_published_frames(&publisher, 1).await;
 
     let frames = publisher.frames.lock().await;
     let center = (5 * 10 + 5) * 4;

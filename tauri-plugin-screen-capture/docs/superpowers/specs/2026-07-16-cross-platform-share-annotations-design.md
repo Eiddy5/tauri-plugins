@@ -19,7 +19,7 @@ The controller is UI-agnostic. Products may render any toolbar or pointer layer 
 
 Annotation composition belongs between capture and publishing so every publisher sees identical output. macOS already sends BGRA frames through this seam. On Windows, annotation-enabled sessions intentionally request the CPU BGRA capture path; sessions that do not opt in retain the existing D3D11 GPU surface path.
 
-The pipeline retains the latest unannotated source frame. A document update composites and republishes that frame immediately, which keeps annotation latency independent from screen-content changes. Documents are immutable shared snapshots, and pixel buffers are mutated in place when uniquely owned.
+The pipeline retains the latest unannotated source frame. A document update queues and waits for a refreshed publication through the same latest-frame worker as normal capture, which keeps annotation latency independent from screen-content changes without allowing stale frames to overtake it. Documents are immutable shared snapshots.
 
 ## Validation and lifecycle
 

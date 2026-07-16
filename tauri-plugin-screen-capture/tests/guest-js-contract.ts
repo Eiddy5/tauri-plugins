@@ -35,7 +35,7 @@ const pen: AnnotationElement = {
   width: 0.01,
 }
 
-const annotations = createAnnotationController("session-1")
+const annotations = createAnnotationController("session-1", { videoWidth: 1920, videoHeight: 1080 })
 void annotations.setVisible(true)
 void annotations.beginElement(pen)
 void annotations.updateElement({ ...pen, points: [...pen.points, { x: 0.5, y: 0.5 }] })

@@ -9,14 +9,14 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use tokio::{
-    sync::{Mutex, Notify},
+    sync::{oneshot, Mutex, Notify},
     task::JoinHandle,
 };
 
 use crate::{
     annotation::AnnotationLayer,
     capture::FrameConsumer,
-    models::{AnnotationDocument, CaptureStats},
+    models::{AnnotationDocument, CaptureErrorPayload, CaptureStats},
     pipeline::frame::VideoFrame,
     publisher::CapturePublisher,
     Result,
@@ -24,10 +24,10 @@ use crate::{
 
 pub struct CapturePipeline {
     publisher: Arc<dyn CapturePublisher>,
-    annotations: Option<AnnotationLayer>,
+    annotations: Option<Arc<AnnotationLayer>>,
     stats: Mutex<CaptureStats>,
     latest_frame: Mutex<Option<PipelineFrame>>,
-    pending_frame: Arc<Mutex<Option<PipelineFrame>>>,
+    pending_frame: Arc<Mutex<Option<PendingPipelineFrame>>>,
     notify: Arc<Notify>,
     stopped: Arc<AtomicBool>,
     worker: JoinHandle<()>,
@@ -41,16 +41,46 @@ enum PipelineFrame {
     Gpu(crate::platform::windows::media::WindowsGpuSurface),
 }
 
+impl PipelineFrame {
+    fn timestamp_ns(&self) -> u64 {
+        match self {
+            Self::Cpu(frame) => frame.timestamp_ns,
+            #[cfg(target_os = "windows")]
+            Self::Gpu(surface) => surface.timestamp_ns(),
+        }
+    }
+
+    fn with_timestamp(self, timestamp_ns: u64) -> Self {
+        match self {
+            Self::Cpu(mut frame) => {
+                frame.timestamp_ns = timestamp_ns;
+                Self::Cpu(frame)
+            }
+            #[cfg(target_os = "windows")]
+            Self::Gpu(surface) => Self::Gpu(surface.with_timestamp(timestamp_ns)),
+        }
+    }
+}
+
+struct PendingPipelineFrame {
+    frame: PipelineFrame,
+    is_capture_frame: bool,
+    completions: Vec<oneshot::Sender<std::result::Result<(), CaptureErrorPayload>>>,
+}
+
 impl CapturePipeline {
     pub fn new(publisher: Arc<dyn CapturePublisher>) -> Self {
         Self::build(publisher, None)
     }
 
     pub fn new_with_annotations(publisher: Arc<dyn CapturePublisher>) -> Self {
-        Self::build(publisher, Some(AnnotationLayer::default()))
+        Self::build(publisher, Some(Arc::new(AnnotationLayer::default())))
     }
 
-    fn build(publisher: Arc<dyn CapturePublisher>, annotations: Option<AnnotationLayer>) -> Self {
+    fn build(
+        publisher: Arc<dyn CapturePublisher>,
+        annotations: Option<Arc<AnnotationLayer>>,
+    ) -> Self {
         let pending_frame = Arc::new(Mutex::new(None));
         let notify = Arc::new(Notify::new());
         let stopped = Arc::new(AtomicBool::new(false));
@@ -59,6 +89,7 @@ impl CapturePipeline {
             Arc::clone(&pending_frame),
             Arc::clone(&notify),
             Arc::clone(&stopped),
+            annotations.clone(),
         );
 
         Self {
@@ -117,8 +148,17 @@ impl CapturePipeline {
         let Some(frame) = self.latest_frame.lock().await.clone() else {
             return Ok(());
         };
-
-        publish_pipeline_frame(&self.publisher, self.composite_annotations(frame)?).await
+        let (completion, published) = oneshot::channel();
+        self.enqueue_frame(frame, Some(completion), false).await;
+        match published.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(payload)) => Err(crate::Error::Structured { payload }),
+            Err(error) => Err(crate::Error::new(
+                crate::CaptureErrorCode::CaptureRuntimeFailed,
+                format!("annotation frame publication was cancelled: {error}"),
+                true,
+            )),
+        }
     }
 }
 
@@ -168,26 +208,46 @@ impl CapturePipeline {
             }
         }
         *self.latest_frame.lock().await = Some(frame.clone());
-        let frame = self.composite_annotations(frame)?;
-        {
-            let mut pending_frame = self.pending_frame.lock().await;
-            if pending_frame.replace(frame).is_some() {
-                let mut stats = self.stats.lock().await;
-                stats.frames_pipeline_dropped += 1;
-                stats.frames_dropped = stats.frames_pipeline_dropped;
-            }
-        }
-        self.notify.notify_one();
+        self.enqueue_frame(frame, None, true).await;
 
         Ok(())
     }
 
-    fn composite_annotations(&self, mut frame: PipelineFrame) -> Result<PipelineFrame> {
-        if let (Some(annotations), PipelineFrame::Cpu(cpu_frame)) = (&self.annotations, &mut frame)
-        {
-            *cpu_frame = annotations.composite(cpu_frame.clone())?;
+    async fn enqueue_frame(
+        &self,
+        frame: PipelineFrame,
+        completion: Option<oneshot::Sender<std::result::Result<(), CaptureErrorPayload>>>,
+        is_capture_frame: bool,
+    ) {
+        let replaced_capture_frame = {
+            let mut pending = self.pending_frame.lock().await;
+            if let Some(pending) = pending.as_mut() {
+                if let Some(completion) = completion {
+                    pending.completions.push(completion);
+                }
+                if is_capture_frame {
+                    let replaced_capture_frame = pending.is_capture_frame;
+                    pending.frame = frame;
+                    pending.is_capture_frame = true;
+                    replaced_capture_frame
+                } else {
+                    false
+                }
+            } else {
+                *pending = Some(PendingPipelineFrame {
+                    frame,
+                    is_capture_frame,
+                    completions: completion.into_iter().collect(),
+                });
+                false
+            }
+        };
+        if replaced_capture_frame {
+            let mut stats = self.stats.lock().await;
+            stats.frames_pipeline_dropped += 1;
+            stats.frames_dropped = stats.frames_pipeline_dropped;
         }
-        Ok(frame)
+        self.notify.notify_one();
     }
 }
 
@@ -212,20 +272,39 @@ impl FrameConsumer for Arc<CapturePipeline> {
 
 fn spawn_latest_frame_worker(
     publisher: Arc<dyn CapturePublisher>,
-    pending_frame: Arc<Mutex<Option<PipelineFrame>>>,
+    pending_frame: Arc<Mutex<Option<PendingPipelineFrame>>>,
     notify: Arc<Notify>,
     stopped: Arc<AtomicBool>,
+    annotations: Option<Arc<AnnotationLayer>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let mut last_timestamp_ns = 0_u64;
         loop {
             notify.notified().await;
 
-            while let Some(frame) = pending_frame.lock().await.take() {
+            while let Some(pending) = pending_frame.lock().await.take() {
                 if stopped.load(Ordering::Acquire) {
                     return;
                 }
-                if let Err(error) = publish_pipeline_frame(&publisher, frame).await {
-                    eprintln!("[screen-capture] pipeline publish failed: {error:?}");
+                let timestamp_ns = pending
+                    .frame
+                    .timestamp_ns()
+                    .max(last_timestamp_ns.saturating_add(1));
+                last_timestamp_ns = timestamp_ns;
+                let frame = pending.frame.with_timestamp(timestamp_ns);
+                let result = match composite_annotations(&annotations, frame) {
+                    Ok(frame) => publish_pipeline_frame(&publisher, frame).await,
+                    Err(error) => Err(error),
+                };
+                let completion_result = match result {
+                    Ok(()) => Ok(()),
+                    Err(error) => {
+                        eprintln!("[screen-capture] pipeline publish failed: {error:?}");
+                        Err(error.payload())
+                    }
+                };
+                for completion in pending.completions {
+                    let _ = completion.send(completion_result.clone());
                 }
             }
 
@@ -234,6 +313,16 @@ fn spawn_latest_frame_worker(
             }
         }
     })
+}
+
+fn composite_annotations(
+    annotations: &Option<Arc<AnnotationLayer>>,
+    mut frame: PipelineFrame,
+) -> Result<PipelineFrame> {
+    if let (Some(annotations), PipelineFrame::Cpu(cpu_frame)) = (annotations, &mut frame) {
+        *cpu_frame = annotations.composite(cpu_frame.clone())?;
+    }
+    Ok(frame)
 }
 
 async fn publish_pipeline_frame(
