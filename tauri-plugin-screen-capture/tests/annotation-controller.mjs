@@ -29,3 +29,13 @@ assert.equal(controller.document.elements.length, 1, 'a distant eraser must not 
 await controller.eraseAt({ x: 0.15, y: 0.1 })
 assert.equal(controller.document.elements.length, 0, 'an eraser on the line should remove it')
 assert.equal(writes.at(-1).elements.length, 0)
+
+await controller.commitElement(line)
+await controller.beginElement({
+  ...line,
+  id: 'unfinished',
+  points: [{ x: 0.4, y: 0.4 }],
+})
+assert.equal(controller.document.elements.length, 2)
+await controller.cancelElement()
+assert.deepEqual(controller.document.elements.map((element) => element.id), ['line-1'])

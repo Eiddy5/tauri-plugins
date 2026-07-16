@@ -153,6 +153,30 @@ test("shape gestures publish a valid two-point draft from pointer down", async (
   ])
 })
 
+test("disabling the board rolls back an unfinished gesture before hiding", async () => {
+  const toggle = new FakeElement()
+  const toolbar = new FakeElement()
+  const canvas = new FakeElement()
+  const calls = []
+  const board = createAnnotationBoard({
+    elements: { toggle, toolbar, canvas },
+    createController: () => ({
+      setVisible: async (visible) => calls.push(["visible", visible]),
+      beginElement: async () => calls.push(["begin"]),
+      updateElement: async () => {},
+      commitElement: async () => {},
+      cancelElement: async () => calls.push(["cancel"]),
+    }),
+  })
+  board.attach({ sessionId: "session-1", width: 1920, height: 1080 })
+  await board.setEnabled(true)
+  canvas.dispatchEvent(pointerEvent("pointerdown", 500, 500, 1))
+
+  await board.setEnabled(false)
+
+  assert.deepEqual(calls, [["visible", true], ["begin"], ["cancel"], ["visible", false]])
+})
+
 function pointerEvent(type, clientX, clientY, pointerId) {
   const event = new Event(type)
   Object.assign(event, { clientX, clientY, pointerId, button: 0 })

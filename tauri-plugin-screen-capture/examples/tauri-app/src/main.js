@@ -168,6 +168,17 @@ app.innerHTML = `
   </main>
 `
 
+const annotationElements = {
+  toggle: app.querySelector("[data-board-toggle]"),
+  toolbar: app.querySelector("[data-board-toolbar]"),
+  canvas: app.querySelector("[data-board-canvas]"),
+  tools: [...app.querySelectorAll("[data-board-tool]")],
+  color: app.querySelector("[data-board-color]"),
+  undo: app.querySelector("[data-board-undo]"),
+  redo: app.querySelector("[data-board-redo]"),
+  clear: app.querySelector("[data-board-clear]"),
+}
+
 const elements = {
   sourceSummary: app.querySelector("[data-source-summary]"),
   refresh: app.querySelector("[data-refresh]"),
@@ -185,14 +196,6 @@ const elements = {
   pause: app.querySelector("[data-pause]"),
   resume: app.querySelector("[data-resume]"),
   stop: app.querySelector("[data-stop]"),
-  boardToggle: app.querySelector("[data-board-toggle]"),
-  boardToolbar: app.querySelector("[data-board-toolbar]"),
-  boardCanvas: app.querySelector("[data-board-canvas]"),
-  boardTools: [...app.querySelectorAll("[data-board-tool]")],
-  boardColor: app.querySelector("[data-board-color]"),
-  boardUndo: app.querySelector("[data-board-undo]"),
-  boardRedo: app.querySelector("[data-board-redo]"),
-  boardClear: app.querySelector("[data-board-clear]"),
   previewIdle: app.querySelector("[data-preview-idle]"),
   previewTitle: app.querySelector("[data-preview-title]"),
   previewSubtitle: app.querySelector("[data-preview-subtitle]"),
@@ -207,16 +210,7 @@ const elements = {
 }
 
 const annotationBoard = createAnnotationBoard({
-  elements: {
-    toggle: elements.boardToggle,
-    toolbar: elements.boardToolbar,
-    canvas: elements.boardCanvas,
-    tools: elements.boardTools,
-    color: elements.boardColor,
-    undo: elements.boardUndo,
-    redo: elements.boardRedo,
-    clear: elements.boardClear,
-  },
+  elements: annotationElements,
   onError(error) {
     state.error = errorMessage(error)
     render()

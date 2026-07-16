@@ -208,6 +208,7 @@ export interface AnnotationController {
   beginElement(element: AnnotationElement): Promise<void>
   updateElement(element: AnnotationElement): Promise<void>
   commitElement(element: AnnotationElement): Promise<void>
+  cancelElement(): Promise<void>
   eraseAt(point: AnnotationPoint, radius?: number): Promise<void>
   removeElement(elementId: string): Promise<void>
   clear(): Promise<void>
@@ -389,6 +390,12 @@ export function createAnnotationController(
       draftBase = null
       remember(before)
       return publish(upsert(current, element))
+    },
+    cancelElement() {
+      if (!draftBase) return flushPromise ?? Promise.resolve()
+      const before = draftBase
+      draftBase = null
+      return publish(before)
     },
     eraseAt(point, radius = 0.02) {
       const hitPoint = toPixelAspect(point)

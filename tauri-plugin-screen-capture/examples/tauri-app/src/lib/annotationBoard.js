@@ -26,9 +26,9 @@ export function createAnnotationBoard({
 
   const setEnabled = async (nextEnabled) => {
     if (!controller || enabled === nextEnabled) return
+    if (!nextEnabled) await rollbackGesture()
     await controller.setVisible(nextEnabled)
     enabled = nextEnabled
-    if (!enabled) cancelGesture()
     render()
   }
 
@@ -50,7 +50,7 @@ export function createAnnotationBoard({
     activeElement = {
       id: globalThis.crypto.randomUUID(),
       kind: activeTool,
-      points: activeTool === "pen" ? [point] : [point, point],
+      points: initialPoints(activeTool, point),
       color: annotationColor(elements.color?.value ?? "#ff3b30"),
       width: 0.006,
     }
@@ -61,8 +61,7 @@ export function createAnnotationBoard({
     if (event.pointerId !== activePointerId || !activeElement) return
     const point = pointerPoint(event)
     if (!point) return
-    if (activeElement.kind === "pen") activeElement.points.push(point)
-    else activeElement.points = [activeElement.points[0], point]
+    activeElement.points = updatedPoints(activeElement, point)
     report(controller.updateElement(activeElement))
   })
 
@@ -88,10 +87,7 @@ export function createAnnotationBoard({
   function finishGesture(event) {
     if (event.pointerId !== activePointerId || !activeElement) return
     const point = pointerPoint(event)
-    if (point) {
-      if (activeElement.kind === "pen") activeElement.points.push(point)
-      else activeElement.points = [activeElement.points[0], point]
-    }
+    if (point) activeElement.points = updatedPoints(activeElement, point)
     const completed = activeElement
     cancelGesture()
     report(controller.commitElement(completed))
@@ -101,6 +97,15 @@ export function createAnnotationBoard({
     if (activePointerId !== null) canvas.releasePointerCapture?.(activePointerId)
     activePointerId = null
     activeElement = null
+  }
+
+  async function rollbackGesture() {
+    if (!activeElement) return
+    try {
+      await controller.cancelElement()
+    } finally {
+      cancelGesture()
+    }
   }
 
   render()
@@ -117,7 +122,7 @@ export function createAnnotationBoard({
     },
     async detach() {
       try {
-        if (controller && enabled) await controller.setVisible(false)
+        if (controller && enabled) await setEnabled(false)
       } finally {
         controller = null
         videoSize = null
@@ -157,6 +162,14 @@ function annotationColor(hex) {
     blue: Number.parseInt(value.slice(4, 6), 16),
     alpha: 255,
   }
+}
+
+function initialPoints(tool, point) {
+  return tool === "pen" ? [point] : [point, point]
+}
+
+function updatedPoints(element, point) {
+  return element.kind === "pen" ? [...element.points, point] : [element.points[0], point]
 }
 
 function renderTools(tools = [], activeTool) {
