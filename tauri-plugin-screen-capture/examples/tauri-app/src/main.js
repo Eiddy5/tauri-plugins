@@ -102,57 +102,74 @@ app.innerHTML = `
     <div class="picker-backdrop" data-picker>
       <section class="picker-dialog" role="dialog" aria-modal="true" aria-labelledby="picker-title">
         <header class="picker-header">
-          <div>
-            <p class="eyebrow">选择共享内容</p>
-            <h2 id="picker-title">共享屏幕或窗口</h2>
-            <p data-source-summary>0 个可共享来源</p>
+          <div class="picker-heading">
+            <h2 id="picker-title">选择共享内容</h2>
+            <p>请选择要展示给其他人的屏幕或应用窗口</p>
           </div>
-          <div class="picker-header-actions">
-            <button type="button" class="refresh-button" data-refresh>刷新</button>
-            <button type="button" class="icon-button" data-close-picker aria-label="关闭">×</button>
-          </div>
+          <button type="button" class="icon-button close-button" data-close-picker aria-label="关闭">×</button>
         </header>
 
-        <div class="source-tabs" role="tablist" aria-label="共享类型">
-          <button type="button" role="tab" data-kind="display">屏幕 <span data-display-count>0</span></button>
-          <button type="button" role="tab" data-kind="window">窗口 <span data-window-count>0</span></button>
+        <div class="picker-nav">
+          <div class="source-tabs" role="tablist" aria-label="共享类型">
+            <button type="button" role="tab" data-kind="display">
+              <span class="tab-icon" aria-hidden="true">▣</span>
+              <span>整个屏幕</span>
+              <small data-display-count>0</small>
+            </button>
+            <button type="button" role="tab" data-kind="window">
+              <span class="tab-icon" aria-hidden="true">▤</span>
+              <span>应用窗口</span>
+              <small data-window-count>0</small>
+            </button>
+          </div>
+          <div class="source-tools">
+            <span data-source-summary>0 个可共享来源</span>
+            <button type="button" class="refresh-button" data-refresh aria-label="刷新共享内容">
+              <span aria-hidden="true">↻</span>
+              刷新
+            </button>
+          </div>
         </div>
 
         <section class="source-list" data-source-list></section>
 
-        <details class="advanced-settings">
-          <summary>高级设置</summary>
-          <div class="advanced-content">
-            <div class="options">
-              <label><input type="checkbox" data-option="debugRawSources" /> Debug raw</label>
-              <label><input type="checkbox" data-option="includeCurrentApp" /> Current app</label>
-              <label><input type="checkbox" data-option="includeSystemUi" /> System UI</label>
-            </div>
-            <section class="agora-panel">
-              <label class="agora-toggle">
-                <input type="checkbox" data-agora-enabled />
-                <span>发布到 Agora</span>
-              </label>
-              <label><span>App ID</span><input type="text" data-agora-field="agoraAppId" autocomplete="off" spellcheck="false" /></label>
-              <label><span>Channel</span><input type="text" data-agora-field="agoraChannel" autocomplete="off" spellcheck="false" /></label>
-              <label><span>Token</span><input type="text" data-agora-field="agoraToken" autocomplete="off" spellcheck="false" /></label>
-              <label><span>UID</span><input type="number" min="0" step="1" data-agora-field="agoraUid" /></label>
-            </section>
-          </div>
-        </details>
-
         <footer class="picker-footer">
-          <label class="quality-control">
-            <span>共享清晰度</span>
-            <select data-quality aria-label="共享清晰度">
-              ${Object.entries(captureQualityPresets)
-                .map(([value, preset]) => `<option value="${value}">${preset.label} · ${preset.fps} FPS</option>`)
-                .join("")}
-            </select>
-          </label>
+          <div class="picker-preferences">
+            <label class="quality-control">
+              <span>清晰度</span>
+              <select data-quality aria-label="共享清晰度">
+                ${Object.entries(captureQualityPresets)
+                  .map(([value, preset]) => `<option value="${value}">${preset.label} · ${preset.fps} FPS</option>`)
+                  .join("")}
+              </select>
+            </label>
+            <details class="advanced-settings">
+              <summary>更多设置</summary>
+              <div class="advanced-popover">
+                <div class="options">
+                  <label><input type="checkbox" data-option="debugRawSources" /> 显示原始来源</label>
+                  <label><input type="checkbox" data-option="includeCurrentApp" /> 包含当前应用</label>
+                  <label><input type="checkbox" data-option="includeSystemUi" /> 包含系统窗口</label>
+                </div>
+                <section class="agora-panel">
+                  <label class="agora-toggle">
+                    <input type="checkbox" data-agora-enabled />
+                    <span>发布到 Agora</span>
+                  </label>
+                  <label><span>App ID</span><input type="text" data-agora-field="agoraAppId" autocomplete="off" spellcheck="false" /></label>
+                  <label><span>Channel</span><input type="text" data-agora-field="agoraChannel" autocomplete="off" spellcheck="false" /></label>
+                  <label><span>Token</span><input type="text" data-agora-field="agoraToken" autocomplete="off" spellcheck="false" /></label>
+                  <label><span>UID</span><input type="number" min="0" step="1" data-agora-field="agoraUid" /></label>
+                </section>
+              </div>
+            </details>
+          </div>
           <div class="picker-actions">
-            <button type="button" data-close-picker>取消</button>
-            <button type="button" class="primary" data-start>开始共享</button>
+            <button type="button" class="cancel-button" data-close-picker>取消</button>
+            <button type="button" class="primary share-button" data-start>
+              <span aria-hidden="true">▶</span>
+              开始共享
+            </button>
           </div>
         </footer>
       </section>
