@@ -439,7 +439,9 @@ interface CaptureErrorPayload {
 ### Windows
 
 - Windows 通过 `GraphicsCaptureSession::IsSupported()` 检查能力，不显示额外权限弹窗。
+- 显示器缩略图先读取完整屏幕，再缩放到最大 420px 宽；不会只截取桌面左上角。
 - 硬件 H.264 使用系统/驱动提供的 Media Foundation MFT，不依赖外部编码进程。
+- 未启用批注时优先使用 D3D11 GPU surface 快路径；启用批注时使用可由 Rust 合成的 BGRA 路径。
 - 共享窗口移动或调整大小时，共享边框暂时隐藏并停止几何刷新；操作结束后恢复。
 - 目标窗口失去焦点或被其他窗口遮挡时，共享边框与目标窗口保持相同层级，不覆盖无关窗口。
 
@@ -450,6 +452,7 @@ Windows 媒体实现见 [`src/platform/windows/media/README.md`](src/platform/wi
 - 必须启用 Cargo feature `macos-screencapturekit`，否则来源列表为空且启动捕获返回 `captureStartFailed`。
 - 首次调用 `requestPermission()` 会触发系统屏幕录制授权。授权变化后通常需要重新启动应用才能被系统完整应用。
 - 当前架构使用 ScreenCaptureKit 获取帧，并通过 VideoToolbox 发布 H.264。
+- 画板使用与 Windows 相同的 `AnnotationDocument`，透明输入窗口定位使用逻辑坐标。
 
 ## 示例
 
@@ -469,6 +472,37 @@ npm run tauri dev
 ```
 
 开发端口 `1420` 被占用时，请先停止已有示例进程，或者修改示例的 Vite/Tauri 开发端口配置。
+
+## 常见问题
+
+### 来源列表为空
+
+- 先调用 `getCapabilities()`，确认当前平台支持对应的 `display` 或 `window` 类型。
+- macOS 首次授权后通常需要完全退出并重新启动应用。
+- 默认不会返回当前 Tauri 应用和系统 UI；调试时可临时设置 `debugRawSources: true` 查看 `filteredReason`。
+- 确认 capability 中已经声明 `screen-capture:allow-list-sources` 或 `screen-capture:default`。
+
+### 缩略图为空、黑色或只显示屏幕一角
+
+- 确认 `listSources({ includeThumbnails: true })`，并为 Base64 添加 `data:image/png;base64,` 前缀。
+- 屏幕缩略图由插件生成，前端应使用 `object-fit: contain`，不要使用会裁切画面的 `cover`。
+- 当前 Windows 实现会先读取完整显示器，再等比缩放为 PNG 缩略图；如果升级插件后仍看到旧画面，请重新构建 Rust 应用，而不只是刷新 WebView。
+
+### 本地画板能画，但远端看不到
+
+- 必须在 `startCapture()` 时传入 `annotations: { enabled: true }`。
+- 确认笔迹通过 `createAnnotationController()` 或 `setAnnotationDocument()` 发布到插件，而不只是绘制在前端 Canvas。
+- 调用 `controller.setVisible(true)`；`visible: false` 的文档不会合成到共享帧。
+
+### 画板窗口与共享目标错位
+
+- 不要假设返回值一定是物理像素。读取 `getAnnotationInputTarget()` 的 `coordinateSpace`。
+- Windows 使用 `PhysicalPosition` / `PhysicalSize`；macOS 使用 `LogicalPosition` / `LogicalSize`。
+- 共享窗口移动、缩放或最小化时应持续刷新目标区域；返回 `null` 时隐藏透明输入窗口。
+
+### 被共享窗口关闭后界面仍显示“共享中”
+
+在启动捕获前注册 `onCaptureSessionEnded()`。该事件触发时 Rust 会话已经清理完成，前端只需关闭 WebRTC、统计轮询、视频元素和画板窗口，不要再次调用 `stopCapture()`。
 
 ## 开发
 
