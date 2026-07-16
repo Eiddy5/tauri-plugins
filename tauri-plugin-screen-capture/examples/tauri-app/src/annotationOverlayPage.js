@@ -11,6 +11,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window"
 import { getAnnotationInputTarget } from "tauri-plugin-screen-capture-api"
 
 import { createAnnotationBoard } from "./lib/annotationBoard.js"
+import { createAnnotationOverlayErrorPolicy } from "./lib/annotationOverlayErrors.js"
 import { createAnnotationTargetSynchronizer } from "./lib/annotationTargetGeometry.js"
 
 const params = new URLSearchParams(window.location.search)
@@ -40,11 +41,17 @@ document.querySelector("#app").innerHTML = `
       <button type="button" data-board-clear>清空</button>
       <button type="button" class="close" data-board-close>关闭画板</button>
     </div>
+    <output class="annotation-error" data-board-error hidden></output>
   </main>
 `
 
 const root = document.querySelector("#app")
 const detachedToggle = document.createElement("button")
+const errors = createAnnotationOverlayErrorPolicy({
+  output: root.querySelector("[data-board-error]"),
+  closeOverlay,
+  log: (error) => console.error("[annotation-overlay]", error),
+})
 const board = createAnnotationBoard({
   elements: {
     toggle: detachedToggle,
@@ -56,7 +63,7 @@ const board = createAnnotationBoard({
     redo: root.querySelector("[data-board-redo]"),
     clear: root.querySelector("[data-board-clear]"),
   },
-  onError: closeWithError,
+  onError: errors.reportBoardError,
 })
 
 board.attach({ sessionId, width: videoWidth, height: videoHeight })
@@ -83,7 +90,7 @@ async function syncTarget() {
     const target = await getAnnotationInputTarget(sessionId)
     await syncGeometry(target)
   } catch (error) {
-    await closeWithError(error)
+    await errors.closeFatal(error)
     return
   }
   window.setTimeout(syncTarget, 100)
@@ -97,9 +104,4 @@ async function closeOverlay() {
   } finally {
     await appWindow.close()
   }
-}
-
-async function closeWithError(error) {
-  console.error("[annotation-overlay]", error)
-  await closeOverlay()
 }

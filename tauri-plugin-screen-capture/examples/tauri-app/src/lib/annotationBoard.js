@@ -75,7 +75,7 @@ export function createAnnotationBoard({
 
   for (const button of elements.tools ?? []) {
     button.addEventListener("click", () => {
-      activeTool = button.dataset.tool
+      activeTool = button.dataset.boardTool
       renderTools(elements.tools, activeTool)
     })
   }
@@ -261,7 +261,7 @@ function updatedPoints(element, point) {
 
 function renderTools(tools = [], activeTool) {
   for (const button of tools) {
-    const active = button.dataset.tool === activeTool
+    const active = button.dataset.boardTool === activeTool
     button.classList?.toggle("active", active)
     button.setAttribute("aria-pressed", String(active))
   }

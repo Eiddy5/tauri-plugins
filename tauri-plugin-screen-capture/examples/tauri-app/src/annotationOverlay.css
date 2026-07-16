@@ -18,6 +18,8 @@ body,
 .annotation-overlay {
   position: relative;
   cursor: crosshair;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 [data-board-canvas] {
@@ -43,6 +45,9 @@ body,
   box-shadow: 0 8px 24px rgb(15 23 42 / 22%);
   transform: translateX(-50%);
   cursor: default;
+  pointer-events: auto;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .annotation-toolbar button,
@@ -77,4 +82,20 @@ body,
   border: 1px solid #cbd5e1;
   border-radius: 6px;
   background: #ffffff;
+}
+
+.annotation-error {
+  position: absolute;
+  z-index: 3;
+  top: 78px;
+  left: 50%;
+  max-width: calc(100% - 32px);
+  padding: 6px 10px;
+  border: 1px solid #fecdca;
+  border-radius: 6px;
+  color: #b42318;
+  background: rgb(254 243 242 / 96%);
+  box-shadow: 0 6px 18px rgb(15 23 42 / 18%);
+  transform: translateX(-50%);
+  pointer-events: none;
 }

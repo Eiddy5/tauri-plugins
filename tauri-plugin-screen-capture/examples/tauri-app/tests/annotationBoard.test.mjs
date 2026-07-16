@@ -124,15 +124,17 @@ test("pen gestures submit normalized draft points to the annotation controller",
   )
 })
 
-test("shape gestures publish a valid two-point draft from pointer down", async () => {
+test("data-board-tool selects one shape and publishes its valid kind", async () => {
   const toggle = new FakeElement()
   const toolbar = new FakeElement()
   const canvas = new FakeElement()
+  const penTool = new FakeElement()
   const lineTool = new FakeElement()
-  lineTool.dataset.tool = "line"
+  penTool.dataset.boardTool = "pen"
+  lineTool.dataset.boardTool = "line"
   const drafts = []
   const board = createAnnotationBoard({
-    elements: { toggle, toolbar, canvas, tools: [lineTool] },
+    elements: { toggle, toolbar, canvas, tools: [penTool, lineTool] },
     createController: () => ({
       setVisible: async () => {},
       beginElement: async (element) => drafts.push(structuredClone(element)),
@@ -144,9 +146,13 @@ test("shape gestures publish a valid two-point draft from pointer down", async (
   await board.setEnabled(true)
   lineTool.click()
 
+  assert.equal(penTool.getAttribute("aria-pressed"), "false")
+  assert.equal(lineTool.getAttribute("aria-pressed"), "true")
+
   canvas.dispatchEvent(pointerEvent("pointerdown", 500, 500, 1))
   await nextTask()
 
+  assert.equal(drafts[0].kind, "line")
   assert.deepEqual(drafts[0].points, [
     { x: 0.5, y: 0.5 },
     { x: 0.5, y: 0.5 },
