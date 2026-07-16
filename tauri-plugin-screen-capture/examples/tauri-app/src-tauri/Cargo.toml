@@ -27,6 +27,9 @@ tauri-plugin-screen-capture = { path = "../../../", features = ["macos-screencap
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 tauri-plugin-screen-capture = { path = "../../../" }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
 [profile.dev.package.fast_image_resize]
 opt-level = 3
 

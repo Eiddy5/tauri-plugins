@@ -12,7 +12,10 @@ pub use windows::{
 use async_trait::async_trait;
 use std::sync::Arc;
 
-use crate::{models::CaptureSourceKind, Result};
+use crate::{
+    models::{AnnotationInputTarget, CaptureSourceKind},
+    Result,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OverlayTarget {
@@ -26,6 +29,9 @@ pub trait ShareOverlay: Send + Sync {
     async fn show(&self) -> Result<()>;
     async fn hide(&self) -> Result<()>;
     async fn stop(&self) -> Result<()>;
+    async fn annotation_input_target(&self) -> Result<Option<AnnotationInputTarget>> {
+        Ok(None)
+    }
 }
 
 pub trait ShareOverlayFactory: Send + Sync {

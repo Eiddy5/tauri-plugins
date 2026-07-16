@@ -10,8 +10,9 @@ import {
   startCapture,
   stopCapture,
 } from "tauri-plugin-screen-capture-api"
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow"
 import { publishAgoraScreenTrack } from "./lib/agoraPublisher.js"
-import { createAnnotationBoard } from "./lib/annotationBoard.js"
+import { createAnnotationTargetWindowController } from "./lib/annotationTargetWindow.js"
 import { connectVideo } from "./lib/screenCapture.js"
 
 const captureQualityPresets = {
@@ -209,8 +210,9 @@ const elements = {
   error: app.querySelector("[data-error]"),
 }
 
-const annotationBoard = createAnnotationBoard({
-  elements: annotationElements,
+const annotationBoard = createAnnotationTargetWindowController({
+  toggle: annotationElements.toggle,
+  createWindow: (label, options) => new WebviewWindow(label, options),
   onError(error) {
     state.error = errorMessage(error)
     render()

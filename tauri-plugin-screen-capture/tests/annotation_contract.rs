@@ -1,6 +1,6 @@
 use tauri_plugin_screen_capture::{
     AnnotationColor, AnnotationDocument, AnnotationElement, AnnotationElementKind,
-    AnnotationOptions, AnnotationPoint,
+    AnnotationInputTarget, AnnotationOptions, AnnotationPoint, CoordinateSpace,
 };
 
 #[test]
@@ -31,6 +31,28 @@ fn annotation_document_uses_a_platform_neutral_wire_contract() {
     assert_eq!(json["elements"][0]["points"][0]["x"], 0.25);
     assert_eq!(json["elements"][0]["color"]["alpha"], 192);
     assert_eq!(json["elements"][0]["width"], 0.01);
+}
+
+#[test]
+fn annotation_input_target_describes_the_shared_surface_coordinate_space() {
+    let target = AnnotationInputTarget {
+        x: -1920.0,
+        y: 0.0,
+        width: 1920.0,
+        height: 1080.0,
+        coordinate_space: CoordinateSpace::Physical,
+    };
+
+    assert_eq!(
+        serde_json::to_value(target).expect("serialize annotation input target"),
+        serde_json::json!({
+            "x": -1920.0,
+            "y": 0.0,
+            "width": 1920.0,
+            "height": 1080.0,
+            "coordinateSpace": "physical"
+        })
+    );
 }
 
 #[test]

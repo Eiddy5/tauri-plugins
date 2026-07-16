@@ -42,6 +42,16 @@ pub(crate) fn display_frame(display_id: u32) -> Option<MacRect> {
     display_frame_from_candidates(display_id, candidates)
 }
 
+pub(crate) fn tauri_input_rect(frame: MacRect) -> MacRect {
+    let main = CGDisplayBounds(CGMainDisplayID());
+    MacRect {
+        x: frame.x,
+        y: main.size.height - frame.y - frame.height,
+        width: frame.width,
+        height: frame.height,
+    }
+}
+
 fn display_frame_from_candidates(
     display_id: u32,
     candidates: impl IntoIterator<Item = (u32, MacRect)>,

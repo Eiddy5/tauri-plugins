@@ -101,6 +101,7 @@ impl Builder {
                 commands::get_capture_session,
                 commands::get_capture_stats,
                 commands::get_annotation_document,
+                commands::get_annotation_input_target,
                 commands::set_annotation_document,
                 commands::create_webrtc_offer,
                 commands::accept_webrtc_answer,

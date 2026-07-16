@@ -14,6 +14,10 @@ export function createAnnotationBoard({
   let activeElement = null
 
   const report = (promise) => void promise.catch(onError)
+  const publish = (promise) => {
+    renderCanvas()
+    report(promise.then(renderCanvas))
+  }
 
   const render = () => {
     toggle.disabled = !controller
@@ -30,6 +34,7 @@ export function createAnnotationBoard({
     await controller.setVisible(nextEnabled)
     enabled = nextEnabled
     render()
+    renderCanvas()
   }
 
   toggle.addEventListener("click", () => {
@@ -41,7 +46,7 @@ export function createAnnotationBoard({
     const point = pointerPoint(event)
     if (!point) return
     if (activeTool === "eraser") {
-      report(controller.eraseAt(point))
+      publish(controller.eraseAt(point))
       return
     }
 
@@ -54,7 +59,7 @@ export function createAnnotationBoard({
       color: annotationColor(elements.color?.value ?? "#ff3b30"),
       width: 0.006,
     }
-    report(controller.beginElement(activeElement))
+    publish(controller.beginElement(activeElement))
   })
 
   canvas.addEventListener("pointermove", (event) => {
@@ -62,7 +67,7 @@ export function createAnnotationBoard({
     const point = pointerPoint(event)
     if (!point) return
     activeElement.points = updatedPoints(activeElement, point)
-    report(controller.updateElement(activeElement))
+    publish(controller.updateElement(activeElement))
   })
 
   canvas.addEventListener("pointerup", finishGesture)
@@ -74,9 +79,9 @@ export function createAnnotationBoard({
       renderTools(elements.tools, activeTool)
     })
   }
-  elements.undo?.addEventListener("click", () => controller && report(controller.undo()))
-  elements.redo?.addEventListener("click", () => controller && report(controller.redo()))
-  elements.clear?.addEventListener("click", () => controller && report(controller.clear()))
+  elements.undo?.addEventListener("click", () => controller && publish(controller.undo()))
+  elements.redo?.addEventListener("click", () => controller && publish(controller.redo()))
+  elements.clear?.addEventListener("click", () => controller && publish(controller.clear()))
 
   function pointerPoint(event) {
     return videoSize
@@ -90,7 +95,7 @@ export function createAnnotationBoard({
     if (point) activeElement.points = updatedPoints(activeElement, point)
     const completed = activeElement
     cancelGesture()
-    report(controller.commitElement(completed))
+    publish(controller.commitElement(completed))
   }
 
   function cancelGesture() {
@@ -105,8 +110,31 @@ export function createAnnotationBoard({
       await controller.cancelElement()
     } finally {
       cancelGesture()
+      renderCanvas()
     }
   }
+
+  function renderCanvas() {
+    const context = canvas.getContext?.("2d")
+    if (!context) return
+    const bounds = canvas.getBoundingClientRect()
+    const ratio = globalThis.devicePixelRatio || 1
+    const width = Math.max(1, Math.round(bounds.width * ratio))
+    const height = Math.max(1, Math.round(bounds.height * ratio))
+    if (canvas.width !== width) canvas.width = width
+    if (canvas.height !== height) canvas.height = height
+    context.setTransform(ratio, 0, 0, ratio, 0, 0)
+    context.clearRect(0, 0, bounds.width, bounds.height)
+    if (!videoSize || !controller?.document?.visible) return
+
+    const content = videoContentRect(bounds, videoSize)
+    for (const element of controller.document.elements) drawElement(context, element, content)
+  }
+
+  const resizeObserver = globalThis.ResizeObserver
+    ? new ResizeObserver(renderCanvas)
+    : null
+  resizeObserver?.observe(canvas)
 
   render()
 
@@ -119,6 +147,7 @@ export function createAnnotationBoard({
       videoSize = { width, height }
       enabled = false
       render()
+      renderCanvas()
     },
     async detach() {
       try {
@@ -129,6 +158,7 @@ export function createAnnotationBoard({
         enabled = false
         cancelGesture()
         render()
+        renderCanvas()
       }
     },
     setEnabled,
@@ -152,6 +182,63 @@ export function mapPointerToVideo(pointer, bounds, videoSize) {
   const y = (pointer.clientY - contentTop) / contentHeight
   if (x < 0 || x > 1 || y < 0 || y > 1) return null
   return { x, y }
+}
+
+function videoContentRect(bounds, videoSize) {
+  const containerAspect = bounds.width / bounds.height
+  const videoAspect = videoSize.width / videoSize.height
+  const width = videoAspect > containerAspect ? bounds.width : bounds.height * videoAspect
+  const height = videoAspect > containerAspect ? bounds.width / videoAspect : bounds.height
+  return {
+    left: (bounds.width - width) / 2,
+    top: (bounds.height - height) / 2,
+    width,
+    height,
+  }
+}
+
+function drawElement(context, element, content) {
+  if (!element.points.length) return
+  const points = element.points.map((point) => ({
+    x: content.left + point.x * content.width,
+    y: content.top + point.y * content.height,
+  }))
+  const color = element.color
+  context.strokeStyle = `rgba(${color.red}, ${color.green}, ${color.blue}, ${color.alpha / 255})`
+  context.lineWidth = Math.max(1, element.width * Math.min(content.width, content.height))
+  context.lineCap = "round"
+  context.lineJoin = "round"
+
+  const [start, end = start] = points
+  context.beginPath()
+  if (element.kind === "pen") {
+    context.moveTo(start.x, start.y)
+    for (const point of points.slice(1)) context.lineTo(point.x, point.y)
+  } else if (element.kind === "rectangle") {
+    context.rect(start.x, start.y, end.x - start.x, end.y - start.y)
+  } else if (element.kind === "ellipse") {
+    context.ellipse(
+      (start.x + end.x) / 2,
+      (start.y + end.y) / 2,
+      Math.abs(end.x - start.x) / 2,
+      Math.abs(end.y - start.y) / 2,
+      0,
+      0,
+      Math.PI * 2,
+    )
+  } else {
+    context.moveTo(start.x, start.y)
+    context.lineTo(end.x, end.y)
+    if (element.kind === "arrow") {
+      const angle = Math.atan2(end.y - start.y, end.x - start.x)
+      const head = Math.max(10, Math.min(30, Math.hypot(end.x - start.x, end.y - start.y) * 0.25))
+      for (const offset of [2.6, -2.6]) {
+        context.moveTo(end.x, end.y)
+        context.lineTo(end.x + head * Math.cos(angle + offset), end.y + head * Math.sin(angle + offset))
+      }
+    }
+  }
+  context.stroke()
 }
 
 function annotationColor(hex) {

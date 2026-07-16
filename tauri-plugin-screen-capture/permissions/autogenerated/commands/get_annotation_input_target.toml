@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-get-annotation-input-target"
+description = "Enables the get_annotation_input_target command without any pre-configured scope."
+commands.allow = ["get_annotation_input_target"]
+
+[[permission]]
+identifier = "deny-get-annotation-input-target"
+description = "Denies the get_annotation_input_target command without any pre-configured scope."
+commands.deny = ["get_annotation_input_target"]

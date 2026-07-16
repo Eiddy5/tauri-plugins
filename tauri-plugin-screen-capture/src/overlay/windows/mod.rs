@@ -11,7 +11,7 @@ use async_trait::async_trait;
 
 use crate::{
     error::Error,
-    models::{CaptureErrorCode, CaptureSourceKind},
+    models::{AnnotationInputTarget, CaptureErrorCode, CaptureSourceKind, CoordinateSpace},
     overlay::{OverlayRect, OverlayStyle, OverlayTarget, ShareOverlay},
     Result,
 };
@@ -27,6 +27,7 @@ pub struct WindowsShareOverlay {
     style: OverlayStyle,
     host: Mutex<Option<OverlayHost>>,
     window_event_registration_id: u64,
+    target: Mutex<Option<OverlayTarget>>,
 }
 
 impl Default for WindowsShareOverlay {
@@ -35,6 +36,7 @@ impl Default for WindowsShareOverlay {
             style: OverlayStyle::default(),
             host: Mutex::new(None),
             window_event_registration_id: next_window_event_registration_id(),
+            target: Mutex::new(None),
         }
     }
 }
@@ -42,6 +44,7 @@ impl Default for WindowsShareOverlay {
 #[async_trait]
 impl ShareOverlay for WindowsShareOverlay {
     async fn start(&self, target: OverlayTarget) -> Result<()> {
+        *self.lock_target()? = Some(target.clone());
         match target.source_kind {
             CaptureSourceKind::Window => {
                 let target_hwnd = match windows_target_handle_from_source_id(&target.source_id) {
@@ -127,11 +130,29 @@ impl ShareOverlay for WindowsShareOverlay {
     }
 
     async fn stop(&self) -> Result<()> {
+        *self.lock_target()? = None;
         if let Some(host) = self.take_host()? {
             host.shutdown().await?;
         }
 
         Ok(())
+    }
+
+    async fn annotation_input_target(&self) -> Result<Option<AnnotationInputTarget>> {
+        let Some(target) = self.lock_target()?.clone() else {
+            return Ok(None);
+        };
+        let rect = match target.source_kind {
+            CaptureSourceKind::Display => display_bounds_from_source_id(&target.source_id),
+            CaptureSourceKind::Window => window_bounds_from_source_id(&target.source_id)?,
+        };
+        Ok(rect.map(|rect| AnnotationInputTarget {
+            x: f64::from(rect.left),
+            y: f64::from(rect.top),
+            width: f64::from(rect.right.saturating_sub(rect.left)),
+            height: f64::from(rect.bottom.saturating_sub(rect.top)),
+            coordinate_space: CoordinateSpace::Physical,
+        }))
     }
 }
 
@@ -178,6 +199,16 @@ impl WindowsShareOverlay {
             Error::new(
                 CaptureErrorCode::Internal,
                 "share border overlay host state lock was poisoned",
+                false,
+            )
+        })
+    }
+
+    fn lock_target(&self) -> Result<std::sync::MutexGuard<'_, Option<OverlayTarget>>> {
+        self.target.lock().map_err(|_| {
+            Error::new(
+                CaptureErrorCode::Internal,
+                "share overlay target lock was poisoned",
                 false,
             )
         })

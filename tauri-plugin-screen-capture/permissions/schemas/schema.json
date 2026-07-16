@@ -355,6 +355,18 @@
           "markdownDescription": "Denies the get_annotation_document command without any pre-configured scope."
         },
         {
+          "description": "Enables the get_annotation_input_target command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-annotation-input-target",
+          "markdownDescription": "Enables the get_annotation_input_target command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_annotation_input_target command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-annotation-input-target",
+          "markdownDescription": "Denies the get_annotation_input_target command without any pre-configured scope."
+        },
+        {
           "description": "Enables the get_capabilities command without any pre-configured scope.",
           "type": "string",
           "const": "allow-get-capabilities",
@@ -475,10 +487,10 @@
           "markdownDescription": "Denies the stop_capture command without any pre-configured scope."
         },
         {
-          "description": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-get-capabilities`\n- `allow-check-permission`\n- `allow-request-permission`\n- `allow-list-sources`\n- `allow-start-capture`\n- `allow-pause-capture`\n- `allow-resume-capture`\n- `allow-stop-capture`\n- `allow-get-capture-session`\n- `allow-get-capture-stats`\n- `allow-get-annotation-document`\n- `allow-set-annotation-document`\n- `allow-create-webrtc-offer`\n- `allow-accept-webrtc-answer`\n- `allow-add-webrtc-ice-candidate`",
+          "description": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-get-capabilities`\n- `allow-check-permission`\n- `allow-request-permission`\n- `allow-list-sources`\n- `allow-start-capture`\n- `allow-pause-capture`\n- `allow-resume-capture`\n- `allow-stop-capture`\n- `allow-get-capture-session`\n- `allow-get-capture-stats`\n- `allow-get-annotation-document`\n- `allow-get-annotation-input-target`\n- `allow-set-annotation-document`\n- `allow-create-webrtc-offer`\n- `allow-accept-webrtc-answer`\n- `allow-add-webrtc-ice-candidate`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-get-capabilities`\n- `allow-check-permission`\n- `allow-request-permission`\n- `allow-list-sources`\n- `allow-start-capture`\n- `allow-pause-capture`\n- `allow-resume-capture`\n- `allow-stop-capture`\n- `allow-get-capture-session`\n- `allow-get-capture-stats`\n- `allow-get-annotation-document`\n- `allow-set-annotation-document`\n- `allow-create-webrtc-offer`\n- `allow-accept-webrtc-answer`\n- `allow-add-webrtc-ice-candidate`"
+          "markdownDescription": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-get-capabilities`\n- `allow-check-permission`\n- `allow-request-permission`\n- `allow-list-sources`\n- `allow-start-capture`\n- `allow-pause-capture`\n- `allow-resume-capture`\n- `allow-stop-capture`\n- `allow-get-capture-session`\n- `allow-get-capture-stats`\n- `allow-get-annotation-document`\n- `allow-get-annotation-input-target`\n- `allow-set-annotation-document`\n- `allow-create-webrtc-offer`\n- `allow-accept-webrtc-answer`\n- `allow-add-webrtc-ice-candidate`"
         }
       ]
     }

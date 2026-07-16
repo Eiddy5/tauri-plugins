@@ -124,6 +124,7 @@ Tauri 2 默认通过 Capability 控制插件命令访问。将 `screen-capture:d
 | `screen-capture:allow-get-capture-session` | `getCaptureSession()` |
 | `screen-capture:allow-get-capture-stats` | `getCaptureStats()` |
 | `screen-capture:allow-get-annotation-document` | `getAnnotationDocument()` |
+| `screen-capture:allow-get-annotation-input-target` | `getAnnotationInputTarget()` |
 | `screen-capture:allow-set-annotation-document` | `setAnnotationDocument()` / `createAnnotationController()` |
 | `screen-capture:allow-create-webrtc-offer` | `createWebRtcOffer()` |
 | `screen-capture:allow-accept-webrtc-answer` | `acceptWebRtcAnswer()` |
@@ -250,6 +251,15 @@ await annotations.undo()
 await annotations.redo()
 await annotations.clear()
 ```
+
+画板窗口可通过统一接口获取当前共享屏幕或窗口的实时区域。Windows 返回物理像素坐标，macOS 返回逻辑坐标；调用方根据 `coordinateSpace` 选择 Tauri 的 `PhysicalPosition/PhysicalSize` 或 `LogicalPosition/LogicalSize`，即可让透明输入窗口跟随共享目标移动和缩放：
+
+```ts
+const target = await getAnnotationInputTarget(session.sessionId)
+// target: { x, y, width, height, coordinateSpace: 'physical' | 'logical' } | null
+```
+
+示例应用已经包含完整用法：主窗口的“开启画板”会创建独立透明窗口覆盖共享目标，并在停止共享或关闭画板时撤销未完成笔迹、释放输入窗口。
 
 `setAnnotationDocument()` 适合已经有画板状态管理器的调用方；`createAnnotationController()` 则提供完整的单会话历史和草稿更新。更新批注文档会主动重放最后一个采集帧，所以静态桌面上的笔迹也会立即发布。
 

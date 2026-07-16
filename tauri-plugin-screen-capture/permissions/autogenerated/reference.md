@@ -15,6 +15,7 @@ Default permissions for the plugin
 - `allow-get-capture-session`
 - `allow-get-capture-stats`
 - `allow-get-annotation-document`
+- `allow-get-annotation-input-target`
 - `allow-set-annotation-document`
 - `allow-create-webrtc-offer`
 - `allow-accept-webrtc-answer`
@@ -155,6 +156,32 @@ Enables the get_annotation_document command without any pre-configured scope.
 <td>
 
 Denies the get_annotation_document command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`screen-capture:allow-get-annotation-input-target`
+
+</td>
+<td>
+
+Enables the get_annotation_input_target command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`screen-capture:deny-get-annotation-input-target`
+
+</td>
+<td>
+
+Denies the get_annotation_input_target command without any pre-configured scope.
 
 </td>
 </tr>

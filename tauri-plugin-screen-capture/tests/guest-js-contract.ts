@@ -1,5 +1,6 @@
 import {
   createAnnotationController,
+  getAnnotationInputTarget,
   onCaptureSessionEnded,
   type AnnotationElement,
   type CaptureSessionEndedEvent,
@@ -37,6 +38,7 @@ const pen: AnnotationElement = {
 
 const annotations = createAnnotationController("session-1", { videoWidth: 1920, videoHeight: 1080 })
 void annotations.setVisible(true)
+void getAnnotationInputTarget("session-1")
 void annotations.beginElement(pen)
 void annotations.updateElement({ ...pen, points: [...pen.points, { x: 0.5, y: 0.5 }] })
 void annotations.commitElement(pen)

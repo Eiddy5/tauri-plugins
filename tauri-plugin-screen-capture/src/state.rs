@@ -12,7 +12,7 @@ use crate::{
     capture::{CaptureBackend, CaptureFinishReason, RunningCapture},
     error::Error,
     models::{
-        AnnotationDocument, Capabilities, CaptureErrorCode, CaptureSession,
+        AnnotationDocument, AnnotationInputTarget, Capabilities, CaptureErrorCode, CaptureSession,
         CaptureSessionEndedEvent, CaptureSource, CaptureStats, CaptureStatus, ListSourcesOptions,
         PermissionStatus, PublisherKind, StartCaptureOptions, WebRtcAnswer, WebRtcIceCandidate,
         WebRtcOffer,
@@ -406,6 +406,20 @@ impl ScreenCaptureState {
                 .ok_or_else(invalid_session_error)?
         };
         pipeline.annotation_document()
+    }
+
+    pub async fn get_annotation_input_target(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<AnnotationInputTarget>> {
+        let overlay = {
+            let sessions = self.sessions.lock().await;
+            sessions
+                .get(session_id)
+                .map(|record| Arc::clone(&record.overlay))
+                .ok_or_else(invalid_session_error)?
+        };
+        overlay.annotation_input_target().await
     }
 
     pub async fn create_webrtc_offer(&self, session_id: &str) -> Result<WebRtcOffer> {

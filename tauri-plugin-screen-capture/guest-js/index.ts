@@ -56,6 +56,16 @@ export interface AnnotationOptions {
   enabled?: boolean
 }
 
+export type CoordinateSpace = 'logical' | 'physical'
+
+export interface AnnotationInputTarget {
+  x: number
+  y: number
+  width: number
+  height: number
+  coordinateSpace: CoordinateSpace
+}
+
 export interface CaptureSource {
   id: string
   kind: CaptureSourceKind
@@ -194,6 +204,10 @@ export function getCaptureStats(sessionId: string) {
 
 export function getAnnotationDocument(sessionId: string) {
   return invoke<AnnotationDocument>(command('get_annotation_document'), { sessionId })
+}
+
+export function getAnnotationInputTarget(sessionId: string) {
+  return invoke<AnnotationInputTarget | null>(command('get_annotation_input_target'), { sessionId })
 }
 
 export function setAnnotationDocument(sessionId: string, document: AnnotationDocument) {

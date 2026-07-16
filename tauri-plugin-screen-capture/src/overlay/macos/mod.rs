@@ -18,7 +18,7 @@ use std::{
 use async_trait::async_trait;
 use tauri::{AppHandle, Runtime};
 
-use crate::{overlay::OverlayTarget, Result};
+use crate::{models::AnnotationInputTarget, overlay::OverlayTarget, Result};
 
 use self::dispatcher::{request, MainThreadDispatcher, TauriMainThreadDispatcher};
 
@@ -110,5 +110,13 @@ impl ShareOverlay for MacOsShareOverlay {
     async fn stop(&self) -> Result<()> {
         let id = self.id;
         request(self.dispatcher.as_ref(), move || host::stop(id)).await
+    }
+
+    async fn annotation_input_target(&self) -> Result<Option<AnnotationInputTarget>> {
+        let id = self.id;
+        request(self.dispatcher.as_ref(), move || {
+            host::annotation_input_target(id)
+        })
+        .await
     }
 }

@@ -11,9 +11,10 @@ use tauri_plugin_screen_capture::{
     },
     overlay::ShareOverlayFactory,
     AnnotationColor, AnnotationDocument, AnnotationElement, AnnotationElementKind,
-    AnnotationOptions, AnnotationPoint, CaptureErrorCode, CaptureErrorPayload, CaptureEventSink,
-    CaptureSessionEndedEvent, CaptureSourceKind, CaptureStatus, ListSourcesOptions,
-    PermissionStatus, Result, ScreenCaptureState, StartCaptureOptions,
+    AnnotationInputTarget, AnnotationOptions, AnnotationPoint, CaptureErrorCode,
+    CaptureErrorPayload, CaptureEventSink, CaptureSessionEndedEvent, CaptureSourceKind,
+    CaptureStatus, CoordinateSpace, ListSourcesOptions, PermissionStatus, Result,
+    ScreenCaptureState, StartCaptureOptions,
 };
 use tokio::sync::watch;
 
@@ -318,6 +319,41 @@ fn start_options() -> StartCaptureOptions {
     }
 }
 
+#[derive(Debug)]
+struct AnnotationTargetOverlayProbe;
+
+#[async_trait]
+impl tauri_plugin_screen_capture::overlay::ShareOverlay for AnnotationTargetOverlayProbe {
+    async fn start(
+        &self,
+        _target: tauri_plugin_screen_capture::overlay::OverlayTarget,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn show(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn hide(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn annotation_input_target(&self) -> Result<Option<AnnotationInputTarget>> {
+        Ok(Some(AnnotationInputTarget {
+            x: 100.0,
+            y: 50.0,
+            width: 1280.0,
+            height: 720.0,
+            coordinate_space: CoordinateSpace::Physical,
+        }))
+    }
+}
+
 fn annotation_document(id: &str) -> AnnotationDocument {
     AnnotationDocument {
         visible: true,
@@ -374,6 +410,35 @@ async fn state_keeps_annotation_documents_isolated_per_capture_session() {
             .await
             .expect("get second document"),
         AnnotationDocument::default()
+    );
+}
+
+#[tokio::test]
+async fn state_exposes_the_active_share_surface_for_annotation_input() {
+    let state = ScreenCaptureState::with_backend_and_overlay(
+        Arc::new(DummyCaptureBackend),
+        Arc::new(AnnotationTargetOverlayProbe),
+    );
+    let session = state
+        .start_capture(StartCaptureOptions {
+            annotations: Some(AnnotationOptions { enabled: true }),
+            ..start_options()
+        })
+        .await
+        .expect("start annotated capture");
+
+    assert_eq!(
+        state
+            .get_annotation_input_target(&session.session_id)
+            .await
+            .expect("annotation input target"),
+        Some(AnnotationInputTarget {
+            x: 100.0,
+            y: 50.0,
+            width: 1280.0,
+            height: 720.0,
+            coordinate_space: CoordinateSpace::Physical,
+        })
     );
 }
 
