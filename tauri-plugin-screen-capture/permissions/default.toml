@@ -11,6 +11,8 @@ permissions = [
   "allow-stop-capture",
   "allow-get-capture-session",
   "allow-get-capture-stats",
+  "allow-get-annotation-document",
+  "allow-set-annotation-document",
   "allow-create-webrtc-offer",
   "allow-accept-webrtc-answer",
   "allow-add-webrtc-ice-candidate",

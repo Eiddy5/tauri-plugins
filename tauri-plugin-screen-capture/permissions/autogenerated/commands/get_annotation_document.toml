@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-get-annotation-document"
+description = "Enables the get_annotation_document command without any pre-configured scope."
+commands.allow = ["get_annotation_document"]
+
+[[permission]]
+identifier = "deny-get-annotation-document"
+description = "Denies the get_annotation_document command without any pre-configured scope."
+commands.deny = ["get_annotation_document"]

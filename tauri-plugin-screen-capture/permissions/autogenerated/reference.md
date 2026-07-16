@@ -14,6 +14,8 @@ Default permissions for the plugin
 - `allow-stop-capture`
 - `allow-get-capture-session`
 - `allow-get-capture-stats`
+- `allow-get-annotation-document`
+- `allow-set-annotation-document`
 - `allow-create-webrtc-offer`
 - `allow-accept-webrtc-answer`
 - `allow-add-webrtc-ice-candidate`
@@ -127,6 +129,32 @@ Enables the create_webrtc_offer command without any pre-configured scope.
 <td>
 
 Denies the create_webrtc_offer command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`screen-capture:allow-get-annotation-document`
+
+</td>
+<td>
+
+Enables the get_annotation_document command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`screen-capture:deny-get-annotation-document`
+
+</td>
+<td>
+
+Denies the get_annotation_document command without any pre-configured scope.
 
 </td>
 </tr>
@@ -309,6 +337,32 @@ Enables the resume_capture command without any pre-configured scope.
 <td>
 
 Denies the resume_capture command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`screen-capture:allow-set-annotation-document`
+
+</td>
+<td>
+
+Enables the set_annotation_document command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`screen-capture:deny-set-annotation-document`
+
+</td>
+<td>
+
+Denies the set_annotation_document command without any pre-configured scope.
 
 </td>
 </tr>

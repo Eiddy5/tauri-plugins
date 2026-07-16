@@ -14,12 +14,17 @@ use tokio::{
 };
 
 use crate::{
-    capture::FrameConsumer, models::CaptureStats, pipeline::frame::VideoFrame,
-    publisher::CapturePublisher, Result,
+    annotation::AnnotationLayer,
+    capture::FrameConsumer,
+    models::{AnnotationDocument, CaptureStats},
+    pipeline::frame::VideoFrame,
+    publisher::CapturePublisher,
+    Result,
 };
 
 pub struct CapturePipeline {
     publisher: Arc<dyn CapturePublisher>,
+    annotations: Option<AnnotationLayer>,
     stats: Mutex<CaptureStats>,
     latest_frame: Mutex<Option<PipelineFrame>>,
     pending_frame: Arc<Mutex<Option<PipelineFrame>>>,
@@ -38,6 +43,14 @@ enum PipelineFrame {
 
 impl CapturePipeline {
     pub fn new(publisher: Arc<dyn CapturePublisher>) -> Self {
+        Self::build(publisher, None)
+    }
+
+    pub fn new_with_annotations(publisher: Arc<dyn CapturePublisher>) -> Self {
+        Self::build(publisher, Some(AnnotationLayer::default()))
+    }
+
+    fn build(publisher: Arc<dyn CapturePublisher>, annotations: Option<AnnotationLayer>) -> Self {
         let pending_frame = Arc::new(Mutex::new(None));
         let notify = Arc::new(Notify::new());
         let stopped = Arc::new(AtomicBool::new(false));
@@ -50,6 +63,7 @@ impl CapturePipeline {
 
         Self {
             publisher,
+            annotations,
             stats: Mutex::new(CaptureStats::default()),
             latest_frame: Mutex::new(None),
             pending_frame,
@@ -58,6 +72,33 @@ impl CapturePipeline {
             worker,
             started_at: Mutex::new(None),
         }
+    }
+
+    pub async fn set_annotation_document(&self, document: AnnotationDocument) -> Result<()> {
+        self.annotations
+            .as_ref()
+            .ok_or_else(|| {
+                crate::Error::new(
+                    crate::CaptureErrorCode::InvalidAnnotation,
+                    "annotations were not enabled when this capture session started",
+                    true,
+                )
+            })?
+            .set_document(document)?;
+        self.replay_latest_frame().await
+    }
+
+    pub fn annotation_document(&self) -> Result<AnnotationDocument> {
+        self.annotations
+            .as_ref()
+            .ok_or_else(|| {
+                crate::Error::new(
+                    crate::CaptureErrorCode::InvalidAnnotation,
+                    "annotations were not enabled when this capture session started",
+                    true,
+                )
+            })?
+            .document()
     }
 
     pub async fn stats(&self) -> CaptureStats {
@@ -77,7 +118,7 @@ impl CapturePipeline {
             return Ok(());
         };
 
-        publish_pipeline_frame(&self.publisher, frame).await
+        publish_pipeline_frame(&self.publisher, self.composite_annotations(frame)?).await
     }
 }
 
@@ -92,7 +133,7 @@ impl Drop for CapturePipeline {
 #[async_trait]
 impl FrameConsumer for CapturePipeline {
     fn supports_gpu_surfaces(&self) -> bool {
-        self.publisher.supports_gpu_surfaces()
+        self.annotations.is_none() && self.publisher.supports_gpu_surfaces()
     }
 
     async fn push_frame(&self, frame: VideoFrame) -> Result<()> {
@@ -127,6 +168,7 @@ impl CapturePipeline {
             }
         }
         *self.latest_frame.lock().await = Some(frame.clone());
+        let frame = self.composite_annotations(frame)?;
         {
             let mut pending_frame = self.pending_frame.lock().await;
             if pending_frame.replace(frame).is_some() {
@@ -138,6 +180,14 @@ impl CapturePipeline {
         self.notify.notify_one();
 
         Ok(())
+    }
+
+    fn composite_annotations(&self, mut frame: PipelineFrame) -> Result<PipelineFrame> {
+        if let (Some(annotations), PipelineFrame::Cpu(cpu_frame)) = (&self.annotations, &mut frame)
+        {
+            *cpu_frame = annotations.composite(cpu_frame.clone())?;
+        }
+        Ok(frame)
     }
 }
 

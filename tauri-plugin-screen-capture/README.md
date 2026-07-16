@@ -123,6 +123,8 @@ Tauri 2 默认通过 Capability 控制插件命令访问。将 `screen-capture:d
 | `screen-capture:allow-stop-capture` | `stopCapture()` |
 | `screen-capture:allow-get-capture-session` | `getCaptureSession()` |
 | `screen-capture:allow-get-capture-stats` | `getCaptureStats()` |
+| `screen-capture:allow-get-annotation-document` | `getAnnotationDocument()` |
+| `screen-capture:allow-set-annotation-document` | `setAnnotationDocument()` / `createAnnotationController()` |
 | `screen-capture:allow-create-webrtc-offer` | `createWebRtcOffer()` |
 | `screen-capture:allow-accept-webrtc-answer` | `acceptWebRtcAnswer()` |
 | `screen-capture:allow-add-webrtc-ice-candidate` | `addWebRtcIceCandidate()` |
@@ -199,6 +201,54 @@ const session = await startCapture({
 | `fps` | `number` | `30` | 目标帧率，限制在 `1..=60` |
 | `captureCursor` | `boolean` | `true` | 是否捕获鼠标指针 |
 | `publisher` | `PublisherOptions` | WebRTC loopback | 选择发布器；原生 Agora 尚未链接 |
+| `annotations` | `{ enabled?: boolean }` | `{ enabled: false }` | 为当前会话预留共享批注合成路径 |
+
+### 屏幕共享批注（Windows / macOS）
+
+批注使用一套平台无关的 document 接口。坐标和线宽按 `0..1` 归一化，因此调用层不需要处理 Windows 与 macOS 的像素密度差异。支持画笔、直线、矩形、椭圆和箭头；控制器同时提供对象擦除、撤销、重做、清空和显隐。
+
+Windows 必须在 `startCapture()` 时启用 `annotations`，这样插件会为该会话选择可合成的 BGRA 路径。未启用批注的 Windows 会话继续使用原有 D3D11 GPU surface 快路径。macOS 和 Windows 的批注都在发布前由同一个 pipeline 合成，WebRTC/Agora 观看者收到的是已经带批注的画面。
+
+```ts
+import {
+  createAnnotationController,
+  startCapture,
+  type AnnotationElement,
+} from 'tauri-plugin-screen-capture-api'
+
+const session = await startCapture({
+  sourceId: source.id,
+  sourceKind: source.kind,
+  width: 1920,
+  height: 1080,
+  fps: 60,
+  annotations: { enabled: true },
+})
+
+const annotations = createAnnotationController(session.sessionId)
+await annotations.setVisible(true)
+
+const stroke: AnnotationElement = {
+  id: crypto.randomUUID(),
+  kind: 'pen',
+  points: [{ x: 0.2, y: 0.3 }],
+  color: { red: 255, green: 59, blue: 48, alpha: 255 },
+  width: 0.006,
+}
+
+await annotations.beginElement(stroke)
+// pointermove 时追加归一化坐标；控制器会合并积压的高频更新。
+stroke.points.push({ x: 0.25, y: 0.36 })
+await annotations.updateElement(stroke)
+await annotations.commitElement(stroke)
+
+await annotations.eraseAt({ x: 0.25, y: 0.36 })
+await annotations.undo()
+await annotations.redo()
+await annotations.clear()
+```
+
+`setAnnotationDocument()` 适合已经有画板状态管理器的调用方；`createAnnotationController()` 则提供完整的单会话历史和草稿更新。更新批注文档会主动重放最后一个采集帧，所以静态桌面上的笔迹也会立即发布。
 
 输出画布尺寸在会话期间保持固定。Windows 窗口宽高比变化时，内容会等比例缩放并居中补黑边，不会拉伸；macOS 当前仅保证按请求的输出宽高采集，尚未声明相同的动态 letterbox 语义。
 
@@ -339,6 +389,9 @@ session = await startCapture({
 | `stopCapture(sessionId)` | `Promise<void>` | 停止并释放会话资源 |
 | `getCaptureSession(sessionId)` | `Promise<CaptureSession>` | 获取会话状态和最近错误 |
 | `getCaptureStats(sessionId)` | `Promise<CaptureStats>` | 获取捕获、发布、丢帧、码率和后端统计 |
+| `getAnnotationDocument(sessionId)` | `Promise<AnnotationDocument>` | 获取当前会话的共享批注文档 |
+| `setAnnotationDocument(sessionId, document)` | `Promise<void>` | 原子替换当前会话的共享批注文档 |
+| `createAnnotationController(sessionId)` | `AnnotationController` | 创建带草稿、擦除、撤销、重做和清空能力的统一控制器 |
 | `onCaptureSessionEnded(handler)` | `Promise<UnlistenFn>` | 监听会话因捕获源关闭或运行时错误而被动结束 |
 | `createWebRtcOffer(sessionId)` | `Promise<WebRtcOffer>` | 获取原生 WebRTC peer 的 SDP offer |
 | `acceptWebRtcAnswer(sessionId, answer)` | `Promise<void>` | 提交 WebView peer 的 SDP answer |

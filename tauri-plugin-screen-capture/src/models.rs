@@ -38,6 +38,57 @@ pub enum PixelFormat {
     Nv12,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AnnotationElementKind {
+    Pen,
+    Line,
+    Rectangle,
+    Ellipse,
+    Arrow,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnnotationPoint {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnnotationColor {
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+    pub alpha: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnnotationElement {
+    pub id: String,
+    pub kind: AnnotationElementKind,
+    pub points: Vec<AnnotationPoint>,
+    pub color: AnnotationColor,
+    pub width: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(default)]
+pub struct AnnotationDocument {
+    pub visible: bool,
+    pub elements: Vec<AnnotationElement>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(default)]
+pub struct AnnotationOptions {
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Capabilities {
@@ -47,6 +98,7 @@ pub struct Capabilities {
     pub supports_thumbnails: bool,
     pub supports_cursor_capture: bool,
     pub supports_webrtc: bool,
+    pub supports_annotations: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -122,6 +174,7 @@ pub struct StartCaptureOptions {
     pub height: Option<u32>,
     pub capture_cursor: Option<bool>,
     pub publisher: Option<PublisherOptions>,
+    pub annotations: Option<AnnotationOptions>,
 }
 
 impl StartCaptureOptions {
@@ -152,6 +205,12 @@ impl StartCaptureOptions {
             .as_ref()
             .map(|publisher| publisher.kind)
             .unwrap_or(PublisherKind::WebRtcLoopback)
+    }
+
+    pub fn effective_annotations_enabled(&self) -> bool {
+        self.annotations
+            .as_ref()
+            .is_some_and(|annotations| annotations.enabled)
     }
 }
 
@@ -253,6 +312,7 @@ pub enum CaptureErrorCode {
     #[serde(rename = "webrtcTrackFailed")]
     WebRtcTrackFailed,
     InvalidSession,
+    InvalidAnnotation,
     Internal,
 }
 

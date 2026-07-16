@@ -57,6 +57,7 @@ fn start_capture_options_use_video_defaults() {
         height: None,
         capture_cursor: None,
         publisher: None,
+        annotations: None,
     };
 
     assert_eq!(options.effective_fps(), 30);
@@ -74,9 +75,28 @@ fn start_capture_options_normalize_video_size_for_h264() {
         height: Some(481),
         capture_cursor: Some(true),
         publisher: None,
+        annotations: None,
     };
 
     assert_eq!(options.effective_video_size(), (852, 480));
+}
+
+#[test]
+fn start_capture_options_opt_into_annotations_explicitly() {
+    let disabled: StartCaptureOptions = serde_json::from_value(serde_json::json!({
+        "sourceId": "display:1",
+        "sourceKind": "display"
+    }))
+    .expect("deserialize capture options without annotations");
+    assert!(!disabled.effective_annotations_enabled());
+
+    let enabled: StartCaptureOptions = serde_json::from_value(serde_json::json!({
+        "sourceId": "display:1",
+        "sourceKind": "display",
+        "annotations": { "enabled": true }
+    }))
+    .expect("deserialize capture options with annotations");
+    assert!(enabled.effective_annotations_enabled());
 }
 
 #[test]
@@ -120,6 +140,15 @@ fn webrtc_error_codes_use_documented_wire_names() {
     let parsed: CaptureErrorCode =
         serde_json::from_str("\"webrtcTrackFailed\"").expect("deserialize track error");
     assert_eq!(parsed, CaptureErrorCode::WebRtcTrackFailed);
+}
+
+#[test]
+fn invalid_annotation_error_uses_a_stable_wire_name() {
+    assert_eq!(
+        serde_json::to_value(CaptureErrorCode::InvalidAnnotation)
+            .expect("serialize annotation error code"),
+        "invalidAnnotation"
+    );
 }
 
 #[test]

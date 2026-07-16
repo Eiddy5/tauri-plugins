@@ -10,9 +10,10 @@ use tauri_plugin_screen_capture::{
         CaptureBackend, CaptureFinishReason, DummyCaptureBackend, FrameConsumer, RunningCapture,
     },
     overlay::ShareOverlayFactory,
-    CaptureErrorCode, CaptureErrorPayload, CaptureEventSink, CaptureSessionEndedEvent,
-    CaptureSourceKind, CaptureStatus, ListSourcesOptions, PermissionStatus, Result,
-    ScreenCaptureState, StartCaptureOptions,
+    AnnotationColor, AnnotationDocument, AnnotationElement, AnnotationElementKind,
+    AnnotationOptions, AnnotationPoint, CaptureErrorCode, CaptureErrorPayload, CaptureEventSink,
+    CaptureSessionEndedEvent, CaptureSourceKind, CaptureStatus, ListSourcesOptions,
+    PermissionStatus, Result, ScreenCaptureState, StartCaptureOptions,
 };
 use tokio::sync::watch;
 
@@ -313,7 +314,67 @@ fn start_options() -> StartCaptureOptions {
         height: Some(720),
         capture_cursor: Some(true),
         publisher: None,
+        annotations: None,
     }
+}
+
+fn annotation_document(id: &str) -> AnnotationDocument {
+    AnnotationDocument {
+        visible: true,
+        elements: vec![AnnotationElement {
+            id: id.to_string(),
+            kind: AnnotationElementKind::Pen,
+            points: vec![AnnotationPoint { x: 0.5, y: 0.5 }],
+            color: AnnotationColor {
+                red: 255,
+                green: 0,
+                blue: 0,
+                alpha: 255,
+            },
+            width: 0.01,
+        }],
+    }
+}
+
+#[tokio::test]
+async fn state_keeps_annotation_documents_isolated_per_capture_session() {
+    let state = ScreenCaptureState::with_backend(Arc::new(DummyCaptureBackend));
+    let first = state
+        .start_capture(StartCaptureOptions {
+            annotations: Some(AnnotationOptions { enabled: true }),
+            ..start_options()
+        })
+        .await
+        .expect("first annotated session");
+    let second = state
+        .start_capture(StartCaptureOptions {
+            source_id: "dummy-display-2".to_string(),
+            annotations: Some(AnnotationOptions { enabled: true }),
+            ..start_options()
+        })
+        .await
+        .expect("second annotated session");
+
+    let document = annotation_document("first-session-stroke");
+    state
+        .set_annotation_document(&first.session_id, document.clone())
+        .await
+        .expect("set first document");
+
+    assert_eq!(
+        state
+            .get_annotation_document(&first.session_id)
+            .await
+            .expect("get first document"),
+        document
+    );
+    assert_eq!(
+        state
+            .get_annotation_document(&second.session_id)
+            .await
+            .expect("get second document"),
+        AnnotationDocument::default()
+    );
 }
 
 #[tokio::test]
@@ -708,6 +769,7 @@ async fn state_normalizes_capture_size_before_starting_backend() {
             height: Some(481),
             capture_cursor: Some(true),
             publisher: None,
+            annotations: None,
         })
         .await
         .expect("start");

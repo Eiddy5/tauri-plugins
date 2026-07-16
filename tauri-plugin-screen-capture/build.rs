@@ -9,6 +9,8 @@ const COMMANDS: &[&str] = &[
     "stop_capture",
     "get_capture_session",
     "get_capture_stats",
+    "get_annotation_document",
+    "set_annotation_document",
     "create_webrtc_offer",
     "accept_webrtc_answer",
     "add_webrtc_ice_candidate",

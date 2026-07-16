@@ -11,6 +11,7 @@ mod desktop;
 #[cfg(mobile)]
 mod mobile;
 
+mod annotation;
 pub mod capture;
 mod commands;
 mod error;
@@ -99,6 +100,8 @@ impl Builder {
                 commands::stop_capture,
                 commands::get_capture_session,
                 commands::get_capture_stats,
+                commands::get_annotation_document,
+                commands::set_annotation_document,
                 commands::create_webrtc_offer,
                 commands::accept_webrtc_answer,
                 commands::add_webrtc_ice_candidate
