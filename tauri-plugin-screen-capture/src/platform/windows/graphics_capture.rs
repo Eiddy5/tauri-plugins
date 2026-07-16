@@ -964,13 +964,13 @@ fn capture_monitor_thumbnail_gdi_result(monitor: Monitor) -> Result<String> {
         return Err(runtime_error("monitor has empty bounds"));
     }
 
-    let (thumb_width, thumb_height) = thumbnail_size(source_width, source_height);
+    let plan = display_thumbnail_capture_plan(source_width, source_height);
     let mut bits = std::ptr::null_mut();
     let bitmap_info = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: i32::try_from(thumb_width).map_err(runtime_error)?,
-            biHeight: -i32::try_from(thumb_height).map_err(runtime_error)?,
+            biWidth: i32::try_from(plan.capture_width).map_err(runtime_error)?,
+            biHeight: -i32::try_from(plan.capture_height).map_err(runtime_error)?,
             biPlanes: 1,
             biBitCount: 32,
             biCompression: BI_RGB.0,
@@ -1022,8 +1022,8 @@ fn capture_monitor_thumbnail_gdi_result(monitor: Monitor) -> Result<String> {
             memory_dc,
             0,
             0,
-            i32::try_from(thumb_width).map_err(runtime_error)?,
-            i32::try_from(thumb_height).map_err(runtime_error)?,
+            i32::try_from(plan.capture_width).map_err(runtime_error)?,
+            i32::try_from(plan.capture_height).map_err(runtime_error)?,
             Some(screen_dc),
             rect.left,
             rect.top,
@@ -1038,10 +1038,17 @@ fn capture_monitor_thumbnail_gdi_result(monitor: Monitor) -> Result<String> {
             "CreateDIBSection returned a null pixel pointer",
         ))
     } else {
-        let len = thumb_width as usize * thumb_height as usize * 4;
+        let len = plan.capture_width as usize * plan.capture_height as usize * 4;
         let bgra = unsafe { std::slice::from_raw_parts(bits.cast::<u8>(), len) };
-        let rgba = bgra_to_rgba(bgra);
-        encode_png_base64(&rgba, thumb_width, thumb_height).ok_or_else(|| {
+        let rgba = bgra_to_opaque_rgba(bgra);
+        let rgba = resize_rgba_nearest(
+            &rgba,
+            plan.capture_width,
+            plan.capture_height,
+            plan.thumbnail_width,
+            plan.thumbnail_height,
+        );
+        encode_png_base64(&rgba, plan.thumbnail_width, plan.thumbnail_height).ok_or_else(|| {
             Error::new(
                 CaptureErrorCode::CaptureRuntimeFailed,
                 "failed to encode Windows GDI display thumbnail",
@@ -1324,6 +1331,27 @@ fn thumbnail_size(width: u32, height: u32) -> (u32, u32) {
     (target_width, target_height)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct DisplayThumbnailCapturePlan {
+    capture_width: u32,
+    capture_height: u32,
+    thumbnail_width: u32,
+    thumbnail_height: u32,
+}
+
+fn display_thumbnail_capture_plan(
+    source_width: u32,
+    source_height: u32,
+) -> DisplayThumbnailCapturePlan {
+    let (thumbnail_width, thumbnail_height) = thumbnail_size(source_width, source_height);
+    DisplayThumbnailCapturePlan {
+        capture_width: source_width,
+        capture_height: source_height,
+        thumbnail_width,
+        thumbnail_height,
+    }
+}
+
 fn resize_rgba_nearest(
     input: &[u8],
     source_width: u32,
@@ -1402,6 +1430,19 @@ mod tests {
         assert_eq!(
             capture_draw_border_settings(),
             DrawBorderSettings::WithoutBorder
+        );
+    }
+
+    #[test]
+    fn display_thumbnail_capture_reads_the_full_monitor_before_resizing() {
+        assert_eq!(
+            display_thumbnail_capture_plan(2560, 1440),
+            DisplayThumbnailCapturePlan {
+                capture_width: 2560,
+                capture_height: 1440,
+                thumbnail_width: 420,
+                thumbnail_height: 236,
+            }
         );
     }
 
