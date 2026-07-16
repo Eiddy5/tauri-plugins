@@ -11,6 +11,7 @@ import {
   stopCapture,
 } from "tauri-plugin-screen-capture-api"
 import { publishAgoraScreenTrack } from "./lib/agoraPublisher.js"
+import { createAnnotationBoard } from "./lib/annotationBoard.js"
 import { connectVideo } from "./lib/screenCapture.js"
 
 const captureQualityPresets = {
@@ -116,10 +117,31 @@ app.innerHTML = `
           <span data-session-status>idle</span>
         </div>
         <div class="actions">
+          <button type="button" data-board-toggle aria-pressed="false">开启画板</button>
           <button type="button" data-start>开始共享</button>
           <button type="button" data-pause>暂停</button>
           <button type="button" data-resume>继续</button>
           <button type="button" class="danger" data-stop>停止</button>
+        </div>
+      </div>
+
+      <div class="annotation-toolbar" data-board-toolbar hidden>
+        <div class="annotation-tools" role="toolbar" aria-label="画板工具">
+          <button type="button" data-board-tool="pen" aria-pressed="true">画笔</button>
+          <button type="button" data-board-tool="line" aria-pressed="false">直线</button>
+          <button type="button" data-board-tool="rectangle" aria-pressed="false">矩形</button>
+          <button type="button" data-board-tool="ellipse" aria-pressed="false">椭圆</button>
+          <button type="button" data-board-tool="arrow" aria-pressed="false">箭头</button>
+          <button type="button" data-board-tool="eraser" aria-pressed="false">橡皮擦</button>
+        </div>
+        <label class="annotation-color">
+          <span>颜色</span>
+          <input type="color" value="#ff3b30" data-board-color />
+        </label>
+        <div class="annotation-history">
+          <button type="button" data-board-undo>撤销</button>
+          <button type="button" data-board-redo>重做</button>
+          <button type="button" data-board-clear>清空</button>
         </div>
       </div>
 
@@ -129,6 +151,7 @@ app.innerHTML = `
           <span data-preview-subtitle>选择后点击开始共享</span>
         </div>
         <video data-video autoplay playsinline muted></video>
+        <canvas class="annotation-canvas" data-board-canvas hidden></canvas>
       </div>
 
       <div class="status-strip">
@@ -162,6 +185,14 @@ const elements = {
   pause: app.querySelector("[data-pause]"),
   resume: app.querySelector("[data-resume]"),
   stop: app.querySelector("[data-stop]"),
+  boardToggle: app.querySelector("[data-board-toggle]"),
+  boardToolbar: app.querySelector("[data-board-toolbar]"),
+  boardCanvas: app.querySelector("[data-board-canvas]"),
+  boardTools: [...app.querySelectorAll("[data-board-tool]")],
+  boardColor: app.querySelector("[data-board-color]"),
+  boardUndo: app.querySelector("[data-board-undo]"),
+  boardRedo: app.querySelector("[data-board-redo]"),
+  boardClear: app.querySelector("[data-board-clear]"),
   previewIdle: app.querySelector("[data-preview-idle]"),
   previewTitle: app.querySelector("[data-preview-title]"),
   previewSubtitle: app.querySelector("[data-preview-subtitle]"),
@@ -174,6 +205,23 @@ const elements = {
   agoraStatus: app.querySelector("[data-agora-status]"),
   error: app.querySelector("[data-error]"),
 }
+
+const annotationBoard = createAnnotationBoard({
+  elements: {
+    toggle: elements.boardToggle,
+    toolbar: elements.boardToolbar,
+    canvas: elements.boardCanvas,
+    tools: elements.boardTools,
+    color: elements.boardColor,
+    undo: elements.boardUndo,
+    redo: elements.boardRedo,
+    clear: elements.boardClear,
+  },
+  onError(error) {
+    state.error = errorMessage(error)
+    render()
+  },
+})
 
 elements.refresh.addEventListener("click", refreshSources)
 elements.start.addEventListener("click", start)
@@ -281,6 +329,12 @@ async function start() {
       width: captureSize.width,
       height: captureSize.height,
       captureCursor: true,
+      annotations: { enabled: true },
+    })
+    annotationBoard.attach({
+      sessionId: state.session.sessionId,
+      width: captureSize.width,
+      height: captureSize.height,
     })
     console.info("[screen-capture] capture session started", state.session)
     const videoConnection = await connectVideo(state.session, elements.video)
@@ -353,6 +407,11 @@ async function stop({ stopBackend = true } = {}) {
   state.stats = null
   if (state.pollTimer) clearInterval(state.pollTimer)
   state.pollTimer = null
+  try {
+    await annotationBoard.detach()
+  } catch (err) {
+    state.error = errorMessage(err)
+  }
   if (state.agoraPublication) {
     try {
       await state.agoraPublication.stop()
