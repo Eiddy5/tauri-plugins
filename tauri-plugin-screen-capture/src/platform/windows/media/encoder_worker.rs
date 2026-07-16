@@ -454,8 +454,11 @@ fn run_encoder(
             if cadence.on_captured_frame() {
                 force_keyframe.store(true, Ordering::Release);
             }
-            repeated_timestamp_ns =
-                next_captured_timestamp(repeated_timestamp_ns, frame.timestamp_ns());
+            repeated_timestamp_ns = next_captured_timestamp(
+                repeated_timestamp_ns,
+                frame.timestamp_ns(),
+                frame_duration_ns,
+            );
             let frame = frame.with_timestamp(repeated_timestamp_ns);
             last_frame = Some(frame.clone());
             frame
@@ -543,8 +546,12 @@ fn run_encoder(
     }
 }
 
-fn next_captured_timestamp(previous_timestamp_ns: u64, captured_timestamp_ns: u64) -> u64 {
-    captured_timestamp_ns.max(previous_timestamp_ns.saturating_add(1))
+fn next_captured_timestamp(
+    previous_timestamp_ns: u64,
+    captured_timestamp_ns: u64,
+    frame_duration_ns: u64,
+) -> u64 {
+    captured_timestamp_ns.max(previous_timestamp_ns.saturating_add(frame_duration_ns))
 }
 
 fn next_repeat_deadline(previous: Instant, now: Instant, period: Duration) -> Instant {
@@ -738,9 +745,9 @@ mod tests {
 
     #[test]
     fn captured_frame_timestamp_stays_monotonic_after_static_repeats() {
-        assert_eq!(next_captured_timestamp(1_000, 900), 1_001);
-        assert_eq!(next_captured_timestamp(1_000, 1_500), 1_500);
-        assert_eq!(next_captured_timestamp(u64::MAX, 1), u64::MAX);
+        assert_eq!(next_captured_timestamp(1_000, 900, 500), 1_500);
+        assert_eq!(next_captured_timestamp(1_000, 2_000, 500), 2_000);
+        assert_eq!(next_captured_timestamp(u64::MAX, 1, 500), u64::MAX);
     }
 
     #[test]

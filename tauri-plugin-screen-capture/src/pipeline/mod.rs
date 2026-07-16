@@ -22,6 +22,10 @@ use crate::{
     Result,
 };
 
+// OpenH264 uses millisecond timestamps, while the native encoders use finer timebases.
+// Advancing by one millisecond keeps republished static frames distinct for every backend.
+const MIN_PUBLISH_TIMESTAMP_STEP_NS: u64 = 1_000_000;
+
 pub struct CapturePipeline {
     publisher: Arc<dyn CapturePublisher>,
     annotations: Option<Arc<AnnotationLayer>>,
@@ -106,30 +110,22 @@ impl CapturePipeline {
     }
 
     pub async fn set_annotation_document(&self, document: AnnotationDocument) -> Result<()> {
-        self.annotations
-            .as_ref()
-            .ok_or_else(|| {
-                crate::Error::new(
-                    crate::CaptureErrorCode::InvalidAnnotation,
-                    "annotations were not enabled when this capture session started",
-                    true,
-                )
-            })?
-            .set_document(document)?;
+        self.annotation_layer()?.set_document(document)?;
         self.replay_latest_frame().await
     }
 
     pub fn annotation_document(&self) -> Result<AnnotationDocument> {
-        self.annotations
-            .as_ref()
-            .ok_or_else(|| {
-                crate::Error::new(
-                    crate::CaptureErrorCode::InvalidAnnotation,
-                    "annotations were not enabled when this capture session started",
-                    true,
-                )
-            })?
-            .document()
+        self.annotation_layer()?.document()
+    }
+
+    fn annotation_layer(&self) -> Result<&AnnotationLayer> {
+        self.annotations.as_deref().ok_or_else(|| {
+            crate::Error::new(
+                crate::CaptureErrorCode::InvalidAnnotation,
+                "annotations were not enabled when this capture session started",
+                true,
+            )
+        })
     }
 
     pub async fn stats(&self) -> CaptureStats {
@@ -278,7 +274,7 @@ fn spawn_latest_frame_worker(
     annotations: Option<Arc<AnnotationLayer>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut last_timestamp_ns = 0_u64;
+        let mut last_timestamp_ns: Option<u64> = None;
         loop {
             notify.notified().await;
 
@@ -286,11 +282,11 @@ fn spawn_latest_frame_worker(
                 if stopped.load(Ordering::Acquire) {
                     return;
                 }
-                let timestamp_ns = pending
-                    .frame
-                    .timestamp_ns()
-                    .max(last_timestamp_ns.saturating_add(1));
-                last_timestamp_ns = timestamp_ns;
+                let captured_timestamp_ns = pending.frame.timestamp_ns();
+                let timestamp_ns = last_timestamp_ns.map_or(captured_timestamp_ns, |last| {
+                    captured_timestamp_ns.max(last.saturating_add(MIN_PUBLISH_TIMESTAMP_STEP_NS))
+                });
+                last_timestamp_ns = Some(timestamp_ns);
                 let frame = pending.frame.with_timestamp(timestamp_ns);
                 let result = match composite_annotations(&annotations, frame) {
                     Ok(frame) => publish_pipeline_frame(&publisher, frame).await,

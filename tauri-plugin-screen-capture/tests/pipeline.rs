@@ -264,7 +264,8 @@ async fn updating_annotations_republishes_the_latest_static_capture_frame() {
     let frames = publisher.frames.lock().await;
     let center = (5 * 10 + 5) * 4;
     assert_eq!(&frames[1].data[center..center + 4], &[0, 0, 255, 255]);
-    assert!(frames[1].timestamp_ns > frames[0].timestamp_ns);
+    assert!(frames[1].timestamp_ns >= frames[0].timestamp_ns + 1_000_000);
+    assert!(frames[1].timestamp_ns / 1_000_000 > frames[0].timestamp_ns / 1_000_000);
 }
 
 #[tokio::test]

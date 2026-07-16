@@ -231,8 +231,9 @@ export function createAnnotationController(
   const redoStack: AnnotationDocument[] = []
   let pendingWrite: AnnotationDocument | null = null
   let flushPromise: Promise<void> | null = null
-  const videoWidth = Math.max(1, options.videoWidth ?? 1)
-  const videoHeight = Math.max(1, options.videoHeight ?? 1)
+  const hasVideoDimensions = options.videoWidth !== undefined && options.videoHeight !== undefined
+  const videoWidth = hasVideoDimensions ? Math.max(1, options.videoWidth!) : 1
+  const videoHeight = hasVideoDimensions ? Math.max(1, options.videoHeight!) : 1
   const shorterDimension = Math.min(videoWidth, videoHeight)
   const scaleX = videoWidth / shorterDimension
   const scaleY = videoHeight / shorterDimension
@@ -395,7 +396,7 @@ export function createAnnotationController(
         elementSegments(candidate).some(
           ([start, end]) =>
             pointDistanceToSegment(hitPoint, start, end) <=
-            radius + Math.max(candidate.width / 2, 1 / shorterDimension),
+            radius + Math.max(candidate.width / 2, hasVideoDimensions ? 1 / shorterDimension : 0),
         ),
       )
       if (!element) return flushPromise ?? Promise.resolve()
