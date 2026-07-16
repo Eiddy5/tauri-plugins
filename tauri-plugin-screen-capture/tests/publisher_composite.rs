@@ -29,6 +29,7 @@ fn start_options() -> StartCaptureOptions {
         height: Some(1),
         capture_cursor: Some(true),
         publisher: None,
+        annotations: None,
     }
 }
 

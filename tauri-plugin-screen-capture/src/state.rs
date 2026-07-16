@@ -12,9 +12,10 @@ use crate::{
     capture::{CaptureBackend, CaptureFinishReason, RunningCapture},
     error::Error,
     models::{
-        Capabilities, CaptureErrorCode, CaptureSession, CaptureSessionEndedEvent, CaptureSource,
-        CaptureStats, CaptureStatus, ListSourcesOptions, PermissionStatus, PublisherKind,
-        StartCaptureOptions, WebRtcAnswer, WebRtcIceCandidate, WebRtcOffer,
+        AnnotationDocument, AnnotationInputTarget, Capabilities, CaptureErrorCode, CaptureSession,
+        CaptureSessionEndedEvent, CaptureSource, CaptureStats, CaptureStatus, ListSourcesOptions,
+        PermissionStatus, PublisherKind, StartCaptureOptions, WebRtcAnswer, WebRtcIceCandidate,
+        WebRtcOffer,
     },
     overlay::{DefaultShareOverlayFactory, OverlayTarget, ShareOverlay, ShareOverlayFactory},
     pipeline::CapturePipeline,
@@ -163,6 +164,7 @@ impl ScreenCaptureState {
             supports_thumbnails: cfg!(any(target_os = "macos", target_os = "windows")),
             supports_cursor_capture: cfg!(any(target_os = "macos", target_os = "windows")),
             supports_webrtc: cfg!(any(target_os = "macos", target_os = "windows")),
+            supports_annotations: cfg!(any(target_os = "macos", target_os = "windows")),
         }
     }
 
@@ -183,7 +185,11 @@ impl ScreenCaptureState {
         let bundle = self.publisher_factory.create(&options).await?;
         let publisher = bundle.publisher;
         let webrtc_signaling = bundle.webrtc_signaling;
-        let pipeline = Arc::new(CapturePipeline::new(Arc::clone(&publisher)));
+        let pipeline = Arc::new(if options.effective_annotations_enabled() {
+            CapturePipeline::new_with_annotations(Arc::clone(&publisher))
+        } else {
+            CapturePipeline::new(Arc::clone(&publisher))
+        });
 
         let running_capture = match self
             .backend
@@ -374,6 +380,46 @@ impl ScreenCaptureState {
         stats.encoder_backend = publisher_stats.encoder_backend;
         stats.started = stats.started || publisher_stats.started;
         Ok(stats)
+    }
+
+    pub async fn set_annotation_document(
+        &self,
+        session_id: &str,
+        document: AnnotationDocument,
+    ) -> Result<()> {
+        let pipeline = {
+            let sessions = self.sessions.lock().await;
+            sessions
+                .get(session_id)
+                .map(|record| Arc::clone(&record.pipeline))
+                .ok_or_else(invalid_session_error)?
+        };
+        pipeline.set_annotation_document(document).await
+    }
+
+    pub async fn get_annotation_document(&self, session_id: &str) -> Result<AnnotationDocument> {
+        let pipeline = {
+            let sessions = self.sessions.lock().await;
+            sessions
+                .get(session_id)
+                .map(|record| Arc::clone(&record.pipeline))
+                .ok_or_else(invalid_session_error)?
+        };
+        pipeline.annotation_document()
+    }
+
+    pub async fn get_annotation_input_target(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<AnnotationInputTarget>> {
+        let overlay = {
+            let sessions = self.sessions.lock().await;
+            sessions
+                .get(session_id)
+                .map(|record| Arc::clone(&record.overlay))
+                .ok_or_else(invalid_session_error)?
+        };
+        overlay.annotation_input_target().await
     }
 
     pub async fn create_webrtc_offer(&self, session_id: &str) -> Result<WebRtcOffer> {

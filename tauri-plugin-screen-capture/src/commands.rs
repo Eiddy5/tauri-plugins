@@ -2,8 +2,9 @@ use tauri::{command, State};
 
 use crate::{
     models::{
-        Capabilities, CaptureSession, CaptureSource, CaptureStats, ListSourcesOptions,
-        PermissionStatus, StartCaptureOptions, WebRtcAnswer, WebRtcIceCandidate, WebRtcOffer,
+        AnnotationDocument, AnnotationInputTarget, Capabilities, CaptureSession, CaptureSource,
+        CaptureStats, ListSourcesOptions, PermissionStatus, StartCaptureOptions, WebRtcAnswer,
+        WebRtcIceCandidate, WebRtcOffer,
     },
     state::ScreenCaptureState,
     Result,
@@ -72,6 +73,31 @@ pub async fn get_capture_stats(
     session_id: String,
 ) -> Result<CaptureStats> {
     state.get_capture_stats(&session_id).await
+}
+
+#[command]
+pub async fn get_annotation_document(
+    state: State<'_, ScreenCaptureState>,
+    session_id: String,
+) -> Result<AnnotationDocument> {
+    state.get_annotation_document(&session_id).await
+}
+
+#[command]
+pub async fn get_annotation_input_target(
+    state: State<'_, ScreenCaptureState>,
+    session_id: String,
+) -> Result<Option<AnnotationInputTarget>> {
+    state.get_annotation_input_target(&session_id).await
+}
+
+#[command]
+pub async fn set_annotation_document(
+    state: State<'_, ScreenCaptureState>,
+    session_id: String,
+    document: AnnotationDocument,
+) -> Result<()> {
+    state.set_annotation_document(&session_id, document).await
 }
 
 #[command]

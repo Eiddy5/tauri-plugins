@@ -10,8 +10,11 @@ import {
   startCapture,
   stopCapture,
 } from "tauri-plugin-screen-capture-api"
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow"
 import { publishAgoraScreenTrack } from "./lib/agoraPublisher.js"
+import { createAnnotationTargetWindowController } from "./lib/annotationTargetWindow.js"
 import { connectVideo } from "./lib/screenCapture.js"
+import { shareExperienceMode } from "./lib/shareExperience.js"
 
 const captureQualityPresets = {
   "720p": { label: "720p HD", maxWidth: 1280, maxHeight: 720, fps: 60 },
@@ -45,93 +48,48 @@ const state = {
   agoraToken: localStorage.getItem("screenCapture.agora.token") ?? "",
   agoraUid: localStorage.getItem("screenCapture.agora.uid") ?? "",
   pollTimer: null,
+  pickerOpen: false,
 }
 
 const app = document.querySelector("#app")
 
 app.innerHTML = `
-  <main class="app-shell">
-    <aside class="sidebar">
-      <header class="sidebar-header">
-        <div>
-          <h1>选择共享内容</h1>
-          <p data-source-summary>0 个可共享来源</p>
-        </div>
-        <button type="button" class="refresh-button" data-refresh>刷新</button>
-      </header>
-
-      <div class="source-tabs" role="tablist" aria-label="共享类型">
-        <button type="button" role="tab" data-kind="display">共享屏幕 <span data-display-count>0</span></button>
-        <button type="button" role="tab" data-kind="window">共享窗口 <span data-window-count>0</span></button>
+  <main class="app-shell" data-mode="landing">
+    <section class="landing" data-landing>
+      <div class="landing-card">
+        <span class="app-mark" aria-hidden="true">S</span>
+        <p class="eyebrow">SCREEN CAPTURE</p>
+        <h1>共享你的屏幕</h1>
+        <p>选择一个屏幕或窗口，将画面清晰、流畅地共享给其他人。</p>
+        <button type="button" class="primary share-entry" data-open-picker>开始共享</button>
       </div>
+    </section>
 
-      <label class="quality-control">
-        <span>共享清晰度</span>
-        <select data-quality aria-label="共享清晰度">
-          ${Object.entries(captureQualityPresets)
-            .map(
-              ([value, preset]) =>
-                `<option value="${value}">${preset.label} · ${preset.fps} FPS</option>`,
-            )
-            .join("")}
-        </select>
-      </label>
-
-      <div class="options">
-        <label><input type="checkbox" data-option="debugRawSources" /> Debug raw</label>
-        <label><input type="checkbox" data-option="includeCurrentApp" /> Current app</label>
-        <label><input type="checkbox" data-option="includeSystemUi" /> System UI</label>
-      </div>
-
-      <section class="agora-panel">
-        <label class="agora-toggle">
-          <input type="checkbox" data-agora-enabled />
-          <span>发布到 Agora</span>
-        </label>
-        <label>
-          <span>App ID</span>
-          <input type="text" data-agora-field="agoraAppId" autocomplete="off" spellcheck="false" />
-        </label>
-        <label>
-          <span>Channel</span>
-          <input type="text" data-agora-field="agoraChannel" autocomplete="off" spellcheck="false" />
-        </label>
-        <label>
-          <span>Token</span>
-          <input type="text" data-agora-field="agoraToken" autocomplete="off" spellcheck="false" />
-        </label>
-        <label>
-          <span>UID</span>
-          <input type="number" min="0" step="1" data-agora-field="agoraUid" />
-        </label>
-      </section>
-
-      <section class="source-list" data-source-list></section>
-    </aside>
-
-    <section class="preview">
-      <div class="toolbar">
-        <div>
-          <strong data-selected-title>未选择共享源</strong>
-          <span data-session-status>idle</span>
-        </div>
-        <div class="actions">
-          <button type="button" data-start>开始共享</button>
-          <button type="button" data-pause>暂停</button>
-          <button type="button" data-resume>继续</button>
-          <button type="button" class="danger" data-stop>停止</button>
-        </div>
-      </div>
-
+    <section class="share-stage" data-share-stage>
       <div class="canvas-wrap">
         <div class="preview-idle" data-preview-idle>
-          <strong data-preview-title>请选择左侧来源</strong>
-          <span data-preview-subtitle>选择后点击开始共享</span>
+          <strong data-preview-title>正在准备共享画面</strong>
+          <span data-preview-subtitle></span>
         </div>
         <video data-video autoplay playsinline muted></video>
       </div>
 
-      <div class="status-strip">
+      <header class="share-topbar">
+        <button type="button" class="stop-sharing" data-stop>结束共享</button>
+      </header>
+
+      <div class="share-bottom-dock">
+        <button type="button" class="board-button" data-board-toggle aria-pressed="false">
+          <span class="board-icon" aria-hidden="true">✎</span>
+          <span>画板</span>
+        </button>
+      </div>
+
+      <div class="hidden-runtime-controls" hidden>
+        <strong data-selected-title>未选择共享源</strong>
+        <span data-session-status>idle</span>
+        <button type="button" data-pause>暂停</button>
+        <button type="button" data-resume>继续</button>
         <span data-captured>Captured 0</span>
         <span data-published>Published 0</span>
         <span data-dropped>Dropped 0</span>
@@ -139,13 +97,97 @@ app.innerHTML = `
         <span data-streaming>Stopped</span>
         <span data-agora-status>Agora off</span>
       </div>
-
-      <div class="error" data-error hidden></div>
     </section>
+
+    <div class="picker-backdrop" data-picker>
+      <section class="picker-dialog" role="dialog" aria-modal="true" aria-labelledby="picker-title">
+        <header class="picker-header">
+          <div class="picker-heading">
+            <h2 id="picker-title">选择共享内容</h2>
+            <p>请选择要展示给其他人的屏幕或应用窗口</p>
+          </div>
+          <button type="button" class="icon-button close-button" data-close-picker aria-label="关闭">×</button>
+        </header>
+
+        <div class="picker-nav">
+          <div class="source-tabs" role="tablist" aria-label="共享类型">
+            <button type="button" role="tab" data-kind="display">
+              <span class="tab-icon" aria-hidden="true">▣</span>
+              <span>整个屏幕</span>
+              <small data-display-count>0</small>
+            </button>
+            <button type="button" role="tab" data-kind="window">
+              <span class="tab-icon" aria-hidden="true">▤</span>
+              <span>应用窗口</span>
+              <small data-window-count>0</small>
+            </button>
+          </div>
+          <div class="source-tools">
+            <span data-source-summary>0 个可共享来源</span>
+            <button type="button" class="refresh-button" data-refresh aria-label="刷新共享内容">
+              <span aria-hidden="true">↻</span>
+              刷新
+            </button>
+          </div>
+        </div>
+
+        <section class="source-list" data-source-list></section>
+
+        <footer class="picker-footer">
+          <div class="picker-preferences">
+            <label class="quality-control">
+              <span>清晰度</span>
+              <select data-quality aria-label="共享清晰度">
+                ${Object.entries(captureQualityPresets)
+                  .map(([value, preset]) => `<option value="${value}">${preset.label} · ${preset.fps} FPS</option>`)
+                  .join("")}
+              </select>
+            </label>
+            <details class="advanced-settings">
+              <summary>更多设置</summary>
+              <div class="advanced-popover">
+                <div class="options">
+                  <label><input type="checkbox" data-option="debugRawSources" /> 显示原始来源</label>
+                  <label><input type="checkbox" data-option="includeCurrentApp" /> 包含当前应用</label>
+                  <label><input type="checkbox" data-option="includeSystemUi" /> 包含系统窗口</label>
+                </div>
+                <section class="agora-panel">
+                  <label class="agora-toggle">
+                    <input type="checkbox" data-agora-enabled />
+                    <span>发布到 Agora</span>
+                  </label>
+                  <label><span>App ID</span><input type="text" data-agora-field="agoraAppId" autocomplete="off" spellcheck="false" /></label>
+                  <label><span>Channel</span><input type="text" data-agora-field="agoraChannel" autocomplete="off" spellcheck="false" /></label>
+                  <label><span>Token</span><input type="text" data-agora-field="agoraToken" autocomplete="off" spellcheck="false" /></label>
+                  <label><span>UID</span><input type="number" min="0" step="1" data-agora-field="agoraUid" /></label>
+                </section>
+              </div>
+            </details>
+          </div>
+          <div class="picker-actions">
+            <button type="button" class="cancel-button" data-close-picker>取消</button>
+            <button type="button" class="primary share-button" data-start>
+              <span aria-hidden="true">▶</span>
+              开始共享
+            </button>
+          </div>
+        </footer>
+      </section>
+    </div>
+
+    <div class="error app-error" data-error hidden></div>
   </main>
 `
 
+const annotationElements = {
+  toggle: app.querySelector("[data-board-toggle]"),
+}
+
 const elements = {
+  shell: app.querySelector(".app-shell"),
+  openPicker: app.querySelector("[data-open-picker]"),
+  closePicker: [...app.querySelectorAll("[data-close-picker]")],
+  picker: app.querySelector("[data-picker]"),
   sourceSummary: app.querySelector("[data-source-summary]"),
   refresh: app.querySelector("[data-refresh]"),
   kindButtons: [...app.querySelectorAll("[data-kind]")],
@@ -175,6 +217,23 @@ const elements = {
   error: app.querySelector("[data-error]"),
 }
 
+const annotationBoard = createAnnotationTargetWindowController({
+  toggle: annotationElements.toggle,
+  createWindow: (label, options) => new WebviewWindow(label, options),
+  onError(error) {
+    state.error = errorMessage(error)
+    render()
+  },
+})
+
+elements.openPicker.addEventListener("click", openPicker)
+for (const button of elements.closePicker) button.addEventListener("click", closePicker)
+elements.picker.addEventListener("click", (event) => {
+  if (event.target === elements.picker) closePicker()
+})
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && state.pickerOpen && !state.session) closePicker()
+})
 elements.refresh.addEventListener("click", refreshSources)
 elements.start.addEventListener("click", start)
 elements.pause.addEventListener("click", pause)
@@ -218,6 +277,19 @@ void onCaptureSessionEnded(({ payload }) => {
 })
 
 render()
+
+function openPicker() {
+  if (state.session) return
+  state.pickerOpen = true
+  render()
+  void refreshSources()
+}
+
+function closePicker() {
+  if (state.session) return
+  state.pickerOpen = false
+  render()
+}
 
 async function refreshSources() {
   state.loading = true
@@ -281,6 +353,13 @@ async function start() {
       width: captureSize.width,
       height: captureSize.height,
       captureCursor: true,
+      annotations: { enabled: true },
+    })
+    state.pickerOpen = false
+    annotationBoard.attach({
+      sessionId: state.session.sessionId,
+      width: captureSize.width,
+      height: captureSize.height,
     })
     console.info("[screen-capture] capture session started", state.session)
     const videoConnection = await connectVideo(state.session, elements.video)
@@ -353,6 +432,11 @@ async function stop({ stopBackend = true } = {}) {
   state.stats = null
   if (state.pollTimer) clearInterval(state.pollTimer)
   state.pollTimer = null
+  try {
+    await annotationBoard.detach()
+  } catch (err) {
+    state.error = errorMessage(err)
+  }
   if (state.agoraPublication) {
     try {
       await state.agoraPublication.stop()
@@ -397,6 +481,7 @@ function render() {
   const windowSources = windows()
   const activeSources = state.activeKind === "display" ? displaySources : windowSources
   const hasSession = Boolean(state.session)
+  elements.shell.dataset.mode = shareExperienceMode(state)
 
   elements.sourceSummary.textContent = state.loading
     ? "正在更新可共享列表"

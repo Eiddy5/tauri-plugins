@@ -15,10 +15,28 @@ fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
+#[tauri::command]
+fn prepare_annotation_overlay(window: tauri::WebviewWindow) -> std::result::Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::{
+            Foundation::HWND,
+            UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE},
+        };
+
+        let raw_hwnd = window.hwnd().map_err(|error| error.to_string())?.0;
+        let hwnd = HWND(raw_hwnd);
+        unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) }
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![greet])
+        .invoke_handler(tauri::generate_handler![greet, prepare_annotation_overlay])
         .plugin(
             tauri_plugin_screen_capture::Builder::new()
                 .publisher_factory(Arc::new(ExamplePublisherFactory))

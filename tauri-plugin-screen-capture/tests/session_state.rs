@@ -10,8 +10,10 @@ use tauri_plugin_screen_capture::{
         CaptureBackend, CaptureFinishReason, DummyCaptureBackend, FrameConsumer, RunningCapture,
     },
     overlay::ShareOverlayFactory,
-    CaptureErrorCode, CaptureErrorPayload, CaptureEventSink, CaptureSessionEndedEvent,
-    CaptureSourceKind, CaptureStatus, ListSourcesOptions, PermissionStatus, Result,
+    AnnotationColor, AnnotationDocument, AnnotationElement, AnnotationElementKind,
+    AnnotationInputTarget, AnnotationOptions, AnnotationPoint, CaptureErrorCode,
+    CaptureErrorPayload, CaptureEventSink, CaptureSessionEndedEvent, CaptureSourceKind,
+    CaptureStatus, CoordinateSpace, ListSourcesOptions, PermissionStatus, Result,
     ScreenCaptureState, StartCaptureOptions,
 };
 use tokio::sync::watch;
@@ -313,7 +315,131 @@ fn start_options() -> StartCaptureOptions {
         height: Some(720),
         capture_cursor: Some(true),
         publisher: None,
+        annotations: None,
     }
+}
+
+#[derive(Debug)]
+struct AnnotationTargetOverlayProbe;
+
+#[async_trait]
+impl tauri_plugin_screen_capture::overlay::ShareOverlay for AnnotationTargetOverlayProbe {
+    async fn start(
+        &self,
+        _target: tauri_plugin_screen_capture::overlay::OverlayTarget,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn show(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn hide(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn annotation_input_target(&self) -> Result<Option<AnnotationInputTarget>> {
+        Ok(Some(AnnotationInputTarget {
+            x: 100.0,
+            y: 50.0,
+            width: 1280.0,
+            height: 720.0,
+            coordinate_space: CoordinateSpace::Physical,
+        }))
+    }
+}
+
+fn annotation_document(id: &str) -> AnnotationDocument {
+    AnnotationDocument {
+        visible: true,
+        elements: vec![AnnotationElement {
+            id: id.to_string(),
+            kind: AnnotationElementKind::Pen,
+            points: vec![AnnotationPoint { x: 0.5, y: 0.5 }],
+            color: AnnotationColor {
+                red: 255,
+                green: 0,
+                blue: 0,
+                alpha: 255,
+            },
+            width: 0.01,
+        }],
+    }
+}
+
+#[tokio::test]
+async fn state_keeps_annotation_documents_isolated_per_capture_session() {
+    let state = ScreenCaptureState::with_backend(Arc::new(DummyCaptureBackend));
+    let first = state
+        .start_capture(StartCaptureOptions {
+            annotations: Some(AnnotationOptions { enabled: true }),
+            ..start_options()
+        })
+        .await
+        .expect("first annotated session");
+    let second = state
+        .start_capture(StartCaptureOptions {
+            source_id: "dummy-display-2".to_string(),
+            annotations: Some(AnnotationOptions { enabled: true }),
+            ..start_options()
+        })
+        .await
+        .expect("second annotated session");
+
+    let document = annotation_document("first-session-stroke");
+    state
+        .set_annotation_document(&first.session_id, document.clone())
+        .await
+        .expect("set first document");
+
+    assert_eq!(
+        state
+            .get_annotation_document(&first.session_id)
+            .await
+            .expect("get first document"),
+        document
+    );
+    assert_eq!(
+        state
+            .get_annotation_document(&second.session_id)
+            .await
+            .expect("get second document"),
+        AnnotationDocument::default()
+    );
+}
+
+#[tokio::test]
+async fn state_exposes_the_active_share_surface_for_annotation_input() {
+    let state = ScreenCaptureState::with_backend_and_overlay(
+        Arc::new(DummyCaptureBackend),
+        Arc::new(AnnotationTargetOverlayProbe),
+    );
+    let session = state
+        .start_capture(StartCaptureOptions {
+            annotations: Some(AnnotationOptions { enabled: true }),
+            ..start_options()
+        })
+        .await
+        .expect("start annotated capture");
+
+    assert_eq!(
+        state
+            .get_annotation_input_target(&session.session_id)
+            .await
+            .expect("annotation input target"),
+        Some(AnnotationInputTarget {
+            x: 100.0,
+            y: 50.0,
+            width: 1280.0,
+            height: 720.0,
+            coordinate_space: CoordinateSpace::Physical,
+        })
+    );
 }
 
 #[tokio::test]
@@ -708,6 +834,7 @@ async fn state_normalizes_capture_size_before_starting_backend() {
             height: Some(481),
             capture_cursor: Some(true),
             publisher: None,
+            annotations: None,
         })
         .await
         .expect("start");

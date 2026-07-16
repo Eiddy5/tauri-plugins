@@ -18,6 +18,7 @@
   ],
   "scripts": {
     "build": "rollup -c",
+    "test:annotation-controller": "pnpm build && node tests/annotation-controller.mjs",
     "prepublishOnly": "pnpm build",
     "pretest": "pnpm build"
   },

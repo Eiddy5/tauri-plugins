@@ -3,7 +3,7 @@ use std::{cell::RefCell, collections::HashMap};
 use objc2_app_kit::NSStatusWindowLevel;
 
 use crate::{
-    models::{CaptureErrorCode, CaptureSourceKind},
+    models::{AnnotationInputTarget, CaptureErrorCode, CaptureSourceKind, CoordinateSpace},
     overlay::OverlayTarget,
     Error, Result,
 };
@@ -15,7 +15,8 @@ use super::{
     panel::OverlayPanel,
     verify_lightweight_order, verify_overlay_panel_placement, visible_corner_layers,
     window_info::{
-        activate_window_owner, display_frame, ordered_windows, visible_window_ids, window_geometry,
+        activate_window_owner, display_frame, ordered_windows, tauri_input_rect,
+        visible_window_ids, window_geometry,
     },
     OrderVerificationState, OverlayDecision, OverlayPanelLayout, WindowFrameAction,
     WindowFrameTracker,
@@ -107,6 +108,13 @@ pub(crate) fn stop(session_id: u64) -> Result<()> {
     })
 }
 
+pub(crate) fn annotation_input_target(session_id: u64) -> Result<Option<AnnotationInputTarget>> {
+    HOSTS.with_borrow(|hosts| match hosts.get(&session_id) {
+        Some(host) => host.annotation_input_target(),
+        None => Ok(None),
+    })
+}
+
 fn with_host(
     session_id: u64,
     operation: impl FnOnce(&mut OverlayHost) -> Result<()>,
@@ -181,6 +189,29 @@ impl OverlayHost {
             CaptureSourceKind::Display => self.refresh_display(),
             CaptureSourceKind::Window => self.refresh_window(),
         }
+    }
+
+    fn annotation_input_target(&self) -> Result<Option<AnnotationInputTarget>> {
+        let frame = match self.target.source_kind {
+            CaptureSourceKind::Display => {
+                let display_id = parse_source_id(&self.target.source_id, "display")?;
+                display_frame(display_id)
+            }
+            CaptureSourceKind::Window => {
+                let window_id = parse_source_id(&self.target.source_id, "window")?;
+                window_geometry(window_id)?.map(|geometry| geometry.frame)
+            }
+        };
+        Ok(frame.map(|frame| {
+            let frame = tauri_input_rect(frame);
+            AnnotationInputTarget {
+                x: frame.x,
+                y: frame.y,
+                width: frame.width,
+                height: frame.height,
+                coordinate_space: CoordinateSpace::Logical,
+            }
+        }))
     }
 
     fn refresh_display(&mut self) -> Result<()> {
