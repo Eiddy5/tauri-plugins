@@ -54,6 +54,7 @@ pub const fn event_action(event: OverlayEvent) -> RefreshAction {
 }
 
 pub const WINDOW_POSITION_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const WINDOW_SERVER_COMMIT_DELAY: Duration = Duration::from_millis(50);
 const CORRECTION_INTERVAL: Duration = Duration::from_secs(2);
 
 pub(crate) struct EventObservers {
@@ -174,22 +175,32 @@ pub(crate) fn schedule_order_verification(session_id: u64, generation: u64) {
     let block = RcBlock::new(move |_: NonNull<NSTimer>| {
         super::host::verify_pending_order(session_id, generation);
     });
-    // SAFETY: The block captures only a numeric session ID and the scheduled timer fires on
-    // the current main RunLoop. The RunLoop retains the one-shot timer until it fires.
-    let _timer =
-        unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.0, false, &block) };
+    // SAFETY: The block captures only numeric IDs. A short delay gives Window Server time to
+    // commit the cross-process relative order before the one-shot performs strict validation.
+    let _timer = unsafe {
+        NSTimer::scheduledTimerWithTimeInterval_repeats_block(
+            WINDOW_SERVER_COMMIT_DELAY.as_secs_f64(),
+            false,
+            &block,
+        )
+    };
 }
 
-fn schedule_refresh_after_window_ordering(session_id: u64) {
+pub(crate) fn schedule_refresh_after_window_ordering(session_id: u64) {
     let block = RcBlock::new(move |_: NonNull<NSTimer>| {
-        if let Err(error) = super::host::refresh(session_id) {
+        if let Err(error) = super::host::refresh_after_environment_change(session_id) {
             tracing::debug!(%error, session_id, "macOS 浮层聚焦后刷新失败");
         }
     });
-    // SAFETY: A zero-delay one-shot runs on the next main RunLoop turn, after AppKit finishes
-    // committing the activation event's Window Server ordering transaction.
-    let _timer =
-        unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.0, false, &block) };
+    // SAFETY: The block captures only the session ID. The short delay lets AppKit finish the
+    // activation transaction before this one-shot re-establishes cross-process relative order.
+    let _timer = unsafe {
+        NSTimer::scheduledTimerWithTimeInterval_repeats_block(
+            WINDOW_SERVER_COMMIT_DELAY.as_secs_f64(),
+            false,
+            &block,
+        )
+    };
 }
 
 impl Drop for EventObservers {
@@ -230,7 +241,10 @@ fn dispatch(session_id: u64, event: OverlayEvent) {
     }
     let result = match event_action(event) {
         RefreshAction::Hide => super::host::hide_transient(session_id),
-        RefreshAction::Refresh => super::host::refresh(session_id),
+        RefreshAction::Refresh if event == OverlayEvent::CorrectionTimer => {
+            super::host::refresh(session_id)
+        }
+        RefreshAction::Refresh => super::host::refresh_after_environment_change(session_id),
         RefreshAction::RefreshAfterWindowOrdering => {
             schedule_refresh_after_window_ordering(session_id);
             Ok(())

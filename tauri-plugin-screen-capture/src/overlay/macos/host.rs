@@ -10,16 +10,18 @@ use crate::{
 
 use super::{
     decide_window_overlay,
-    events::{schedule_order_verification, EventObservers},
-    lightweight_order_span, needs_native_update,
+    events::{schedule_order_verification, schedule_refresh_after_window_ordering, EventObservers},
+    lightweight_order_span,
+    model::mac_rects_match,
+    needs_native_update,
     panel::OverlayPanel,
     verify_lightweight_order, verify_overlay_panel_placement, visible_corner_layers,
     window_info::{
         activate_window_owner, display_frame, ordered_windows, tauri_input_rect,
         visible_window_ids, window_geometry,
     },
-    OrderVerificationState, OverlayDecision, OverlayPanelLayout, WindowFrameAction,
-    WindowFrameTracker,
+    OrderRetryState, OrderVerificationState, OverlayDecision, OverlayPanelLayout,
+    WindowFrameAction, WindowFrameTracker,
 };
 
 thread_local! {
@@ -27,34 +29,47 @@ thread_local! {
 }
 
 pub(crate) fn start(session_id: u64, target: OverlayTarget) -> Result<()> {
+    startup_activation_target(&target)?;
+    let activation_target = target.clone();
     HOSTS.with_borrow_mut(|hosts| {
         if hosts.contains_key(&session_id) {
             return Err(overlay_error("macOS 浮层会话已经启动"));
         }
-        match activate_startup_target_with(&target, activate_window_owner) {
-            Ok(Some(false)) => tracing::debug!(
-                session_id,
-                source_id = %target.source_id,
-                "macOS 共享启动时未能激活目标窗口所属应用"
-            ),
-            Err(error) => tracing::debug!(
-                %error,
-                session_id,
-                source_id = %target.source_id,
-                "macOS 共享启动时读取目标窗口所属应用失败"
-            ),
-            Ok(Some(true) | None) => {}
-        }
-        let mut host = OverlayHost::new(session_id, target)?;
-        host.refresh()?;
-        hosts.insert(session_id, host);
+        hosts.insert(session_id, OverlayHost::new(session_id, target)?);
         Ok(())
-    })
+    })?;
+
+    match activate_startup_target_with(&activation_target, activate_window_owner) {
+        Ok(Some(false)) => tracing::debug!(
+            session_id,
+            source_id = %activation_target.source_id,
+            "macOS 共享启动时未能激活目标窗口所属应用"
+        ),
+        Err(error) => tracing::debug!(
+            %error,
+            session_id,
+            source_id = %activation_target.source_id,
+            "macOS 共享启动时读取目标窗口所属应用失败"
+        ),
+        Ok(Some(true) | None) => {}
+    }
+
+    let refresh_result = if activation_target.source_kind == CaptureSourceKind::Window {
+        schedule_refresh_after_window_ordering(session_id);
+        Ok(())
+    } else {
+        refresh(session_id)
+    };
+    if refresh_result.is_err() {
+        let _ = stop(session_id);
+    }
+    refresh_result
 }
 
 pub(crate) fn show(session_id: u64) -> Result<()> {
     with_host(session_id, |host| {
         host.requested_visible = true;
+        host.order_retry.reset();
         host.observers.set_paused(false);
         host.refresh()
     })
@@ -71,6 +86,13 @@ pub(crate) fn hide(session_id: u64) -> Result<()> {
 
 pub(crate) fn refresh(session_id: u64) -> Result<()> {
     with_host(session_id, OverlayHost::refresh)
+}
+
+pub(crate) fn refresh_after_environment_change(session_id: u64) -> Result<()> {
+    with_host(session_id, |host| {
+        host.order_retry.reset();
+        host.refresh()
+    })
 }
 
 pub(crate) fn hide_transient(session_id: u64) -> Result<()> {
@@ -155,6 +177,7 @@ struct OverlayHost {
     lightweight_order_span: Option<Vec<u32>>,
     window_frame_tracker: WindowFrameTracker,
     order_verification: OrderVerificationState,
+    order_retry: OrderRetryState,
 }
 
 impl OverlayHost {
@@ -173,10 +196,17 @@ impl OverlayHost {
             lightweight_order_span: None,
             window_frame_tracker: WindowFrameTracker::default(),
             order_verification: OrderVerificationState::default(),
+            order_retry: OrderRetryState::default(),
         })
     }
 
     fn refresh(&mut self) -> Result<()> {
+        if self.target.source_kind == CaptureSourceKind::Window
+            && !self.panel_visible
+            && self.order_retry.automatic_refresh_suppressed()
+        {
+            return Ok(());
+        }
         if !self.requested_visible
             || (self.target.source_kind == CaptureSourceKind::Window
                 && self.window_frame_tracker.is_moving())
@@ -287,10 +317,12 @@ impl OverlayHost {
                 &layout,
                 corner_visibility,
             );
-        let bounds_changed = self.last_frame != Some(geometry.frame)
-            || self.last_level != Some(level)
+        let bounds_changed = self.last_frame.map_or(true, |last_frame| {
+            !mac_rects_match(last_frame, geometry.frame)
+        }) || self.last_level != Some(level)
             || self.corner_visibility != corner_visibility;
         if !needs_native_update(self.panel_visible, bounds_changed, order_valid) {
+            self.order_retry.verification_succeeded();
             self.lightweight_order_span =
                 lightweight_order_span(&current_order, target_id, panel_id);
             self.window_frame_tracker.synchronize(geometry.frame);
@@ -334,9 +366,13 @@ impl OverlayHost {
             return Ok(());
         }
 
-        let mut action = self
-            .window_frame_tracker
-            .observe_for_visibility(geometry.frame, self.panel_visible);
+        let mut action = self.window_frame_tracker.observe(geometry.frame);
+        if action == WindowFrameAction::Keep
+            && !self.panel_visible
+            && self.order_retry.poll_allows_retry()
+        {
+            action = WindowFrameAction::Refresh;
+        }
         if action == WindowFrameAction::Keep && self.panel_visible {
             let order_valid = visible_window_ids()
                 .ok()
@@ -350,6 +386,7 @@ impl OverlayHost {
         match action {
             WindowFrameAction::Keep => Ok(()),
             WindowFrameAction::Hide => {
+                self.order_retry.reset();
                 self.hide_panel();
                 Ok(())
             }
@@ -368,6 +405,7 @@ impl OverlayHost {
         let target_id = match parse_source_id(&self.target.source_id, "window") {
             Ok(target_id) => target_id,
             Err(error) => {
+                self.order_retry.verification_failed();
                 self.hide_panel();
                 return Err(error);
             }
@@ -376,11 +414,13 @@ impl OverlayHost {
         let windows = match ordered_windows(target_id, &[panel_id]) {
             Ok(windows) => windows,
             Err(error) => {
+                self.order_retry.verification_failed();
                 self.hide_panel();
                 return Err(error);
             }
         };
         let Some(last_frame) = self.last_frame else {
+            self.order_retry.verification_failed();
             self.hide_panel();
             return Err(overlay_error("浮层缺少目标窗口边界"));
         };
@@ -395,10 +435,12 @@ impl OverlayHost {
                 corner_visibility,
             )
         {
+            self.order_retry.verification_succeeded();
             self.lightweight_order_span = lightweight_order_span(&windows, target_id, panel_id);
             return Ok(());
         }
 
+        self.order_retry.verification_failed();
         self.hide_panel();
         Err(overlay_error("无法维持目标窗口的相对层级，已隐藏浮层"))
     }

@@ -1,7 +1,7 @@
 use objc2::{rc::Retained, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSPanel, NSView, NSWindowCollectionBehavior, NSWindowOrderingMode,
-    NSWindowStyleMask,
+    NSBackingStoreType, NSColor, NSPanel, NSView, NSWindowAnimationBehavior,
+    NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_foundation::{NSInteger, NSPoint, NSRect, NSSize, NSString};
 use objc2_quartz_core::{CALayer, CATransaction};
@@ -84,6 +84,10 @@ fn overlay_panel_collection_behavior() -> NSWindowCollectionBehavior {
     NSWindowCollectionBehavior::CanJoinAllSpaces
         | NSWindowCollectionBehavior::FullScreenAuxiliary
         | NSWindowCollectionBehavior::Stationary
+}
+
+fn overlay_panel_animation_behavior() -> NSWindowAnimationBehavior {
+    NSWindowAnimationBehavior::None
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -192,8 +196,12 @@ impl OverlayPanel {
         panel.setOpaque(false);
         panel.setHasShadow(false);
         panel.setIgnoresMouseEvents(true);
-        panel.setFloatingPanel(false);
+        panel.setMovable(false);
+        panel.setMovableByWindowBackground(false);
         panel.setHidesOnDeactivate(false);
+        panel.setBecomesKeyOnlyIfNeeded(true);
+        panel.setExcludedFromWindowsMenu(true);
+        panel.setAnimationBehavior(overlay_panel_animation_behavior());
         panel.setBackgroundColor(Some(&NSColor::clearColor()));
         panel.setCollectionBehavior(overlay_panel_collection_behavior());
         panel.setTitle(&NSString::from_str(&format!(
@@ -302,5 +310,13 @@ mod tests {
         assert!(behavior.contains(NSWindowCollectionBehavior::Stationary));
         assert!(!behavior.contains(NSWindowCollectionBehavior::Transient));
         assert!(!behavior.contains(NSWindowCollectionBehavior::Managed));
+    }
+
+    #[test]
+    fn overlay_panel_disables_appkit_show_and_hide_animation() {
+        assert_eq!(
+            overlay_panel_animation_behavior(),
+            NSWindowAnimationBehavior::None
+        );
     }
 }

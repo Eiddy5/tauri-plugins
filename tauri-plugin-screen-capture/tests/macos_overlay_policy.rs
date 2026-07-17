@@ -3,8 +3,8 @@
 use tauri_plugin_screen_capture::overlay::macos::{
     decide_window_overlay, event_action, lightweight_order_span, needs_native_update,
     verify_lightweight_order, verify_overlay_panel_placement, visible_corner_layers, MacRect,
-    OrderVerificationState, OrderedWindow, OverlayDecision, OverlayEvent, OverlayPanelLayout,
-    RefreshAction, WindowFrameAction, WindowFrameTracker, WindowSnapshot,
+    OrderRetryState, OrderVerificationState, OrderedWindow, OverlayDecision, OverlayEvent,
+    OverlayPanelLayout, RefreshAction, WindowFrameAction, WindowFrameTracker, WindowSnapshot,
     WINDOW_POSITION_POLL_INTERVAL,
 };
 
@@ -151,6 +151,36 @@ fn verification_accepts_single_panel_immediately_above_target() {
     ];
 
     assert!(verify_overlay_panel_placement(
+        &windows, 42, 11, &layout, [true; 4],
+    ));
+}
+
+#[test]
+fn verification_accepts_subpoint_window_server_frame_rounding() {
+    let target = rect(0.0, 0.0, 100.0, 100.0);
+    let layout = OverlayPanelLayout::new(target, 32.0);
+    let rounded_target = rect(0.25, -0.25, 100.5, 99.5);
+    let rounded_panel = rect(-0.25, 0.25, 99.5, 100.5);
+    let windows = vec![
+        detailed_panel(11, 0, 9000, rounded_panel),
+        detailed_target(42, 0, 9, rounded_target),
+    ];
+
+    assert!(verify_overlay_panel_placement(
+        &windows, 42, 11, &layout, [true; 4],
+    ));
+}
+
+#[test]
+fn verification_rejects_materially_different_panel_frame() {
+    let target = rect(0.0, 0.0, 100.0, 100.0);
+    let layout = OverlayPanelLayout::new(target, 32.0);
+    let windows = vec![
+        detailed_panel(11, 0, 9000, rect(2.0, 0.0, 100.0, 100.0)),
+        detailed_target(42, 0, 9, target),
+    ];
+
+    assert!(!verify_overlay_panel_placement(
         &windows, 42, 11, &layout, [true; 4],
     ));
 }
@@ -392,6 +422,22 @@ fn every_new_frame_keeps_the_overlay_hidden_during_continuous_motion() {
 }
 
 #[test]
+fn subpoint_frame_jitter_is_ignored_but_accumulated_motion_is_not() {
+    let frame = |x| MacRect {
+        x,
+        y: 20.0,
+        width: 800.0,
+        height: 600.0,
+    };
+    let mut tracker = WindowFrameTracker::default();
+
+    assert_eq!(tracker.observe(frame(10.0)), WindowFrameAction::Keep);
+    assert_eq!(tracker.observe(frame(10.5)), WindowFrameAction::Keep);
+    assert_eq!(tracker.observe(frame(11.5)), WindowFrameAction::Hide);
+    assert_eq!(tracker.observe(frame(11.5)), WindowFrameAction::Refresh);
+}
+
+#[test]
 fn explicit_refresh_synchronizes_the_tracker_without_a_second_hide() {
     let frame = |x| MacRect {
         x,
@@ -505,4 +551,36 @@ fn stale_timer_cannot_consume_verification_requested_after_cancel() {
     assert!(!state.take_if_current(stale_generation));
     assert_eq!(state.pending_generation(), Some(current_generation));
     assert!(state.take_if_current(current_generation));
+}
+
+#[test]
+fn failed_order_verification_allows_only_one_delayed_retry() {
+    let mut state = OrderRetryState::default();
+
+    state.verification_failed();
+    assert!(state.automatic_refresh_suppressed());
+    assert!(!state.poll_allows_retry());
+    assert!(!state.poll_allows_retry());
+    assert!(state.poll_allows_retry());
+    assert!(!state.poll_allows_retry());
+
+    state.verification_failed();
+    for _ in 0..10 {
+        assert!(!state.poll_allows_retry());
+    }
+}
+
+#[test]
+fn successful_verification_or_environment_change_clears_retry_suppression() {
+    let mut state = OrderRetryState::default();
+
+    state.verification_failed();
+    state.verification_succeeded();
+    assert!(!state.automatic_refresh_suppressed());
+    assert!(state.poll_allows_retry());
+
+    state.verification_failed();
+    state.reset();
+    assert!(!state.automatic_refresh_suppressed());
+    assert!(state.poll_allows_retry());
 }

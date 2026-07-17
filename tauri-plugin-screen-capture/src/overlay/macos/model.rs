@@ -197,7 +197,7 @@ pub fn verify_overlay_panel_placement(
         return false;
     };
     if !layout.panel_frame.is_valid()
-        || layout.panel_frame != target_frame
+        || !mac_rects_match(layout.panel_frame, target_frame)
         || windows
             .iter()
             .any(|window| window.kind == OrderedWindowKind::Panel && window.id != panel_id)
@@ -214,7 +214,9 @@ pub fn verify_overlay_panel_placement(
     let panel = windows[panel_index];
     if panel_index >= target_index
         || panel.layer != target.layer
-        || panel.frame != Some(layout.panel_frame)
+        || !panel
+            .frame
+            .is_some_and(|frame| mac_rects_match(frame, layout.panel_frame))
     {
         return false;
     }
@@ -281,6 +283,17 @@ fn rects_intersect(first: MacRect, second: MacRect) -> bool {
         && second.y < first.y + first.height
 }
 
+const MAC_RECT_TOLERANCE_POINTS: f64 = 1.0;
+
+pub(crate) fn mac_rects_match(first: MacRect, second: MacRect) -> bool {
+    first.is_valid()
+        && second.is_valid()
+        && (first.x - second.x).abs() <= MAC_RECT_TOLERANCE_POINTS
+        && (first.y - second.y).abs() <= MAC_RECT_TOLERANCE_POINTS
+        && (first.width - second.width).abs() <= MAC_RECT_TOLERANCE_POINTS
+        && (first.height - second.height).abs() <= MAC_RECT_TOLERANCE_POINTS
+}
+
 pub const fn needs_native_update(
     panel_visible: bool,
     bounds_changed: bool,
@@ -322,14 +335,17 @@ impl WindowFrameTracker {
     }
 
     pub fn observe(&mut self, frame: super::MacRect) -> WindowFrameAction {
-        let Some(last_frame) = self.last_frame.replace(frame) else {
+        let Some(last_frame) = self.last_frame else {
+            self.last_frame = Some(frame);
             return WindowFrameAction::Keep;
         };
-        if last_frame != frame {
+        if !mac_rects_match(last_frame, frame) {
+            self.last_frame = Some(frame);
             self.moving = true;
             return WindowFrameAction::Hide;
         }
         if self.moving {
+            self.last_frame = Some(frame);
             self.moving = false;
             return WindowFrameAction::Refresh;
         }
@@ -345,6 +361,50 @@ impl WindowFrameTracker {
             WindowFrameAction::Keep if !overlay_visible => WindowFrameAction::Refresh,
             action => action,
         }
+    }
+}
+
+const ORDER_RETRY_DELAY_POLLS: u8 = 3;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct OrderRetryState {
+    failure_count: u8,
+    polls_remaining: u8,
+}
+
+impl OrderRetryState {
+    pub fn verification_failed(&mut self) {
+        self.failure_count = self.failure_count.saturating_add(1);
+        self.polls_remaining = if self.failure_count == 1 {
+            ORDER_RETRY_DELAY_POLLS
+        } else {
+            0
+        };
+    }
+
+    pub fn verification_succeeded(&mut self) {
+        self.reset();
+    }
+
+    pub const fn automatic_refresh_suppressed(&self) -> bool {
+        self.failure_count > 0
+    }
+
+    pub fn poll_allows_retry(&mut self) -> bool {
+        if self.failure_count == 0 {
+            return true;
+        }
+        if self.failure_count > 1 || self.polls_remaining == 0 {
+            return false;
+        }
+
+        self.polls_remaining -= 1;
+        self.polls_remaining == 0
+    }
+
+    pub fn reset(&mut self) {
+        self.failure_count = 0;
+        self.polls_remaining = 0;
     }
 }
 
