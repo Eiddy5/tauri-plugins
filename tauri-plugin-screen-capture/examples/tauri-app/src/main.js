@@ -95,7 +95,7 @@ app.innerHTML = `
           <span>画板</span>
         </button>
         <div class="annotation-toolbar" data-annotation-toolbar hidden>
-          <button type="button" data-annotation-mode>标注</button>
+          <button type="button" data-annotation-mode>关闭画板</button>
           <button type="button" data-annotation-tool="pen">画笔</button>
           <button type="button" data-annotation-tool="eraser">橡皮擦</button>
           <input type="color" value="#ff3b30" data-annotation-color aria-label="标注颜色" />
@@ -253,6 +253,10 @@ const annotationBoard = createAnnotationTargetWindowController({
   },
 })
 
+annotationElements.toggle.addEventListener("click", () => {
+  if (supportsNativeAnnotation()) toggleNativeAnnotationSafely()
+})
+
 elements.openPicker.addEventListener("click", openPicker)
 for (const button of elements.closePicker) button.addEventListener("click", closePicker)
 elements.picker.addEventListener("click", (event) => {
@@ -266,7 +270,7 @@ elements.start.addEventListener("click", start)
 elements.pause.addEventListener("click", pause)
 elements.resume.addEventListener("click", resume)
 elements.stop.addEventListener("click", () => void stop())
-annotationElements.mode.addEventListener("click", () => void toggleNativeAnnotation())
+annotationElements.mode.addEventListener("click", toggleNativeAnnotationSafely)
 for (const button of annotationElements.tools) {
   button.addEventListener("click", () => void selectNativeAnnotationTool(button.dataset.annotationTool))
 }
@@ -602,6 +606,13 @@ async function toggleNativeAnnotation() {
   renderAnnotationToolbar()
 }
 
+function toggleNativeAnnotationSafely() {
+  void toggleNativeAnnotation().catch((error) => {
+    state.error = errorMessage(error)
+    render()
+  })
+}
+
 async function selectNativeAnnotationTool(kind) {
   if (!state.session) return
   await applyNativeAnnotationTool(kind)
@@ -624,12 +635,19 @@ async function mutateNativeAnnotation(command) {
 
 function renderAnnotationToolbar() {
   const native = supportsNativeAnnotation()
-  annotationElements.toggle.hidden = native
-  annotationElements.toolbar.hidden = !native || !state.session
-  if (!native) return
+  if (!native) {
+    annotationElements.toolbar.hidden = true
+    return
+  }
   const annotation = state.annotation
-  annotationElements.mode.classList.toggle("selected", Boolean(annotation?.interactionEnabled))
-  annotationElements.mode.setAttribute("aria-pressed", String(Boolean(annotation?.interactionEnabled)))
+  const enabled = Boolean(annotation?.interactionEnabled)
+  annotationElements.toggle.hidden = false
+  annotationElements.toggle.disabled = !state.session
+  annotationElements.toggle.textContent = enabled ? "关闭画板" : "开启画板"
+  annotationElements.toggle.setAttribute("aria-pressed", String(enabled))
+  annotationElements.toolbar.hidden = !state.session || !enabled
+  annotationElements.mode.classList.toggle("selected", enabled)
+  annotationElements.mode.setAttribute("aria-pressed", String(enabled))
   for (const button of annotationElements.tools) {
     button.classList.toggle("selected", annotation?.tool.kind === button.dataset.annotationTool)
     button.disabled = !state.session

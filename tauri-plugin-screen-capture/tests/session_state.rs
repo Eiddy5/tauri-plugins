@@ -357,6 +357,39 @@ impl tauri_plugin_screen_capture::overlay::ShareOverlay for AnnotationTargetOver
     }
 }
 
+#[derive(Debug)]
+struct FailingAnnotationOverlayProbe;
+
+#[async_trait]
+impl tauri_plugin_screen_capture::overlay::ShareOverlay for FailingAnnotationOverlayProbe {
+    async fn start(
+        &self,
+        _target: tauri_plugin_screen_capture::overlay::OverlayTarget,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn show(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn hide(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn set_annotation_interaction(&self, _enabled: bool) -> Result<()> {
+        Err(tauri_plugin_screen_capture::Error::new(
+            CaptureErrorCode::Internal,
+            "annotation overlay failed",
+            true,
+        ))
+    }
+}
+
 fn annotation_document(id: &str) -> AnnotationDocument {
     AnnotationDocument {
         visible: true,
@@ -442,6 +475,33 @@ async fn state_exposes_the_active_share_surface_for_annotation_input() {
             height: 720.0,
             coordinate_space: CoordinateSpace::Physical,
         })
+    );
+}
+
+#[tokio::test]
+async fn state_rolls_back_interaction_when_the_board_overlay_cannot_open() {
+    let state = ScreenCaptureState::with_backend_and_overlay(
+        Arc::new(DummyCaptureBackend),
+        Arc::new(FailingAnnotationOverlayProbe),
+    );
+    let session = state
+        .start_capture(StartCaptureOptions {
+            annotations: Some(AnnotationOptions { enabled: true }),
+            ..start_options()
+        })
+        .await
+        .expect("start annotated capture");
+
+    assert!(state
+        .set_annotation_interaction(&session.session_id, true)
+        .await
+        .is_err());
+    assert!(
+        !state
+            .get_annotation_state(&session.session_id)
+            .await
+            .expect("annotation state after failed open")
+            .interaction_enabled
     );
 }
 

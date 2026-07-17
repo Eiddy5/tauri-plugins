@@ -300,8 +300,12 @@ impl ScreenCaptureState {
         enabled: bool,
     ) -> Result<AnnotationState> {
         let (annotations, overlay) = self.annotation_resources(session_id).await?;
+        let previous_enabled = annotations.state().interaction_enabled;
         let state = annotations.set_interaction_enabled(enabled)?;
-        overlay.set_annotation_interaction(enabled).await?;
+        if let Err(error) = overlay.set_annotation_interaction(enabled).await {
+            let _ = annotations.set_interaction_enabled(previous_enabled);
+            return Err(error);
+        }
         self.emit_annotation_state(session_id, state.clone())?;
         Ok(state)
     }

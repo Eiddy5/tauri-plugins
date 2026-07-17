@@ -140,8 +140,10 @@ pub(crate) fn stop(session_id: u64) -> Result<()> {
 
 pub(crate) fn set_annotation_interaction(session_id: u64, enabled: bool) -> Result<()> {
     with_host(session_id, |host| {
-        host.panel.set_annotation_interaction(enabled);
-        Ok(())
+        if enabled {
+            host.refresh()?;
+        }
+        host.panel.set_annotation_interaction(enabled)
     })
 }
 

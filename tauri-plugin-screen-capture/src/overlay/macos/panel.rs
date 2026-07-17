@@ -1,7 +1,9 @@
+use std::{cell::RefCell, sync::Arc};
+
 use objc2::{rc::Retained, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSPanel, NSWindowAnimationBehavior, NSWindowCollectionBehavior,
-    NSWindowOrderingMode, NSWindowStyleMask,
+    NSAutoresizingMaskOptions, NSBackingStoreType, NSColor, NSPanel, NSView,
+    NSWindowAnimationBehavior, NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_foundation::{NSInteger, NSPoint, NSRect, NSSize, NSString};
 use objc2_quartz_core::{CALayer, CATransaction};
@@ -130,6 +132,8 @@ impl CornerLayers {
 
         horizontal.setBackgroundColor(Some(&green));
         vertical.setBackgroundColor(Some(&green));
+        horizontal.setZPosition(100.0);
+        vertical.setZPosition(100.0);
         root.addSublayer(&horizontal);
         root.addSublayer(&vertical);
         Self {
@@ -167,18 +171,17 @@ impl CornerLayers {
 
 pub(crate) struct OverlayPanel {
     panel: Retained<NSPanel>,
+    root_view: Retained<NSView>,
     root: Retained<CALayer>,
-    annotation_view: Retained<AnnotationView>,
+    annotation_view: RefCell<Option<Retained<AnnotationView>>>,
+    annotation_session: Arc<AnnotationSession>,
     corners: [CornerLayers; 4],
     window_id: u32,
     session_id: u64,
 }
 
 impl OverlayPanel {
-    pub(crate) fn new(
-        session_id: u64,
-        annotation_session: std::sync::Arc<AnnotationSession>,
-    ) -> Result<Self> {
+    pub(crate) fn new(session_id: u64, annotation_session: Arc<AnnotationSession>) -> Result<Self> {
         let mtm = MainThreadMarker::new().ok_or_else(|| {
             Error::new(
                 CaptureErrorCode::Internal,
@@ -194,13 +197,12 @@ impl OverlayPanel {
             NSBackingStoreType::Buffered,
             false,
         );
-        register_annotation_session(session_id, annotation_session);
-        let view = AnnotationView::new(session_id, rect, mtm);
-        view.setWantsLayer(true);
-        let root = view.layer().unwrap_or_else(CALayer::layer);
+        let root_view = NSView::initWithFrame(NSView::alloc(mtm), rect);
+        root_view.setWantsLayer(true);
+        let root = root_view.layer().unwrap_or_else(CALayer::layer);
         let corners = Corner::ALL.map(|corner| CornerLayers::new(&root, corner));
 
-        panel.setContentView(Some(&view));
+        panel.setContentView(Some(&root_view));
         panel.setOpaque(false);
         panel.setHasShadow(false);
         panel.setIgnoresMouseEvents(true);
@@ -222,8 +224,10 @@ impl OverlayPanel {
         register_overlay_window(window_id);
         let panel = Self {
             panel,
+            root_view,
             root,
-            annotation_view: view,
+            annotation_view: RefCell::new(None),
+            annotation_session,
             corners,
             window_id,
             session_id,
@@ -245,6 +249,10 @@ impl OverlayPanel {
         let contents_scale = self.panel.backingScaleFactor();
         let width = frame.width.max(1.0);
         let height = frame.height.max(1.0);
+        self.root_view.setFrame(NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(width, height),
+        ));
         let local_target = MacRect {
             x: 0.0,
             y: 0.0,
@@ -259,6 +267,12 @@ impl OverlayPanel {
             objc2_core_foundation::CGPoint::new(0.0, 0.0),
             objc2_core_foundation::CGSize::new(width, height),
         ));
+        if let Some(view) = self.annotation_view.borrow().as_ref() {
+            view.setFrame(NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(width, height),
+            ));
+        }
         for ((layers, marker_frame), visible) in self
             .corners
             .iter()
@@ -291,19 +305,50 @@ impl OverlayPanel {
         self.window_id
     }
 
-    pub(crate) fn set_annotation_interaction(&self, enabled: bool) {
+    pub(crate) fn set_annotation_interaction(&self, enabled: bool) -> Result<()> {
+        if enabled {
+            let mut annotation_view = self.annotation_view.borrow_mut();
+            if annotation_view.is_none() {
+                let mtm = MainThreadMarker::new().ok_or_else(|| {
+                    Error::new(
+                        CaptureErrorCode::Internal,
+                        "macOS 画板只能在 AppKit 主线程开启",
+                        true,
+                    )
+                })?;
+                register_annotation_session(self.session_id, Arc::clone(&self.annotation_session));
+                let view = AnnotationView::new(self.session_id, self.root_view.bounds(), mtm);
+                view.setWantsLayer(true);
+                view.setAutoresizingMask(
+                    NSAutoresizingMaskOptions::ViewWidthSizable
+                        | NSAutoresizingMaskOptions::ViewHeightSizable,
+                );
+                self.root_view.addSubview(&view);
+                view.setNeedsDisplay(true);
+                *annotation_view = Some(view);
+            }
+        } else if let Some(view) = self.annotation_view.borrow_mut().take() {
+            self.panel.setIgnoresMouseEvents(true);
+            view.removeFromSuperview();
+            unregister_annotation_session(self.session_id);
+        }
         self.panel.setIgnoresMouseEvents(!enabled);
+        Ok(())
     }
 
     pub(crate) fn refresh_annotations(&self) {
-        self.annotation_view.setNeedsDisplay(true);
+        if let Some(view) = self.annotation_view.borrow().as_ref() {
+            view.setNeedsDisplay(true);
+        }
     }
 }
 
 impl Drop for OverlayPanel {
     fn drop(&mut self) {
         unregister_overlay_window(self.window_id);
-        unregister_annotation_session(self.session_id);
+        if self.annotation_view.get_mut().take().is_some() {
+            unregister_annotation_session(self.session_id);
+        }
         self.panel.orderOut(None);
         self.panel.close();
     }
