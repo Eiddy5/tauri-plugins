@@ -32,6 +32,14 @@ tracing = "0.1"
 apple-cf = { version = "0.2", features = ["cm", "cv"] }
 block2 = "0.6"
 objc2 = { version = "0.6", features = ["exception"] }
+objc2-application-services = { version = "0.3", default-features = false, features = [
+  "std",
+  "AXError",
+  "AXUIElement",
+  "AXValue",
+  "HIServices",
+  "libc",
+] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [
   "std",
   "NSColor",
