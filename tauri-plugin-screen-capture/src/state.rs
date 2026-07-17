@@ -9,10 +9,12 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::{
+    annotation::AnnotationSession,
     capture::{CaptureBackend, CaptureFinishReason, RunningCapture},
     error::Error,
     models::{
-        AnnotationDocument, AnnotationInputTarget, Capabilities, CaptureErrorCode, CaptureSession,
+        AnnotationDocument, AnnotationInputTarget, AnnotationState, AnnotationStateChangedEvent,
+        AnnotationTool, AnnotationToolKind, Capabilities, CaptureErrorCode, CaptureSession,
         CaptureSessionEndedEvent, CaptureSource, CaptureStats, CaptureStatus, ListSourcesOptions,
         PermissionStatus, PublisherKind, StartCaptureOptions, WebRtcAnswer, WebRtcIceCandidate,
         WebRtcOffer,
@@ -33,10 +35,14 @@ struct SessionRecord {
     running_capture: Arc<dyn RunningCapture>,
     overlay: Arc<dyn ShareOverlay>,
     webrtc_signaling: Option<Arc<WebRtcSignalingState>>,
+    annotation_session: Option<Arc<AnnotationSession>>,
 }
 
 pub trait CaptureEventSink: Send + Sync {
     fn emit_session_ended(&self, event: CaptureSessionEndedEvent) -> Result<()>;
+    fn emit_annotation_state_changed(&self, _event: AnnotationStateChangedEvent) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -61,7 +67,7 @@ struct SharedShareOverlayFactory {
 }
 
 impl ShareOverlayFactory for SharedShareOverlayFactory {
-    fn create_overlay(&self) -> Arc<dyn ShareOverlay> {
+    fn create_overlay(&self, _annotation_session: Arc<AnnotationSession>) -> Arc<dyn ShareOverlay> {
         Arc::clone(&self.overlay)
     }
 }
@@ -164,7 +170,16 @@ impl ScreenCaptureState {
             supports_thumbnails: cfg!(any(target_os = "macos", target_os = "windows")),
             supports_cursor_capture: cfg!(any(target_os = "macos", target_os = "windows")),
             supports_webrtc: cfg!(any(target_os = "macos", target_os = "windows")),
-            supports_annotations: cfg!(any(target_os = "macos", target_os = "windows")),
+            supports_annotations: cfg!(any(
+                target_os = "windows",
+                all(target_os = "macos", feature = "macos-screencapturekit")
+            )),
+            annotation_tools: if cfg!(all(target_os = "macos", feature = "macos-screencapturekit"))
+            {
+                vec![AnnotationToolKind::Pen, AnnotationToolKind::Eraser]
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -185,6 +200,20 @@ impl ScreenCaptureState {
         let bundle = self.publisher_factory.create(&options).await?;
         let publisher = bundle.publisher;
         let webrtc_signaling = bundle.webrtc_signaling;
+        let annotation_session = Arc::new(AnnotationSession::default());
+
+        #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+        let pipeline = Arc::new(if options.effective_annotations_enabled() {
+            CapturePipeline::new_with_native_annotations(
+                Arc::clone(&publisher),
+                Arc::clone(&annotation_session),
+                options.width.unwrap_or(1280),
+                options.height.unwrap_or(720),
+            )?
+        } else {
+            CapturePipeline::new(Arc::clone(&publisher))
+        });
+        #[cfg(not(all(target_os = "macos", feature = "macos-screencapturekit")))]
         let pipeline = Arc::new(if options.effective_annotations_enabled() {
             CapturePipeline::new_with_annotations(Arc::clone(&publisher))
         } else {
@@ -211,7 +240,9 @@ impl ScreenCaptureState {
             return Err(error);
         }
 
-        let overlay = self.overlay_factory.create_overlay();
+        let overlay = self
+            .overlay_factory
+            .create_overlay(Arc::clone(&annotation_session));
         if let Err(error) = overlay
             .start(OverlayTarget {
                 source_id: options.source_id.clone(),
@@ -238,10 +269,11 @@ impl ScreenCaptureState {
             SessionRecord {
                 session: session.clone(),
                 publisher,
-                pipeline,
+                pipeline: Arc::clone(&pipeline),
                 running_capture,
                 overlay,
                 webrtc_signaling,
+                annotation_session: Some(Arc::clone(&annotation_session)),
             },
         );
 
@@ -254,7 +286,80 @@ impl ScreenCaptureState {
             );
         }
 
+        spawn_annotation_revision_monitor(
+            Arc::downgrade(&pipeline),
+            annotation_session.subscribe(),
+        );
+
         Ok(session)
+    }
+
+    pub async fn set_annotation_interaction(
+        &self,
+        session_id: &str,
+        enabled: bool,
+    ) -> Result<AnnotationState> {
+        let (annotations, overlay) = self.annotation_resources(session_id).await?;
+        let state = annotations.set_interaction_enabled(enabled)?;
+        overlay.set_annotation_interaction(enabled).await?;
+        self.emit_annotation_state(session_id, state.clone())?;
+        Ok(state)
+    }
+
+    pub async fn set_annotation_tool(
+        &self,
+        session_id: &str,
+        tool: AnnotationTool,
+    ) -> Result<AnnotationState> {
+        let (annotations, _) = self.annotation_resources(session_id).await?;
+        let state = annotations.set_tool(tool)?;
+        self.emit_annotation_state(session_id, state.clone())?;
+        Ok(state)
+    }
+
+    pub async fn undo_annotation(&self, session_id: &str) -> Result<AnnotationState> {
+        let (annotations, overlay) = self.annotation_resources(session_id).await?;
+        let state = annotations.undo()?;
+        overlay.refresh_annotations().await?;
+        self.emit_annotation_state(session_id, state.clone())?;
+        Ok(state)
+    }
+
+    pub async fn clear_annotations(&self, session_id: &str) -> Result<AnnotationState> {
+        let (annotations, overlay) = self.annotation_resources(session_id).await?;
+        let state = annotations.clear();
+        overlay.refresh_annotations().await?;
+        self.emit_annotation_state(session_id, state.clone())?;
+        Ok(state)
+    }
+
+    pub async fn get_annotation_state(&self, session_id: &str) -> Result<AnnotationState> {
+        let (annotations, _) = self.annotation_resources(session_id).await?;
+        Ok(annotations.state())
+    }
+
+    async fn annotation_resources(
+        &self,
+        session_id: &str,
+    ) -> Result<(Arc<AnnotationSession>, Arc<dyn ShareOverlay>)> {
+        let sessions = self.sessions.lock().await;
+        let record = sessions.get(session_id).ok_or_else(invalid_session_error)?;
+        let annotations = record.annotation_session.clone().ok_or_else(|| {
+            Error::new(
+                CaptureErrorCode::AnnotationUnavailable,
+                "当前会话不支持原生标注",
+                true,
+            )
+        })?;
+        Ok((annotations, Arc::clone(&record.overlay)))
+    }
+
+    fn emit_annotation_state(&self, session_id: &str, state: AnnotationState) -> Result<()> {
+        self.event_sink
+            .emit_annotation_state_changed(AnnotationStateChangedEvent {
+                session_id: session_id.to_string(),
+                state,
+            })
     }
 
     pub async fn pause_capture(&self, session_id: &str) -> Result<()> {
@@ -511,6 +616,22 @@ impl CapturePublisherFactory for DefaultPublisherFactory {
             }
         }
     }
+}
+
+fn spawn_annotation_revision_monitor(
+    pipeline: std::sync::Weak<CapturePipeline>,
+    mut revision: watch::Receiver<u64>,
+) {
+    tokio::spawn(async move {
+        while revision.changed().await.is_ok() {
+            let Some(pipeline) = pipeline.upgrade() else {
+                break;
+            };
+            if let Err(error) = pipeline.replay_latest_frame().await {
+                tracing::debug!(%error, "failed to replay annotation revision");
+            }
+        }
+    });
 }
 
 fn now_ms() -> u128 {

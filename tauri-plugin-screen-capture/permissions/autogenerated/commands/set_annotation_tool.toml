@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-set-annotation-tool"
+description = "Enables the set_annotation_tool command without any pre-configured scope."
+commands.allow = ["set_annotation_tool"]
+
+[[permission]]
+identifier = "deny-set-annotation-tool"
+description = "Denies the set_annotation_tool command without any pre-configured scope."
+commands.deny = ["set_annotation_tool"]

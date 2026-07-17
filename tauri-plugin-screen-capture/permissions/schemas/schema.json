@@ -331,6 +331,18 @@
           "markdownDescription": "Denies the check_permission command without any pre-configured scope."
         },
         {
+          "description": "Enables the clear_annotations command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-clear-annotations",
+          "markdownDescription": "Enables the clear_annotations command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the clear_annotations command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-clear-annotations",
+          "markdownDescription": "Denies the clear_annotations command without any pre-configured scope."
+        },
+        {
           "description": "Enables the create_webrtc_offer command without any pre-configured scope.",
           "type": "string",
           "const": "allow-create-webrtc-offer",
@@ -365,6 +377,18 @@
           "type": "string",
           "const": "deny-get-annotation-input-target",
           "markdownDescription": "Denies the get_annotation_input_target command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_annotation_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-annotation-state",
+          "markdownDescription": "Enables the get_annotation_state command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_annotation_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-annotation-state",
+          "markdownDescription": "Denies the get_annotation_state command without any pre-configured scope."
         },
         {
           "description": "Enables the get_capabilities command without any pre-configured scope.",
@@ -463,6 +487,30 @@
           "markdownDescription": "Denies the set_annotation_document command without any pre-configured scope."
         },
         {
+          "description": "Enables the set_annotation_interaction command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-annotation-interaction",
+          "markdownDescription": "Enables the set_annotation_interaction command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_annotation_interaction command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-annotation-interaction",
+          "markdownDescription": "Denies the set_annotation_interaction command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_annotation_tool command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-annotation-tool",
+          "markdownDescription": "Enables the set_annotation_tool command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_annotation_tool command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-annotation-tool",
+          "markdownDescription": "Denies the set_annotation_tool command without any pre-configured scope."
+        },
+        {
           "description": "Enables the start_capture command without any pre-configured scope.",
           "type": "string",
           "const": "allow-start-capture",
@@ -487,10 +535,22 @@
           "markdownDescription": "Denies the stop_capture command without any pre-configured scope."
         },
         {
-          "description": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-get-capabilities`\n- `allow-check-permission`\n- `allow-request-permission`\n- `allow-list-sources`\n- `allow-start-capture`\n- `allow-pause-capture`\n- `allow-resume-capture`\n- `allow-stop-capture`\n- `allow-get-capture-session`\n- `allow-get-capture-stats`\n- `allow-get-annotation-document`\n- `allow-get-annotation-input-target`\n- `allow-set-annotation-document`\n- `allow-create-webrtc-offer`\n- `allow-accept-webrtc-answer`\n- `allow-add-webrtc-ice-candidate`",
+          "description": "Enables the undo_annotation command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-undo-annotation",
+          "markdownDescription": "Enables the undo_annotation command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the undo_annotation command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-undo-annotation",
+          "markdownDescription": "Denies the undo_annotation command without any pre-configured scope."
+        },
+        {
+          "description": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-get-capabilities`\n- `allow-check-permission`\n- `allow-request-permission`\n- `allow-list-sources`\n- `allow-start-capture`\n- `allow-pause-capture`\n- `allow-resume-capture`\n- `allow-stop-capture`\n- `allow-get-capture-session`\n- `allow-get-capture-stats`\n- `allow-get-annotation-document`\n- `allow-get-annotation-input-target`\n- `allow-set-annotation-document`\n- `allow-set-annotation-interaction`\n- `allow-set-annotation-tool`\n- `allow-undo-annotation`\n- `allow-clear-annotations`\n- `allow-get-annotation-state`\n- `allow-create-webrtc-offer`\n- `allow-accept-webrtc-answer`\n- `allow-add-webrtc-ice-candidate`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-get-capabilities`\n- `allow-check-permission`\n- `allow-request-permission`\n- `allow-list-sources`\n- `allow-start-capture`\n- `allow-pause-capture`\n- `allow-resume-capture`\n- `allow-stop-capture`\n- `allow-get-capture-session`\n- `allow-get-capture-stats`\n- `allow-get-annotation-document`\n- `allow-get-annotation-input-target`\n- `allow-set-annotation-document`\n- `allow-create-webrtc-offer`\n- `allow-accept-webrtc-answer`\n- `allow-add-webrtc-ice-candidate`"
+          "markdownDescription": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-get-capabilities`\n- `allow-check-permission`\n- `allow-request-permission`\n- `allow-list-sources`\n- `allow-start-capture`\n- `allow-pause-capture`\n- `allow-resume-capture`\n- `allow-stop-capture`\n- `allow-get-capture-session`\n- `allow-get-capture-stats`\n- `allow-get-annotation-document`\n- `allow-get-annotation-input-target`\n- `allow-set-annotation-document`\n- `allow-set-annotation-interaction`\n- `allow-set-annotation-tool`\n- `allow-undo-annotation`\n- `allow-clear-annotations`\n- `allow-get-annotation-state`\n- `allow-create-webrtc-offer`\n- `allow-accept-webrtc-answer`\n- `allow-add-webrtc-ice-candidate`"
         }
       ]
     }

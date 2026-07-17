@@ -3,9 +3,27 @@ import {
   getAnnotationInputTarget,
   onCaptureSessionEnded,
   type AnnotationElement,
+  type AnnotationState,
+  type AnnotationStateChangedEvent,
   type CaptureSessionEndedEvent,
   type StartCaptureOptions,
 } from "../guest-js/index"
+
+const annotation: AnnotationState = {
+  interactionEnabled: false,
+  tool: { kind: "pen", color: "#FF3B30", width: 4 },
+  canUndo: false,
+  operationCount: 0,
+  revision: 0,
+  lastError: null,
+}
+
+const changed: AnnotationStateChangedEvent = {
+  sessionId: "session-1",
+  state: annotation,
+}
+
+void changed
 
 const event: CaptureSessionEndedEvent = {
   sessionId: "session-1",

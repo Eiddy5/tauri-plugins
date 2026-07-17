@@ -1,14 +1,17 @@
 use objc2::{rc::Retained, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSPanel, NSView, NSWindowAnimationBehavior,
-    NSWindowCollectionBehavior, NSWindowOrderingMode, NSWindowStyleMask,
+    NSBackingStoreType, NSColor, NSPanel, NSWindowAnimationBehavior, NSWindowCollectionBehavior,
+    NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_foundation::{NSInteger, NSPoint, NSRect, NSSize, NSString};
 use objc2_quartz_core::{CALayer, CATransaction};
 
-use crate::{models::CaptureErrorCode, Error, Result};
+use crate::{annotation::AnnotationSession, models::CaptureErrorCode, Error, Result};
 
-use super::{register_overlay_window, unregister_overlay_window, OVERLAY_WINDOW_TITLE_PREFIX};
+use super::{
+    annotation_view::{register_annotation_session, unregister_annotation_session, AnnotationView},
+    register_overlay_window, unregister_overlay_window, OVERLAY_WINDOW_TITLE_PREFIX,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MacRect {
@@ -165,12 +168,17 @@ impl CornerLayers {
 pub(crate) struct OverlayPanel {
     panel: Retained<NSPanel>,
     root: Retained<CALayer>,
+    annotation_view: Retained<AnnotationView>,
     corners: [CornerLayers; 4],
     window_id: u32,
+    session_id: u64,
 }
 
 impl OverlayPanel {
-    pub(crate) fn new(session_id: u64) -> Result<Self> {
+    pub(crate) fn new(
+        session_id: u64,
+        annotation_session: std::sync::Arc<AnnotationSession>,
+    ) -> Result<Self> {
         let mtm = MainThreadMarker::new().ok_or_else(|| {
             Error::new(
                 CaptureErrorCode::Internal,
@@ -186,11 +194,11 @@ impl OverlayPanel {
             NSBackingStoreType::Buffered,
             false,
         );
-        let view = NSView::initWithFrame(NSView::alloc(mtm), rect);
-        let root = CALayer::layer();
-        let corners = Corner::ALL.map(|corner| CornerLayers::new(&root, corner));
+        register_annotation_session(session_id, annotation_session);
+        let view = AnnotationView::new(session_id, rect, mtm);
         view.setWantsLayer(true);
-        view.setLayer(Some(&root));
+        let root = view.layer().unwrap_or_else(CALayer::layer);
+        let corners = Corner::ALL.map(|corner| CornerLayers::new(&root, corner));
 
         panel.setContentView(Some(&view));
         panel.setOpaque(false);
@@ -215,8 +223,10 @@ impl OverlayPanel {
         let panel = Self {
             panel,
             root,
+            annotation_view: view,
             corners,
             window_id,
+            session_id,
         };
         panel.update_frame(
             MacRect {
@@ -280,11 +290,20 @@ impl OverlayPanel {
     pub(crate) fn window_id(&self) -> u32 {
         self.window_id
     }
+
+    pub(crate) fn set_annotation_interaction(&self, enabled: bool) {
+        self.panel.setIgnoresMouseEvents(!enabled);
+    }
+
+    pub(crate) fn refresh_annotations(&self) {
+        self.annotation_view.setNeedsDisplay(true);
+    }
 }
 
 impl Drop for OverlayPanel {
     fn drop(&mut self) {
         unregister_overlay_window(self.window_id);
+        unregister_annotation_session(self.session_id);
         self.panel.orderOut(None);
         self.panel.close();
     }

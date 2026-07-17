@@ -37,6 +37,21 @@ pub trait CapturePublisher: Send + Sync {
             true,
         ))
     }
+    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+    fn supports_mac_gpu_surfaces(&self) -> bool {
+        false
+    }
+    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+    async fn push_mac_gpu_surface(
+        &self,
+        _surface: crate::platform::macos::media::MacGpuSurface,
+    ) -> Result<()> {
+        Err(crate::Error::new(
+            crate::CaptureErrorCode::PublisherUnsupported,
+            "publisher does not support macOS GPU surfaces",
+            true,
+        ))
+    }
     async fn request_keyframe(&self) -> Result<()> {
         Ok(())
     }

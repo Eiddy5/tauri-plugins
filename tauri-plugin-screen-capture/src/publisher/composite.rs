@@ -29,6 +29,15 @@ impl CapturePublisher for CompositePublisher {
                 .all(|publisher| publisher.supports_gpu_surfaces())
     }
 
+    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+    fn supports_mac_gpu_surfaces(&self) -> bool {
+        !self.publishers.is_empty()
+            && self
+                .publishers
+                .iter()
+                .all(|publisher| publisher.supports_mac_gpu_surfaces())
+    }
+
     async fn start(&self, options: StartCaptureOptions) -> Result<()> {
         for publisher in &self.publishers {
             publisher.start(options.clone()).await?;
@@ -50,6 +59,17 @@ impl CapturePublisher for CompositePublisher {
     ) -> Result<()> {
         for publisher in &self.publishers {
             publisher.push_gpu_surface(surface.clone()).await?;
+        }
+        Ok(())
+    }
+
+    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+    async fn push_mac_gpu_surface(
+        &self,
+        surface: crate::platform::macos::media::MacGpuSurface,
+    ) -> Result<()> {
+        for publisher in &self.publishers {
+            publisher.push_mac_gpu_surface(surface.clone()).await?;
         }
         Ok(())
     }

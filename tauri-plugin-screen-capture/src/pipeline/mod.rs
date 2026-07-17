@@ -14,7 +14,7 @@ use tokio::{
 };
 
 use crate::{
-    annotation::AnnotationLayer,
+    annotation::{AnnotationLayer, AnnotationSession},
     capture::FrameConsumer,
     models::{AnnotationDocument, CaptureErrorPayload, CaptureStats},
     pipeline::frame::VideoFrame,
@@ -29,7 +29,11 @@ const MIN_PUBLISH_TIMESTAMP_STEP_NS: u64 = 1_000_000;
 pub struct CapturePipeline {
     publisher: Arc<dyn CapturePublisher>,
     annotations: Option<Arc<AnnotationLayer>>,
-    stats: Mutex<CaptureStats>,
+    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+    native_annotations: Option<Arc<AnnotationSession>>,
+    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+    mac_compositor: Option<Arc<crate::platform::macos::media::MacMetalCompositor>>,
+    stats: Arc<Mutex<CaptureStats>>,
     latest_frame: Mutex<Option<PipelineFrame>>,
     pending_frame: Arc<Mutex<Option<PendingPipelineFrame>>>,
     notify: Arc<Notify>,
@@ -43,6 +47,10 @@ enum PipelineFrame {
     Cpu(VideoFrame),
     #[cfg(target_os = "windows")]
     Gpu(crate::platform::windows::media::WindowsGpuSurface),
+    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+    MacCapture(crate::platform::macos::media::MacCaptureFrame),
+    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+    MacGpu(crate::platform::macos::media::MacGpuSurface),
 }
 
 impl PipelineFrame {
@@ -51,6 +59,10 @@ impl PipelineFrame {
             Self::Cpu(frame) => frame.timestamp_ns,
             #[cfg(target_os = "windows")]
             Self::Gpu(surface) => surface.timestamp_ns(),
+            #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+            Self::MacCapture(frame) => frame.timestamp_ns(),
+            #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+            Self::MacGpu(surface) => surface.timestamp_ns(),
         }
     }
 
@@ -62,6 +74,10 @@ impl PipelineFrame {
             }
             #[cfg(target_os = "windows")]
             Self::Gpu(surface) => Self::Gpu(surface.with_timestamp(timestamp_ns)),
+            #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+            Self::MacCapture(frame) => Self::MacCapture(frame.with_timestamp(timestamp_ns)),
+            #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+            Self::MacGpu(surface) => Self::MacGpu(surface.with_timestamp(timestamp_ns)),
         }
     }
 }
@@ -86,6 +102,7 @@ impl CapturePipeline {
         annotations: Option<Arc<AnnotationLayer>>,
     ) -> Self {
         let pending_frame = Arc::new(Mutex::new(None));
+        let stats = Arc::new(Mutex::new(CaptureStats::default()));
         let notify = Arc::new(Notify::new());
         let stopped = Arc::new(AtomicBool::new(false));
         let worker = spawn_latest_frame_worker(
@@ -94,18 +111,77 @@ impl CapturePipeline {
             Arc::clone(&notify),
             Arc::clone(&stopped),
             annotations.clone(),
+            Arc::clone(&stats),
+            #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+            None,
+            #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+            None,
         );
 
         Self {
             publisher,
             annotations,
-            stats: Mutex::new(CaptureStats::default()),
+            #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+            native_annotations: None,
+            #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+            mac_compositor: None,
+            stats,
             latest_frame: Mutex::new(None),
             pending_frame,
             notify,
             stopped,
             worker,
             started_at: Mutex::new(None),
+        }
+    }
+
+    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+    pub fn new_with_native_annotations(
+        publisher: Arc<dyn CapturePublisher>,
+        annotations: Arc<AnnotationSession>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self> {
+        let compositor = Arc::new(crate::platform::macos::media::MacMetalCompositor::new(
+            width, height,
+        )?);
+        let pending_frame = Arc::new(Mutex::new(None));
+        let stats = Arc::new(Mutex::new(CaptureStats::default()));
+        let notify = Arc::new(Notify::new());
+        let stopped = Arc::new(AtomicBool::new(false));
+        let worker = spawn_latest_frame_worker(
+            Arc::clone(&publisher),
+            Arc::clone(&pending_frame),
+            Arc::clone(&notify),
+            Arc::clone(&stopped),
+            None,
+            Arc::clone(&stats),
+            Some(Arc::clone(&annotations)),
+            Some(Arc::clone(&compositor)),
+        );
+        Ok(Self {
+            publisher,
+            annotations: Some(Arc::new(AnnotationLayer::default())),
+            native_annotations: Some(annotations),
+            mac_compositor: Some(compositor),
+            stats,
+            latest_frame: Mutex::new(None),
+            pending_frame,
+            notify,
+            stopped,
+            worker,
+            started_at: Mutex::new(None),
+        })
+    }
+
+    pub fn annotation_session(&self) -> Option<Arc<AnnotationSession>> {
+        #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+        {
+            self.native_annotations.clone()
+        }
+        #[cfg(not(all(target_os = "macos", feature = "macos-screencapturekit")))]
+        {
+            None
         }
     }
 
@@ -130,6 +206,12 @@ impl CapturePipeline {
 
     pub async fn stats(&self) -> CaptureStats {
         let mut stats = self.stats.lock().await.clone();
+        #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+        if let Some(annotations) = self.native_annotations.as_ref() {
+            let state = annotations.state();
+            stats.annotation_operation_count = state.operation_count as u64;
+            stats.annotation_revision = state.revision;
+        }
         if let Some(started_at) = *self.started_at.lock().await {
             let elapsed = started_at.elapsed().as_secs_f64();
             if elapsed > 0.0 {
@@ -174,6 +256,20 @@ impl FrameConsumer for CapturePipeline {
 
     async fn push_frame(&self, frame: VideoFrame) -> Result<()> {
         self.push_pipeline_frame(PipelineFrame::Cpu(frame)).await
+    }
+
+    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+    fn supports_mac_capture_frames(&self) -> bool {
+        self.mac_compositor.is_some() && self.publisher.supports_mac_gpu_surfaces()
+    }
+
+    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+    async fn push_mac_capture_frame(
+        &self,
+        frame: crate::platform::macos::media::MacCaptureFrame,
+    ) -> Result<()> {
+        self.push_pipeline_frame(PipelineFrame::MacCapture(frame))
+            .await
     }
 
     #[cfg(target_os = "windows")]
@@ -257,6 +353,19 @@ impl FrameConsumer for Arc<CapturePipeline> {
         self.as_ref().push_frame(frame).await
     }
 
+    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+    fn supports_mac_capture_frames(&self) -> bool {
+        self.as_ref().supports_mac_capture_frames()
+    }
+
+    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+    async fn push_mac_capture_frame(
+        &self,
+        frame: crate::platform::macos::media::MacCaptureFrame,
+    ) -> Result<()> {
+        self.as_ref().push_mac_capture_frame(frame).await
+    }
+
     #[cfg(target_os = "windows")]
     async fn push_gpu_surface(
         &self,
@@ -272,8 +381,17 @@ fn spawn_latest_frame_worker(
     notify: Arc<Notify>,
     stopped: Arc<AtomicBool>,
     annotations: Option<Arc<AnnotationLayer>>,
+    stats: Arc<Mutex<CaptureStats>>,
+    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))] native_annotations: Option<
+        Arc<AnnotationSession>,
+    >,
+    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))] mac_compositor: Option<
+        Arc<crate::platform::macos::media::MacMetalCompositor>,
+    >,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        #[cfg(not(all(target_os = "macos", feature = "macos-screencapturekit")))]
+        let _ = &stats;
         let mut last_timestamp_ns: Option<u64> = None;
         loop {
             notify.notified().await;
@@ -287,8 +405,40 @@ fn spawn_latest_frame_worker(
                     captured_timestamp_ns.max(last.saturating_add(MIN_PUBLISH_TIMESTAMP_STEP_NS))
                 });
                 last_timestamp_ns = Some(timestamp_ns);
+                #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+                let was_mac_capture = matches!(&pending.frame, PipelineFrame::MacCapture(_));
                 let frame = pending.frame.with_timestamp(timestamp_ns);
-                let result = match composite_annotations(&annotations, frame) {
+                let _compose_started = Instant::now();
+                let composed = composite_annotations(
+                    &annotations,
+                    frame,
+                    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+                    &native_annotations,
+                    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+                    &mac_compositor,
+                );
+                #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+                {
+                    let mut current = stats.lock().await;
+                    match &composed {
+                        Ok(PipelineFrame::MacGpu(_)) => {
+                            current.frames_composited += 1;
+                            current.gpu_compose_latency_ms =
+                                _compose_started.elapsed().as_secs_f64() * 1_000.0;
+                            if !pending.is_capture_frame {
+                                current.frames_annotation_triggered += 1;
+                                current.frames_static_repeated += 1;
+                            }
+                        }
+                        Err(_) if was_mac_capture => {
+                            current.frames_gpu_backpressure_dropped += 1;
+                            current.frames_pipeline_dropped += 1;
+                            current.frames_dropped = current.frames_pipeline_dropped;
+                        }
+                        _ => {}
+                    }
+                }
+                let result = match composed {
                     Ok(frame) => publish_pipeline_frame(&publisher, frame).await,
                     Err(error) => Err(error),
                 };
@@ -314,9 +464,34 @@ fn spawn_latest_frame_worker(
 fn composite_annotations(
     annotations: &Option<Arc<AnnotationLayer>>,
     mut frame: PipelineFrame,
+    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+    native_annotations: &Option<Arc<AnnotationSession>>,
+    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))] mac_compositor: &Option<
+        Arc<crate::platform::macos::media::MacMetalCompositor>,
+    >,
 ) -> Result<PipelineFrame> {
     if let (Some(annotations), PipelineFrame::Cpu(cpu_frame)) = (annotations, &mut frame) {
         *cpu_frame = annotations.composite(cpu_frame.clone())?;
+    }
+    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+    if let PipelineFrame::MacCapture(source) = frame {
+        let annotations = native_annotations.as_ref().ok_or_else(|| {
+            crate::Error::new(
+                crate::CaptureErrorCode::AnnotationUnavailable,
+                "native annotation session is unavailable",
+                true,
+            )
+        })?;
+        let compositor = mac_compositor.as_ref().ok_or_else(|| {
+            crate::Error::new(
+                crate::CaptureErrorCode::AnnotationUnavailable,
+                "native annotation compositor is unavailable",
+                true,
+            )
+        })?;
+        return compositor
+            .compose(&source, &annotations.snapshot())
+            .map(PipelineFrame::MacGpu);
     }
     Ok(frame)
 }
@@ -329,5 +504,13 @@ async fn publish_pipeline_frame(
         PipelineFrame::Cpu(frame) => publisher.push_frame(frame).await,
         #[cfg(target_os = "windows")]
         PipelineFrame::Gpu(surface) => publisher.push_gpu_surface(surface).await,
+        #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+        PipelineFrame::MacGpu(surface) => publisher.push_mac_gpu_surface(surface).await,
+        #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+        PipelineFrame::MacCapture(_) => Err(crate::Error::new(
+            crate::CaptureErrorCode::AnnotationUnavailable,
+            "uncomposited macOS frame reached publisher",
+            true,
+        )),
     }
 }

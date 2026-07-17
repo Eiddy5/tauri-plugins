@@ -11,7 +11,7 @@ mod desktop;
 #[cfg(mobile)]
 mod mobile;
 
-mod annotation;
+pub mod annotation;
 pub mod capture;
 mod commands;
 mod error;
@@ -40,6 +40,18 @@ impl<R: Runtime> CaptureEventSink for TauriCaptureEventSink<R> {
                 Error::new(
                     CaptureErrorCode::Internal,
                     format!("failed to emit capture session ended event: {error}"),
+                    true,
+                )
+            })
+    }
+
+    fn emit_annotation_state_changed(&self, event: AnnotationStateChangedEvent) -> Result<()> {
+        self.app
+            .emit(ANNOTATION_STATE_CHANGED_EVENT, event)
+            .map_err(|error| {
+                Error::new(
+                    CaptureErrorCode::Internal,
+                    format!("failed to emit annotation state event: {error}"),
                     true,
                 )
             })
@@ -103,6 +115,11 @@ impl Builder {
                 commands::get_annotation_document,
                 commands::get_annotation_input_target,
                 commands::set_annotation_document,
+                commands::set_annotation_interaction,
+                commands::set_annotation_tool,
+                commands::undo_annotation,
+                commands::clear_annotations,
+                commands::get_annotation_state,
                 commands::create_webrtc_offer,
                 commands::accept_webrtc_answer,
                 commands::add_webrtc_ice_candidate

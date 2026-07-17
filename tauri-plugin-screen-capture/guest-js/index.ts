@@ -21,7 +21,30 @@ export interface Capabilities {
   supportsCursorCapture: boolean
   supportsWebrtc: boolean
   supportsAnnotations: boolean
+  annotationTools: AnnotationToolKind[]
 }
+
+export type AnnotationToolKind = 'pen' | 'eraser'
+
+export type AnnotationTool =
+  | { kind: 'pen'; color: string; width: number }
+  | { kind: 'eraser'; width: number }
+
+export interface AnnotationState {
+  interactionEnabled: boolean
+  tool: AnnotationTool
+  canUndo: boolean
+  operationCount: number
+  revision: number
+  lastError?: CaptureErrorPayload | null
+}
+
+export interface AnnotationStateChangedEvent {
+  sessionId: string
+  state: AnnotationState
+}
+
+export const ANNOTATION_STATE_CHANGED_EVENT = 'screen-capture://annotation-state-changed'
 
 export type AnnotationElementKind = 'pen' | 'line' | 'rectangle' | 'ellipse' | 'arrow'
 
@@ -139,8 +162,22 @@ export interface CaptureStats {
   framesCaptured: number
   framesPublished: number
   framesDropped: number
+  framesCaptureDropped: number
+  framesPipelineDropped: number
+  framesEncoderDropped: number
+  framesCpuReadback: number
+  framesComposited: number
+  framesAnnotationTriggered: number
+  framesStaticRepeated: number
+  framesGpuBackpressureDropped: number
+  gpuComposeLatencyMs: number
+  annotationOperationCount: number
+  annotationRevision: number
   fps: number
+  captureFps: number
+  publishFps: number
   bitrateKbps: number
+  encoderBackend?: string | null
   started: boolean
 }
 
@@ -212,6 +249,26 @@ export function getAnnotationInputTarget(sessionId: string) {
 
 export function setAnnotationDocument(sessionId: string, document: AnnotationDocument) {
   return invoke<void>(command('set_annotation_document'), { sessionId, document })
+}
+
+export function setAnnotationInteraction(sessionId: string, enabled: boolean) {
+  return invoke<AnnotationState>(command('set_annotation_interaction'), { sessionId, enabled })
+}
+
+export function setAnnotationTool(sessionId: string, tool: AnnotationTool) {
+  return invoke<AnnotationState>(command('set_annotation_tool'), { sessionId, tool })
+}
+
+export function undoAnnotation(sessionId: string) {
+  return invoke<AnnotationState>(command('undo_annotation'), { sessionId })
+}
+
+export function clearAnnotations(sessionId: string) {
+  return invoke<AnnotationState>(command('clear_annotations'), { sessionId })
+}
+
+export function getAnnotationState(sessionId: string) {
+  return invoke<AnnotationState>(command('get_annotation_state'), { sessionId })
 }
 
 export interface AnnotationController {
@@ -462,6 +519,12 @@ export function onCaptureSessionEnded(
   handler: (event: Event<CaptureSessionEndedEvent>) => void,
 ): Promise<UnlistenFn> {
   return listen<CaptureSessionEndedEvent>(CAPTURE_SESSION_ENDED_EVENT, handler)
+}
+
+export function onAnnotationStateChanged(
+  handler: (event: Event<AnnotationStateChangedEvent>) => void,
+): Promise<UnlistenFn> {
+  return listen<AnnotationStateChangedEvent>(ANNOTATION_STATE_CHANGED_EVENT, handler)
 }
 
 export function createWebRtcOffer(sessionId: string) {

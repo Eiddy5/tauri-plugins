@@ -11,7 +11,7 @@ use tauri_plugin_screen_capture::{
     },
     overlay::ShareOverlayFactory,
     AnnotationColor, AnnotationDocument, AnnotationElement, AnnotationElementKind,
-    AnnotationInputTarget, AnnotationOptions, AnnotationPoint, CaptureErrorCode,
+    AnnotationInputTarget, AnnotationOptions, AnnotationPoint, AnnotationTool, CaptureErrorCode,
     CaptureErrorPayload, CaptureEventSink, CaptureSessionEndedEvent, CaptureSourceKind,
     CaptureStatus, CoordinateSpace, ListSourcesOptions, PermissionStatus, Result,
     ScreenCaptureState, StartCaptureOptions,
@@ -113,7 +113,10 @@ impl OverlayProbeFactory {
 }
 
 impl ShareOverlayFactory for OverlayProbeFactory {
-    fn create_overlay(&self) -> Arc<dyn tauri_plugin_screen_capture::overlay::ShareOverlay> {
+    fn create_overlay(
+        &self,
+        _annotation_session: Arc<tauri_plugin_screen_capture::annotation::AnnotationSession>,
+    ) -> Arc<dyn tauri_plugin_screen_capture::overlay::ShareOverlay> {
         self.creates.fetch_add(1, Ordering::SeqCst);
         let counters = Arc::new(OverlayLifecycleCounters::default());
         self.overlays
@@ -846,4 +849,51 @@ async fn state_normalizes_capture_size_before_starting_backend() {
         .expect("backend options");
     assert_eq!(options.width, Some(852));
     assert_eq!(options.height, Some(480));
+}
+
+#[tokio::test]
+async fn state_keeps_native_annotations_across_pause_and_resume() {
+    let state = ScreenCaptureState::with_backend(Arc::new(DummyCaptureBackend));
+    let session = state.start_capture(start_options()).await.expect("start");
+    state
+        .set_annotation_interaction(&session.session_id, true)
+        .await
+        .expect("enable annotation");
+    state.pause_capture(&session.session_id).await.unwrap();
+    state.resume_capture(&session.session_id).await.unwrap();
+    assert!(
+        state
+            .get_annotation_state(&session.session_id)
+            .await
+            .unwrap()
+            .interaction_enabled
+    );
+}
+
+#[tokio::test]
+async fn invalid_native_tool_does_not_replace_previous_tool() {
+    let state = ScreenCaptureState::with_backend(Arc::new(DummyCaptureBackend));
+    let session = state.start_capture(start_options()).await.expect("start");
+    let before = state
+        .get_annotation_state(&session.session_id)
+        .await
+        .unwrap();
+    assert!(state
+        .set_annotation_tool(
+            &session.session_id,
+            AnnotationTool::Pen {
+                color: "red".into(),
+                width: 0.0,
+            },
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        state
+            .get_annotation_state(&session.session_id)
+            .await
+            .unwrap()
+            .tool,
+        before.tool
+    );
 }

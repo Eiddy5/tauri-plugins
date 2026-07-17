@@ -17,6 +17,9 @@ fn greet(name: &str) -> String {
 
 #[tauri::command]
 fn prepare_annotation_overlay(window: tauri::WebviewWindow) -> std::result::Result<(), String> {
+    #[cfg(not(target_os = "windows"))]
+    let _ = &window;
+
     #[cfg(target_os = "windows")]
     {
         use windows::Win32::{

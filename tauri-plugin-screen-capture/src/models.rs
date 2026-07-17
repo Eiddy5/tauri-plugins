@@ -106,6 +106,47 @@ pub struct AnnotationInputTarget {
     pub coordinate_space: CoordinateSpace,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AnnotationToolKind {
+    Pen,
+    Eraser,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum AnnotationTool {
+    Pen { color: String, width: f32 },
+    Eraser { width: f32 },
+}
+
+impl Default for AnnotationTool {
+    fn default() -> Self {
+        Self::Pen {
+            color: "#FF3B30".to_owned(),
+            width: 4.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnnotationState {
+    pub interaction_enabled: bool,
+    pub tool: AnnotationTool,
+    pub can_undo: bool,
+    pub operation_count: usize,
+    pub revision: u64,
+    pub last_error: Option<CaptureErrorPayload>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnnotationStateChangedEvent {
+    pub session_id: String,
+    pub state: AnnotationState,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Capabilities {
@@ -115,7 +156,10 @@ pub struct Capabilities {
     pub supports_thumbnails: bool,
     pub supports_cursor_capture: bool,
     pub supports_webrtc: bool,
+    #[serde(default)]
     pub supports_annotations: bool,
+    #[serde(default)]
+    pub annotation_tools: Vec<AnnotationToolKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -260,6 +304,20 @@ pub struct CaptureStats {
     pub frames_encoder_dropped: u64,
     #[serde(default)]
     pub frames_cpu_readback: u64,
+    #[serde(default)]
+    pub frames_composited: u64,
+    #[serde(default)]
+    pub frames_annotation_triggered: u64,
+    #[serde(default)]
+    pub frames_static_repeated: u64,
+    #[serde(default)]
+    pub frames_gpu_backpressure_dropped: u64,
+    #[serde(default)]
+    pub gpu_compose_latency_ms: f64,
+    #[serde(default)]
+    pub annotation_operation_count: u64,
+    #[serde(default)]
+    pub annotation_revision: u64,
     pub fps: f64,
     #[serde(default)]
     pub capture_fps: f64,
@@ -281,6 +339,13 @@ impl Default for CaptureStats {
             frames_pipeline_dropped: 0,
             frames_encoder_dropped: 0,
             frames_cpu_readback: 0,
+            frames_composited: 0,
+            frames_annotation_triggered: 0,
+            frames_static_repeated: 0,
+            frames_gpu_backpressure_dropped: 0,
+            gpu_compose_latency_ms: 0.0,
+            annotation_operation_count: 0,
+            annotation_revision: 0,
             fps: 0.0,
             capture_fps: 0.0,
             publish_fps: 0.0,
@@ -330,6 +395,10 @@ pub enum CaptureErrorCode {
     WebRtcTrackFailed,
     InvalidSession,
     InvalidAnnotation,
+    AnnotationUnsupported,
+    AnnotationInvalidOptions,
+    AnnotationUnavailable,
+    AnnotationLimitReached,
     Internal,
 }
 
@@ -343,6 +412,7 @@ pub struct CaptureErrorPayload {
 }
 
 pub const CAPTURE_SESSION_ENDED_EVENT: &str = "screen-capture://session-ended";
+pub const ANNOTATION_STATE_CHANGED_EVENT: &str = "screen-capture://annotation-state-changed";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

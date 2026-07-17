@@ -1,3 +1,4 @@
+mod annotation_view;
 mod dispatcher;
 mod events;
 mod host;
@@ -18,7 +19,9 @@ use std::{
 use async_trait::async_trait;
 use tauri::{AppHandle, Runtime};
 
-use crate::{models::AnnotationInputTarget, overlay::OverlayTarget, Result};
+use crate::{
+    annotation::AnnotationSession, models::AnnotationInputTarget, overlay::OverlayTarget, Result,
+};
 
 use self::dispatcher::{request, MainThreadDispatcher, TauriMainThreadDispatcher};
 
@@ -42,6 +45,7 @@ pub(crate) fn unregister_overlay_window(window_id: u32) {
     overlay_window_ids().remove(&window_id);
 }
 
+#[cfg(feature = "macos-screencapturekit")]
 pub(crate) fn is_registered_overlay_window(window_id: u32) -> bool {
     overlay_window_ids().contains(&window_id)
 }
@@ -68,10 +72,11 @@ impl MacOsShareOverlayFactory {
 }
 
 impl ShareOverlayFactory for MacOsShareOverlayFactory {
-    fn create_overlay(&self) -> Arc<dyn ShareOverlay> {
+    fn create_overlay(&self, annotation_session: Arc<AnnotationSession>) -> Arc<dyn ShareOverlay> {
         Arc::new(MacOsShareOverlay {
             id: self.next_id.fetch_add(1, Ordering::Relaxed),
             dispatcher: Arc::clone(&self.dispatcher),
+            annotation_session,
         })
     }
 }
@@ -79,6 +84,7 @@ impl ShareOverlayFactory for MacOsShareOverlayFactory {
 struct MacOsShareOverlay {
     id: u64,
     dispatcher: Arc<dyn MainThreadDispatcher>,
+    annotation_session: Arc<AnnotationSession>,
 }
 
 impl Drop for MacOsShareOverlay {
@@ -94,7 +100,11 @@ impl Drop for MacOsShareOverlay {
 impl ShareOverlay for MacOsShareOverlay {
     async fn start(&self, target: OverlayTarget) -> Result<()> {
         let id = self.id;
-        request(self.dispatcher.as_ref(), move || host::start(id, target)).await
+        let annotation_session = Arc::clone(&self.annotation_session);
+        request(self.dispatcher.as_ref(), move || {
+            host::start(id, target, annotation_session)
+        })
+        .await
     }
 
     async fn show(&self) -> Result<()> {
@@ -110,6 +120,22 @@ impl ShareOverlay for MacOsShareOverlay {
     async fn stop(&self) -> Result<()> {
         let id = self.id;
         request(self.dispatcher.as_ref(), move || host::stop(id)).await
+    }
+
+    async fn set_annotation_interaction(&self, enabled: bool) -> Result<()> {
+        let id = self.id;
+        request(self.dispatcher.as_ref(), move || {
+            host::set_annotation_interaction(id, enabled)
+        })
+        .await
+    }
+
+    async fn refresh_annotations(&self) -> Result<()> {
+        let id = self.id;
+        request(self.dispatcher.as_ref(), move || {
+            host::refresh_annotations(id)
+        })
+        .await
     }
 
     async fn annotation_input_target(&self) -> Result<Option<AnnotationInputTarget>> {

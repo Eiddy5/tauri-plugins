@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-clear-annotations"
+description = "Enables the clear_annotations command without any pre-configured scope."
+commands.allow = ["clear_annotations"]
+
+[[permission]]
+identifier = "deny-clear-annotations"
+description = "Denies the clear_annotations command without any pre-configured scope."
+commands.deny = ["clear_annotations"]

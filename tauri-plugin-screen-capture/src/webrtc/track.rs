@@ -13,6 +13,7 @@ pub struct EncodedVideoSample {
 }
 
 impl EncodedVideoSample {
+    #[allow(dead_code)]
     pub(crate) fn is_h264_idr(&self) -> bool {
         let mut offset = 0;
         while offset + 3 < self.data.len() {

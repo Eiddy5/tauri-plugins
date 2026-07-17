@@ -21,10 +21,13 @@ mod macos {
         Result,
     };
 
+    #[cfg(feature = "macos-screencapturekit")]
+    use crate::platform::macos::media::MacGpuSurface;
+
     const K_CM_VIDEO_CODEC_TYPE_H264: u32 = u32::from_be_bytes(*b"avc1");
     const K_CV_PIXEL_FORMAT_TYPE_32_BGRA: u32 = u32::from_be_bytes(*b"BGRA");
 
-    pub struct H264Encoder {
+    pub(crate) struct H264Encoder {
         session: VTCompressionSessionRef,
         context: *mut EncoderContext,
         receiver: Receiver<EncodedVideoSample>,
@@ -99,7 +102,7 @@ mod macos {
             })
         }
 
-        pub fn target_bitrate_bps(&self) -> u32 {
+        pub(crate) fn target_bitrate_bps(&self) -> u32 {
             self.target_bitrate_bps
         }
 
@@ -137,7 +140,7 @@ mod macos {
                     destination_row[..tight_bytes_per_row].copy_from_slice(source_row);
                 }
             }
-            let timestamp = Box::into_raw(Box::new(frame.timestamp_ns));
+            let timestamp = Box::into_raw(Box::new(SubmittedFrame::cpu(frame.timestamp_ns)));
             let pts = CMTime::new(
                 i64::try_from(frame.timestamp_ns / 1_000).unwrap_or(i64::MAX),
                 1_000_000,
@@ -147,14 +150,20 @@ mod macos {
                 1_000_000,
             );
             let force_keyframe = std::mem::take(&mut self.force_next_keyframe);
-            let status = encode_video_frame(
+            let status = match encode_video_frame(
                 self.session,
                 pixel_buffer.as_ptr(),
                 pts,
                 duration,
                 timestamp.cast(),
                 force_keyframe,
-            )?;
+            ) {
+                Ok(status) => status,
+                Err(error) => {
+                    unsafe { drop(Box::from_raw(timestamp)) };
+                    return Err(error);
+                }
+            };
             if status != 0 {
                 unsafe {
                     drop(Box::from_raw(timestamp));
@@ -168,9 +177,90 @@ mod macos {
             Ok(self.receiver.try_iter().last())
         }
 
-        pub fn force_keyframe(&mut self) -> Result<()> {
+        #[cfg(feature = "macos-screencapturekit")]
+        pub(crate) fn encode_gpu_surface(&mut self, surface: MacGpuSurface) -> Result<()> {
+            let pts = CMTime::new(
+                i64::try_from(surface.timestamp_ns() / 1_000).unwrap_or(i64::MAX),
+                1_000_000,
+            );
+            let duration = CMTime::new(
+                i64::try_from(self.frame_duration.as_micros()).unwrap_or(i64::MAX),
+                1_000_000,
+            );
+            let submitted = Box::into_raw(Box::new(SubmittedFrame::gpu(surface)));
+            let force_keyframe = std::mem::take(&mut self.force_next_keyframe);
+            let status = match encode_video_frame(
+                self.session,
+                unsafe { (*submitted).pixel_buffer_ptr() },
+                pts,
+                duration,
+                submitted.cast(),
+                force_keyframe,
+            ) {
+                Ok(status) => status,
+                Err(error) => {
+                    unsafe { drop(Box::from_raw(submitted)) };
+                    return Err(error);
+                }
+            };
+            if status != 0 {
+                unsafe { drop(Box::from_raw(submitted)) };
+                return Err(video_toolbox_error(
+                    "failed to encode GPU surface with VideoToolbox",
+                    status,
+                ));
+            }
+            Ok(())
+        }
+
+        #[cfg(feature = "macos-screencapturekit")]
+        pub(crate) fn take_encoded_samples(&self) -> Vec<EncodedVideoSample> {
+            self.receiver.try_iter().collect()
+        }
+
+        #[cfg(feature = "macos-screencapturekit")]
+        pub(crate) fn complete_frames(&self) {
+            unsafe {
+                VTCompressionSessionCompleteFrames(self.session, CMTime::INVALID);
+            }
+        }
+
+        pub(crate) fn force_keyframe(&mut self) -> Result<()> {
             self.force_next_keyframe = true;
             Ok(())
+        }
+    }
+
+    struct SubmittedFrame {
+        timestamp_ns: u64,
+        #[cfg(feature = "macos-screencapturekit")]
+        surface: Option<MacGpuSurface>,
+    }
+
+    impl SubmittedFrame {
+        fn cpu(timestamp_ns: u64) -> Self {
+            Self {
+                timestamp_ns,
+                #[cfg(feature = "macos-screencapturekit")]
+                surface: None,
+            }
+        }
+
+        #[cfg(feature = "macos-screencapturekit")]
+        fn gpu(surface: MacGpuSurface) -> Self {
+            Self {
+                timestamp_ns: surface.timestamp_ns(),
+                surface: Some(surface),
+            }
+        }
+
+        #[cfg(feature = "macos-screencapturekit")]
+        fn pixel_buffer_ptr(&self) -> *mut c_void {
+            self.surface
+                .as_ref()
+                .expect("GPU submission owns its surface")
+                .pixel_buffer()
+                .as_ptr()
         }
     }
 
@@ -192,15 +282,14 @@ mod macos {
         _info_flags: u32,
         sample_buffer: *mut c_void,
     ) {
-        if status != 0 || output_callback_ref_con.is_null() || sample_buffer.is_null() {
-            return;
-        }
-
         let timestamp_ns = if source_frame_ref_con.is_null() {
             0
         } else {
-            unsafe { *Box::from_raw(source_frame_ref_con.cast::<u64>()) }
+            unsafe { Box::from_raw(source_frame_ref_con.cast::<SubmittedFrame>()).timestamp_ns }
         };
+        if status != 0 || output_callback_ref_con.is_null() || sample_buffer.is_null() {
+            return;
+        }
         let context = unsafe { &*(output_callback_ref_con.cast::<EncoderContext>()) };
         let Some(sample_buffer) = (unsafe { CMSampleBuffer::from_raw_retained(sample_buffer) })
         else {
@@ -622,7 +711,7 @@ mod macos {
 }
 
 #[cfg(target_os = "macos")]
-pub use macos::H264Encoder;
+pub(crate) use macos::H264Encoder;
 
 #[cfg(target_os = "windows")]
 #[allow(dead_code)]

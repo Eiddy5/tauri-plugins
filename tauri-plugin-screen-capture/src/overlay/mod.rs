@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use crate::{
+    annotation::AnnotationSession,
     models::{AnnotationInputTarget, CaptureSourceKind},
     Result,
 };
@@ -29,20 +30,26 @@ pub trait ShareOverlay: Send + Sync {
     async fn show(&self) -> Result<()>;
     async fn hide(&self) -> Result<()>;
     async fn stop(&self) -> Result<()>;
+    async fn set_annotation_interaction(&self, _enabled: bool) -> Result<()> {
+        Ok(())
+    }
+    async fn refresh_annotations(&self) -> Result<()> {
+        Ok(())
+    }
     async fn annotation_input_target(&self) -> Result<Option<AnnotationInputTarget>> {
         Ok(None)
     }
 }
 
 pub trait ShareOverlayFactory: Send + Sync {
-    fn create_overlay(&self) -> Arc<dyn ShareOverlay>;
+    fn create_overlay(&self, annotation_session: Arc<AnnotationSession>) -> Arc<dyn ShareOverlay>;
 }
 
 #[derive(Debug, Default)]
 pub struct DefaultShareOverlayFactory;
 
 impl ShareOverlayFactory for DefaultShareOverlayFactory {
-    fn create_overlay(&self) -> Arc<dyn ShareOverlay> {
+    fn create_overlay(&self, _annotation_session: Arc<AnnotationSession>) -> Arc<dyn ShareOverlay> {
         #[cfg(windows)]
         {
             Arc::new(WindowsShareOverlay::default())
@@ -81,7 +88,7 @@ impl ShareOverlay for NoopShareOverlay {
 pub struct NoopShareOverlayFactory;
 
 impl ShareOverlayFactory for NoopShareOverlayFactory {
-    fn create_overlay(&self) -> Arc<dyn ShareOverlay> {
+    fn create_overlay(&self, _annotation_session: Arc<AnnotationSession>) -> Arc<dyn ShareOverlay> {
         Arc::new(NoopShareOverlay)
     }
 }

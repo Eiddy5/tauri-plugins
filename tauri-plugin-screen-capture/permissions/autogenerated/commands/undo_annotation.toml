@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-undo-annotation"
+description = "Enables the undo_annotation command without any pre-configured scope."
+commands.allow = ["undo_annotation"]
+
+[[permission]]
+identifier = "deny-undo-annotation"
+description = "Denies the undo_annotation command without any pre-configured scope."
+commands.deny = ["undo_annotation"]

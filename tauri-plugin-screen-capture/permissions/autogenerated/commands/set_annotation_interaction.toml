@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-set-annotation-interaction"
+description = "Enables the set_annotation_interaction command without any pre-configured scope."
+commands.allow = ["set_annotation_interaction"]
+
+[[permission]]
+identifier = "deny-set-annotation-interaction"
+description = "Denies the set_annotation_interaction command without any pre-configured scope."
+commands.deny = ["set_annotation_interaction"]

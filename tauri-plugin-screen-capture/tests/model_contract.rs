@@ -152,6 +152,56 @@ fn invalid_annotation_error_uses_a_stable_wire_name() {
 }
 
 #[test]
+fn annotation_tool_uses_a_tagged_camel_case_contract() {
+    let pen: AnnotationTool = serde_json::from_value(serde_json::json!({
+        "kind": "pen",
+        "color": "#FF3B30",
+        "width": 4.0
+    }))
+    .expect("deserialize pen");
+    assert_eq!(
+        pen,
+        AnnotationTool::Pen {
+            color: "#FF3B30".into(),
+            width: 4.0,
+        }
+    );
+
+    let eraser =
+        serde_json::to_value(AnnotationTool::Eraser { width: 24.0 }).expect("serialize eraser");
+    assert_eq!(eraser["kind"], "eraser");
+    assert_eq!(eraser["width"], 24.0);
+}
+
+#[test]
+fn legacy_capabilities_and_stats_default_annotation_fields() {
+    let capabilities: Capabilities = serde_json::from_value(serde_json::json!({
+        "platform": "macos",
+        "supportsDisplayCapture": true,
+        "supportsWindowCapture": true,
+        "supportsThumbnails": true,
+        "supportsCursorCapture": true,
+        "supportsWebrtc": true
+    }))
+    .expect("legacy capabilities");
+    assert!(!capabilities.supports_annotations);
+    assert!(capabilities.annotation_tools.is_empty());
+
+    let stats: CaptureStats = serde_json::from_value(serde_json::json!({
+        "framesCaptured": 1,
+        "framesPublished": 1,
+        "framesDropped": 0,
+        "fps": 30.0,
+        "bitrateKbps": 4000,
+        "started": true
+    }))
+    .expect("legacy stats");
+    assert_eq!(stats.frames_composited, 0);
+    assert_eq!(stats.frames_gpu_backpressure_dropped, 0);
+    assert_eq!(stats.annotation_revision, 0);
+}
+
+#[test]
 fn capture_stats_deserializes_legacy_payload_with_zeroed_stage_metrics() {
     let stats: CaptureStats = serde_json::from_value(serde_json::json!({
         "framesCaptured": 120,

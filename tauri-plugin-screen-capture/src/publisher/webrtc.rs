@@ -12,8 +12,14 @@ use crate::{
     Result,
 };
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(any(
+    not(any(target_os = "windows", target_os = "macos")),
+    all(target_os = "macos", not(feature = "macos-screencapturekit"))
+))]
 use crate::webrtc::h264_encoder::H264Encoder;
+
+#[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+use crate::webrtc::h264_encoder_macos::MacEncoderWorker;
 
 #[cfg(target_os = "windows")]
 use crate::platform::windows::media::encoder_worker::WindowsEncoderWorker;
@@ -23,7 +29,12 @@ pub struct WebRtcPublisher {
     h264_sender: WebRtcH264SampleSender,
     #[cfg(target_os = "windows")]
     encoder: Mutex<Option<WindowsEncoderWorker>>,
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+    encoder: Mutex<Option<MacEncoderWorker>>,
+    #[cfg(any(
+        not(any(target_os = "windows", target_os = "macos")),
+        all(target_os = "macos", not(feature = "macos-screencapturekit"))
+    ))]
     encoder: Mutex<Option<H264Encoder>>,
     pending_frame: Mutex<Option<VideoFrame>>,
     state: Mutex<WebRtcPublisherState>,
@@ -72,6 +83,11 @@ impl CapturePublisher for WebRtcPublisher {
         true
     }
 
+    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+    fn supports_mac_gpu_surfaces(&self) -> bool {
+        true
+    }
+
     async fn start(&self, options: StartCaptureOptions) -> Result<()> {
         let width = options.width.unwrap_or(1280);
         let height = options.height.unwrap_or(720);
@@ -86,7 +102,20 @@ impl CapturePublisher for WebRtcPublisher {
                 tokio::runtime::Handle::current(),
             )?);
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+        {
+            *self.encoder.lock().await = Some(MacEncoderWorker::start(
+                width,
+                height,
+                fps,
+                self.h264_sender.clone(),
+                tokio::runtime::Handle::current(),
+            )?);
+        }
+        #[cfg(any(
+            not(any(target_os = "windows", target_os = "macos")),
+            all(target_os = "macos", not(feature = "macos-screencapturekit"))
+        ))]
         {
             *self.encoder.lock().await = Some(H264Encoder::new(width, height, fps)?);
         }
@@ -134,7 +163,23 @@ impl CapturePublisher for WebRtcPublisher {
             encoder.submit(frame);
         }
 
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+        {
+            let encoder = self.encoder.lock().await;
+            let encoder = encoder.as_ref().ok_or_else(|| {
+                Error::new(
+                    CaptureErrorCode::WebRtcTrackFailed,
+                    "H264 encoder is not initialized",
+                    true,
+                )
+            })?;
+            encoder.submit_cpu(frame);
+        }
+
+        #[cfg(any(
+            not(any(target_os = "windows", target_os = "macos")),
+            all(target_os = "macos", not(feature = "macos-screencapturekit"))
+        ))]
         {
             let mut encoder = self.encoder.lock().await;
             let encoder = encoder.as_mut().ok_or_else(|| {
@@ -160,6 +205,31 @@ impl CapturePublisher for WebRtcPublisher {
                 state.stats.frames_dropped += 1;
             }
         }
+        Ok(())
+    }
+
+    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+    async fn push_mac_gpu_surface(
+        &self,
+        surface: crate::platform::macos::media::MacGpuSurface,
+    ) -> Result<()> {
+        {
+            let state = self.state.lock().await;
+            if state.lifecycle != WebRtcPublisherLifecycle::Started {
+                return Ok(());
+            }
+        }
+        self.sync_keyframe_request().await?;
+        self.ensure_connected_keyframe().await?;
+        let encoder = self.encoder.lock().await;
+        let encoder = encoder.as_ref().ok_or_else(|| {
+            Error::new(
+                CaptureErrorCode::WebRtcTrackFailed,
+                "VideoToolbox worker is not initialized",
+                true,
+            )
+        })?;
+        encoder.submit_gpu(surface);
         Ok(())
     }
 
@@ -224,7 +294,14 @@ impl CapturePublisher for WebRtcPublisher {
         if let Some(encoder) = self.encoder.lock().await.take() {
             encoder.stop();
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+        if let Some(encoder) = self.encoder.lock().await.take() {
+            encoder.stop();
+        }
+        #[cfg(any(
+            not(any(target_os = "windows", target_os = "macos")),
+            all(target_os = "macos", not(feature = "macos-screencapturekit"))
+        ))]
         {
             *self.encoder.lock().await = None;
         }
@@ -233,7 +310,14 @@ impl CapturePublisher for WebRtcPublisher {
     }
 
     async fn stats(&self) -> Result<CaptureStats> {
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+        let macos_encoder_stats = self
+            .encoder
+            .lock()
+            .await
+            .as_ref()
+            .map(MacEncoderWorker::stats);
+        #[cfg(all(target_os = "macos", not(feature = "macos-screencapturekit")))]
         let macos_encoder_bitrate_kbps = self
             .encoder
             .lock()
@@ -254,7 +338,16 @@ impl CapturePublisher for WebRtcPublisher {
             state.stats.publish_fps = worker.publish_fps;
             state.stats.encoder_backend = worker.encoder_backend;
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+        if let Some(worker) = macos_encoder_stats {
+            state.stats.frames_published = worker.frames_published;
+            state.stats.frames_dropped = worker.frames_dropped;
+            state.stats.frames_encoder_dropped = worker.frames_encoder_dropped;
+            state.stats.frames_cpu_readback = worker.frames_cpu_readback;
+            state.stats.bitrate_kbps = worker.bitrate_kbps;
+            state.stats.encoder_backend = worker.encoder_backend;
+        }
+        #[cfg(all(target_os = "macos", not(feature = "macos-screencapturekit")))]
         if let Some(bitrate_kbps) = macos_encoder_bitrate_kbps {
             state.stats.bitrate_kbps = bitrate_kbps;
             state.stats.encoder_backend = Some("VideoToolbox".to_string());
@@ -264,7 +357,10 @@ impl CapturePublisher for WebRtcPublisher {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(any(
+    not(any(target_os = "windows", target_os = "macos")),
+    all(target_os = "macos", not(feature = "macos-screencapturekit"))
+))]
 fn record_published_frame(state: &mut WebRtcPublisherState, now: Instant) {
     state.published_at.push_back(now);
     refresh_published_fps(state, now);
@@ -317,7 +413,14 @@ impl WebRtcPublisher {
         if let Some(encoder) = self.encoder.lock().await.as_ref() {
             encoder.request_keyframe();
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+        if let Some(encoder) = self.encoder.lock().await.as_ref() {
+            encoder.request_keyframe();
+        }
+        #[cfg(any(
+            not(any(target_os = "windows", target_os = "macos")),
+            all(target_os = "macos", not(feature = "macos-screencapturekit"))
+        ))]
         if let Some(encoder) = self.encoder.lock().await.as_mut() {
             encoder.force_keyframe()?;
         }

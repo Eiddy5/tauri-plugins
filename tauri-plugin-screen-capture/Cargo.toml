@@ -29,7 +29,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tracing = "0.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-apple-cf = { version = "0.2", features = ["cm", "cv"] }
+apple-cf = { version = "0.2", features = ["cm", "cv", "iosurface"] }
 block2 = "0.6"
 objc2 = { version = "0.6", features = ["exception"] }
 objc2-application-services = { version = "0.3", default-features = false, features = [
@@ -43,8 +43,10 @@ objc2-application-services = { version = "0.3", default-features = false, featur
 objc2-app-kit = { version = "0.3", default-features = false, features = [
   "std",
   "NSColor",
+  "NSBezierPath",
   "NSEvent",
   "NSGraphics",
+  "NSGraphicsContext",
   "NSPanel",
   "NSResponder",
   "NSRunningApplication",
@@ -72,6 +74,18 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
   "CFNumber",
   "CFString",
 ] }
+objc2-core-video = { version = "0.3", default-features = false, features = [
+  "std",
+  "CVBuffer",
+  "CVImageBuffer",
+  "CVMetalTexture",
+  "CVMetalTextureCache",
+  "CVPixelBuffer",
+  "CVPixelBufferPool",
+  "CVReturn",
+  "objc2",
+  "objc2-metal",
+] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
   "std",
   "NSArray",
@@ -88,12 +102,29 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
   "NSValue",
   "block2",
 ] }
+objc2-metal = { version = "0.3", default-features = false, features = [
+  "std",
+  "MTLAllocation",
+  "MTLBuffer",
+  "MTLCommandBuffer",
+  "MTLCommandQueue",
+  "MTLDevice",
+  "MTLLibrary",
+  "MTLPixelFormat",
+  "MTLRenderCommandEncoder",
+  "MTLRenderPass",
+  "MTLRenderPipeline",
+  "MTLResource",
+  "MTLTexture",
+] }
 objc2-quartz-core = { version = "0.3", default-features = false, features = [
   "std",
+  "CAMetalLayer",
   "CALayer",
   "CATransaction",
   "objc2-core-foundation",
   "objc2-core-graphics",
+  "objc2-metal",
 ] }
 screencapturekit = { version = "=3.0.0", optional = true }
 

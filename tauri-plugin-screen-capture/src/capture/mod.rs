@@ -78,6 +78,23 @@ pub trait FrameConsumer: Send + Sync {
             true,
         ))
     }
+
+    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+    fn supports_mac_capture_frames(&self) -> bool {
+        false
+    }
+
+    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+    async fn push_mac_capture_frame(
+        &self,
+        _frame: crate::platform::macos::media::MacCaptureFrame,
+    ) -> Result<()> {
+        Err(crate::Error::new(
+            crate::CaptureErrorCode::PublisherUnsupported,
+            "frame consumer does not support native macOS capture frames",
+            true,
+        ))
+    }
 }
 
 #[async_trait]

@@ -278,6 +278,47 @@ h2 {
   line-height: 1;
 }
 
+.annotation-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.annotation-toolbar[hidden] {
+  display: none;
+}
+
+.annotation-toolbar button {
+  padding: 8px 10px;
+  color: #f8fafc;
+  border-color: transparent;
+  background: transparent;
+}
+
+.annotation-toolbar button:hover:not(:disabled),
+.annotation-toolbar button.selected {
+  color: #ffffff;
+  border-color: rgb(96 165 250 / 48%);
+  background: rgb(37 99 235 / 82%);
+}
+
+.annotation-toolbar button:disabled {
+  opacity: 0.42;
+}
+
+.annotation-toolbar input[type="color"] {
+  width: 34px;
+  height: 30px;
+  padding: 2px;
+  border: 0;
+  border-radius: 7px;
+  background: rgb(255 255 255 / 12%);
+}
+
+.annotation-toolbar input[type="range"] {
+  width: 96px;
+}
+
 .picker-backdrop {
   position: absolute;
   z-index: 20;

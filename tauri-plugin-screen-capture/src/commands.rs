@@ -2,9 +2,9 @@ use tauri::{command, State};
 
 use crate::{
     models::{
-        AnnotationDocument, AnnotationInputTarget, Capabilities, CaptureSession, CaptureSource,
-        CaptureStats, ListSourcesOptions, PermissionStatus, StartCaptureOptions, WebRtcAnswer,
-        WebRtcIceCandidate, WebRtcOffer,
+        AnnotationDocument, AnnotationInputTarget, AnnotationState, AnnotationTool, Capabilities,
+        CaptureSession, CaptureSource, CaptureStats, ListSourcesOptions, PermissionStatus,
+        StartCaptureOptions, WebRtcAnswer, WebRtcIceCandidate, WebRtcOffer,
     },
     state::ScreenCaptureState,
     Result,
@@ -98,6 +98,48 @@ pub async fn set_annotation_document(
     document: AnnotationDocument,
 ) -> Result<()> {
     state.set_annotation_document(&session_id, document).await
+}
+
+#[command]
+pub async fn set_annotation_interaction(
+    state: State<'_, ScreenCaptureState>,
+    session_id: String,
+    enabled: bool,
+) -> Result<AnnotationState> {
+    state.set_annotation_interaction(&session_id, enabled).await
+}
+
+#[command]
+pub async fn set_annotation_tool(
+    state: State<'_, ScreenCaptureState>,
+    session_id: String,
+    tool: AnnotationTool,
+) -> Result<AnnotationState> {
+    state.set_annotation_tool(&session_id, tool).await
+}
+
+#[command]
+pub async fn undo_annotation(
+    state: State<'_, ScreenCaptureState>,
+    session_id: String,
+) -> Result<AnnotationState> {
+    state.undo_annotation(&session_id).await
+}
+
+#[command]
+pub async fn clear_annotations(
+    state: State<'_, ScreenCaptureState>,
+    session_id: String,
+) -> Result<AnnotationState> {
+    state.clear_annotations(&session_id).await
+}
+
+#[command]
+pub async fn get_annotation_state(
+    state: State<'_, ScreenCaptureState>,
+    session_id: String,
+) -> Result<AnnotationState> {
+    state.get_annotation_state(&session_id).await
 }
 
 #[command]

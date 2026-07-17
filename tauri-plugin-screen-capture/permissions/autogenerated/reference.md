@@ -17,6 +17,11 @@ Default permissions for the plugin
 - `allow-get-annotation-document`
 - `allow-get-annotation-input-target`
 - `allow-set-annotation-document`
+- `allow-set-annotation-interaction`
+- `allow-set-annotation-tool`
+- `allow-undo-annotation`
+- `allow-clear-annotations`
+- `allow-get-annotation-state`
 - `allow-create-webrtc-offer`
 - `allow-accept-webrtc-answer`
 - `allow-add-webrtc-ice-candidate`
@@ -111,6 +116,32 @@ Denies the check_permission command without any pre-configured scope.
 <tr>
 <td>
 
+`screen-capture:allow-clear-annotations`
+
+</td>
+<td>
+
+Enables the clear_annotations command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`screen-capture:deny-clear-annotations`
+
+</td>
+<td>
+
+Denies the clear_annotations command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `screen-capture:allow-create-webrtc-offer`
 
 </td>
@@ -182,6 +213,32 @@ Enables the get_annotation_input_target command without any pre-configured scope
 <td>
 
 Denies the get_annotation_input_target command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`screen-capture:allow-get-annotation-state`
+
+</td>
+<td>
+
+Enables the get_annotation_state command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`screen-capture:deny-get-annotation-state`
+
+</td>
+<td>
+
+Denies the get_annotation_state command without any pre-configured scope.
 
 </td>
 </tr>
@@ -397,6 +454,58 @@ Denies the set_annotation_document command without any pre-configured scope.
 <tr>
 <td>
 
+`screen-capture:allow-set-annotation-interaction`
+
+</td>
+<td>
+
+Enables the set_annotation_interaction command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`screen-capture:deny-set-annotation-interaction`
+
+</td>
+<td>
+
+Denies the set_annotation_interaction command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`screen-capture:allow-set-annotation-tool`
+
+</td>
+<td>
+
+Enables the set_annotation_tool command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`screen-capture:deny-set-annotation-tool`
+
+</td>
+<td>
+
+Denies the set_annotation_tool command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `screen-capture:allow-start-capture`
 
 </td>
@@ -442,6 +551,32 @@ Enables the stop_capture command without any pre-configured scope.
 <td>
 
 Denies the stop_capture command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`screen-capture:allow-undo-annotation`
+
+</td>
+<td>
+
+Enables the undo_annotation command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`screen-capture:deny-undo-annotation`
+
+</td>
+<td>
+
+Denies the undo_annotation command without any pre-configured scope.
 
 </td>
 </tr>

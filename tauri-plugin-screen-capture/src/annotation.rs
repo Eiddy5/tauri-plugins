@@ -3,14 +3,382 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+mod geometry;
+mod history;
+mod model;
+
+pub use geometry::{CaptureGeometry, Point, Rect, Size};
+pub use history::{
+    simplify_points, MAX_OPERATIONS_PER_SESSION, MAX_POINTS_PER_OPERATION, MAX_POINTS_PER_SESSION,
+};
+pub use model::{AnnotationOperation, AnnotationRgba, AnnotationSnapshot, NormalizedPoint, Stroke};
+
+use tokio::sync::watch;
+
 use crate::{
     models::{
         AnnotationColor, AnnotationDocument, AnnotationElement, AnnotationElementKind,
-        AnnotationPoint, CaptureErrorCode, PixelFormat,
+        AnnotationPoint, AnnotationState, AnnotationTool, CaptureErrorCode, PixelFormat,
     },
     pipeline::frame::VideoFrame,
     Error, Result,
 };
+
+#[derive(Clone, Debug)]
+struct ActiveStroke {
+    points: Vec<NormalizedPoint>,
+    normalized_width: f32,
+    color: Option<AnnotationRgba>,
+    eraser: bool,
+}
+
+#[derive(Debug)]
+struct SceneState {
+    interaction_enabled: bool,
+    tool: AnnotationTool,
+    operations: Vec<AnnotationOperation>,
+    total_points: usize,
+    revision: u64,
+    render_revision: u64,
+    active: Option<ActiveStroke>,
+    last_error: Option<crate::CaptureErrorPayload>,
+}
+
+impl Default for SceneState {
+    fn default() -> Self {
+        Self {
+            interaction_enabled: false,
+            tool: AnnotationTool::default(),
+            operations: Vec::new(),
+            total_points: 0,
+            revision: 0,
+            render_revision: 0,
+            active: None,
+            last_error: None,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct AnnotationSession {
+    scene: RwLock<SceneState>,
+    revision: watch::Sender<u64>,
+}
+
+impl Default for AnnotationSession {
+    fn default() -> Self {
+        let (revision, _) = watch::channel(0);
+        Self {
+            scene: RwLock::new(SceneState::default()),
+            revision,
+        }
+    }
+}
+
+impl AnnotationSession {
+    pub fn set_interaction_enabled(&self, enabled: bool) -> Result<AnnotationState> {
+        let state = {
+            let mut scene = self.scene.write().map_err(scene_lock_error)?;
+            if scene.interaction_enabled == enabled {
+                return Ok(annotation_state(&scene));
+            }
+            scene.interaction_enabled = enabled;
+            if !enabled {
+                scene.active = None;
+            }
+            scene.last_error = None;
+            scene.revision = scene.revision.saturating_add(1);
+            scene.render_revision = scene.render_revision.saturating_add(1);
+            annotation_state(&scene)
+        };
+        self.publish_render_revision();
+        Ok(state)
+    }
+
+    pub fn set_tool(&self, tool: AnnotationTool) -> Result<AnnotationState> {
+        validate_tool(&tool)?;
+        let state = {
+            let mut scene = self.scene.write().map_err(scene_lock_error)?;
+            if scene.tool == tool {
+                return Ok(annotation_state(&scene));
+            }
+            scene.tool = tool;
+            scene.active = None;
+            scene.last_error = None;
+            scene.revision = scene.revision.saturating_add(1);
+            scene.render_revision = scene.render_revision.saturating_add(1);
+            annotation_state(&scene)
+        };
+        self.publish_render_revision();
+        Ok(state)
+    }
+
+    pub fn begin_stroke(&self, point: NormalizedPoint, normalized_width: f32) -> Result<()> {
+        validate_native_point(point)?;
+        if !normalized_width.is_finite() || normalized_width <= 0.0 || normalized_width > 1.0 {
+            return Err(scene_error(
+                CaptureErrorCode::AnnotationInvalidOptions,
+                "标注笔迹宽度必须是 (0, 1] 内的有限归一化值",
+            ));
+        }
+        let mut scene = self.scene.write().map_err(scene_lock_error)?;
+        if !scene.interaction_enabled {
+            return Err(scene_error(
+                CaptureErrorCode::AnnotationUnavailable,
+                "标注交互尚未开启",
+            ));
+        }
+        if scene.active.is_some() {
+            return Err(scene_error(
+                CaptureErrorCode::AnnotationUnavailable,
+                "已有进行中的标注笔迹",
+            ));
+        }
+        let (eraser, color) = match &scene.tool {
+            AnnotationTool::Pen { color, .. } => (false, Some(AnnotationRgba::parse(color)?)),
+            AnnotationTool::Eraser { .. } => (true, None),
+        };
+        scene.active = Some(ActiveStroke {
+            points: vec![point],
+            normalized_width,
+            color,
+            eraser,
+        });
+        scene.render_revision = scene.render_revision.saturating_add(1);
+        drop(scene);
+        self.publish_render_revision();
+        Ok(())
+    }
+
+    pub fn append_point(&self, point: NormalizedPoint) -> Result<()> {
+        validate_native_point(point)?;
+        let mut scene = self.scene.write().map_err(scene_lock_error)?;
+        let Some(active) = scene.active.as_mut() else {
+            return Err(scene_error(
+                CaptureErrorCode::AnnotationUnavailable,
+                "没有进行中的标注笔迹",
+            ));
+        };
+        if active.points.len() >= MAX_POINTS_PER_OPERATION {
+            let error = disable_after_limit(&mut scene);
+            drop(scene);
+            self.publish_render_revision();
+            return Err(error);
+        }
+        let retained =
+            history::should_retain_sample(&active.points, point, active.normalized_width);
+        if retained {
+            active.points.push(point);
+            scene.render_revision = scene.render_revision.saturating_add(1);
+        }
+        drop(scene);
+        if retained {
+            self.publish_render_revision();
+        }
+        Ok(())
+    }
+
+    pub fn cancel_stroke(&self) -> Result<AnnotationState> {
+        let state = {
+            let scene = &mut *self.scene.write().map_err(scene_lock_error)?;
+            if scene.active.take().is_some() {
+                scene.render_revision = scene.render_revision.saturating_add(1);
+            }
+            annotation_state(scene)
+        };
+        self.publish_render_revision();
+        Ok(state)
+    }
+
+    pub fn end_stroke(&self) -> Result<AnnotationState> {
+        let state = {
+            let mut scene = self.scene.write().map_err(scene_lock_error)?;
+            let Some(active) = scene.active.take() else {
+                return Err(scene_error(
+                    CaptureErrorCode::AnnotationUnavailable,
+                    "没有可提交的标注笔迹",
+                ));
+            };
+            let points = simplify_points(
+                &active.points,
+                (active.normalized_width / 8.0).max(f32::EPSILON),
+            );
+            if scene.operations.len() >= MAX_OPERATIONS_PER_SESSION
+                || scene.total_points.saturating_add(points.len()) > MAX_POINTS_PER_SESSION
+            {
+                let error = disable_after_limit(&mut scene);
+                drop(scene);
+                self.publish_render_revision();
+                return Err(error);
+            }
+            let stroke = Stroke::new(points, active.normalized_width, active.color)?;
+            scene.total_points = scene.total_points.saturating_add(stroke.points().len());
+            scene.operations.push(if active.eraser {
+                AnnotationOperation::Eraser(stroke)
+            } else {
+                AnnotationOperation::Pen(stroke)
+            });
+            scene.last_error = None;
+            scene.revision = scene.revision.saturating_add(1);
+            scene.render_revision = scene.render_revision.saturating_add(1);
+            annotation_state(&scene)
+        };
+        self.publish_render_revision();
+        Ok(state)
+    }
+
+    pub fn undo(&self) -> Result<AnnotationState> {
+        let state = {
+            let mut scene = self.scene.write().map_err(scene_lock_error)?;
+            if let Some(operation) = scene.operations.pop() {
+                scene.total_points = scene
+                    .total_points
+                    .saturating_sub(operation.stroke().points().len());
+                scene.active = None;
+                scene.last_error = None;
+                scene.revision = scene.revision.saturating_add(1);
+                scene.render_revision = scene.render_revision.saturating_add(1);
+            }
+            annotation_state(&scene)
+        };
+        self.publish_render_revision();
+        Ok(state)
+    }
+
+    pub fn clear(&self) -> AnnotationState {
+        let state = {
+            let mut scene = self
+                .scene
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let changed = !scene.operations.is_empty() || scene.active.is_some();
+            scene.operations.clear();
+            scene.active = None;
+            scene.total_points = 0;
+            scene.last_error = None;
+            if changed {
+                scene.revision = scene.revision.saturating_add(1);
+                scene.render_revision = scene.render_revision.saturating_add(1);
+            }
+            annotation_state(&scene)
+        };
+        self.publish_render_revision();
+        state
+    }
+
+    pub fn state(&self) -> AnnotationState {
+        let scene = self
+            .scene
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        annotation_state(&scene)
+    }
+
+    pub fn snapshot(&self) -> AnnotationSnapshot {
+        let scene = self
+            .scene
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut operations = scene.operations.clone();
+        if let Some(active) = scene.active.as_ref() {
+            if let Ok(stroke) =
+                Stroke::new(active.points.clone(), active.normalized_width, active.color)
+            {
+                operations.push(if active.eraser {
+                    AnnotationOperation::Eraser(stroke)
+                } else {
+                    AnnotationOperation::Pen(stroke)
+                });
+            }
+        }
+        AnnotationSnapshot::new(scene.render_revision, operations)
+    }
+
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.revision.subscribe()
+    }
+
+    fn publish(&self, revision: u64) {
+        self.revision.send_replace(revision);
+    }
+
+    fn publish_render_revision(&self) {
+        let revision = self
+            .scene
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .render_revision;
+        self.publish(revision);
+    }
+}
+
+fn annotation_state(scene: &SceneState) -> AnnotationState {
+    AnnotationState {
+        interaction_enabled: scene.interaction_enabled,
+        tool: scene.tool.clone(),
+        can_undo: !scene.operations.is_empty(),
+        operation_count: scene.operations.len(),
+        revision: scene.revision,
+        last_error: scene.last_error.clone(),
+    }
+}
+
+fn validate_tool(tool: &AnnotationTool) -> Result<()> {
+    let valid = match tool {
+        AnnotationTool::Pen { color, width } => {
+            AnnotationRgba::parse(color)?;
+            width.is_finite() && (1.0..=64.0).contains(width)
+        }
+        AnnotationTool::Eraser { width } => width.is_finite() && (4.0..=128.0).contains(width),
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(scene_error(
+            CaptureErrorCode::AnnotationInvalidOptions,
+            "标注工具宽度超出允许范围",
+        ))
+    }
+}
+
+fn validate_native_point(point: NormalizedPoint) -> Result<()> {
+    if point.x.is_finite()
+        && point.y.is_finite()
+        && (0.0..=1.0).contains(&point.x)
+        && (0.0..=1.0).contains(&point.y)
+    {
+        Ok(())
+    } else {
+        Err(scene_error(
+            CaptureErrorCode::AnnotationInvalidOptions,
+            "标注点必须使用有限归一化坐标",
+        ))
+    }
+}
+
+fn disable_after_limit(scene: &mut SceneState) -> Error {
+    scene.active = None;
+    scene.interaction_enabled = false;
+    scene.revision = scene.revision.saturating_add(1);
+    scene.render_revision = scene.render_revision.saturating_add(1);
+    let error = scene_error(
+        CaptureErrorCode::AnnotationLimitReached,
+        "标注会话已达到资源上限；清空后可继续绘制",
+    );
+    scene.last_error = Some(error.payload());
+    error
+}
+
+fn scene_error(code: CaptureErrorCode, message: impl Into<String>) -> Error {
+    Error::new(code, message, true)
+}
+
+fn scene_lock_error(error: impl std::fmt::Display) -> Error {
+    scene_error(
+        CaptureErrorCode::AnnotationUnavailable,
+        format!("标注场景锁失败: {error}"),
+    )
+}
 
 const MAX_ELEMENTS: usize = 512;
 const MAX_POINTS_PER_ELEMENT: usize = 4096;

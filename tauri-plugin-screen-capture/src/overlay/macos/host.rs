@@ -1,8 +1,9 @@
-use std::{cell::RefCell, collections::HashMap};
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
 use objc2_app_kit::NSStatusWindowLevel;
 
 use crate::{
+    annotation::AnnotationSession,
     models::{AnnotationInputTarget, CaptureErrorCode, CaptureSourceKind, CoordinateSpace},
     overlay::OverlayTarget,
     Error, Result,
@@ -28,14 +29,21 @@ thread_local! {
     static HOSTS: RefCell<HashMap<u64, OverlayHost>> = RefCell::new(HashMap::new());
 }
 
-pub(crate) fn start(session_id: u64, target: OverlayTarget) -> Result<()> {
+pub(crate) fn start(
+    session_id: u64,
+    target: OverlayTarget,
+    annotation_session: Arc<AnnotationSession>,
+) -> Result<()> {
     startup_activation_target(&target)?;
     let activation_target = target.clone();
     HOSTS.with_borrow_mut(|hosts| {
         if hosts.contains_key(&session_id) {
             return Err(overlay_error("macOS 浮层会话已经启动"));
         }
-        hosts.insert(session_id, OverlayHost::new(session_id, target)?);
+        hosts.insert(
+            session_id,
+            OverlayHost::new(session_id, target, annotation_session)?,
+        );
         Ok(())
     })?;
 
@@ -130,6 +138,20 @@ pub(crate) fn stop(session_id: u64) -> Result<()> {
     })
 }
 
+pub(crate) fn set_annotation_interaction(session_id: u64, enabled: bool) -> Result<()> {
+    with_host(session_id, |host| {
+        host.panel.set_annotation_interaction(enabled);
+        Ok(())
+    })
+}
+
+pub(crate) fn refresh_annotations(session_id: u64) -> Result<()> {
+    with_host(session_id, |host| {
+        host.panel.refresh_annotations();
+        Ok(())
+    })
+}
+
 pub(crate) fn annotation_input_target(session_id: u64) -> Result<Option<AnnotationInputTarget>> {
     HOSTS.with_borrow(|hosts| match hosts.get(&session_id) {
         Some(host) => host.annotation_input_target(),
@@ -181,12 +203,16 @@ struct OverlayHost {
 }
 
 impl OverlayHost {
-    fn new(session_id: u64, target: OverlayTarget) -> Result<Self> {
+    fn new(
+        session_id: u64,
+        target: OverlayTarget,
+        annotation_session: Arc<AnnotationSession>,
+    ) -> Result<Self> {
         let track_window_frame = target.source_kind == CaptureSourceKind::Window;
         Ok(Self {
             session_id,
             target,
-            panel: OverlayPanel::new(session_id)?,
+            panel: OverlayPanel::new(session_id, annotation_session)?,
             requested_visible: true,
             observers: EventObservers::new(session_id, track_window_frame)?,
             last_frame: None,

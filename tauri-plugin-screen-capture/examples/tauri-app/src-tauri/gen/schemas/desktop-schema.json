@@ -2193,10 +2193,10 @@
           "markdownDescription": "Denies the unminimize command without any pre-configured scope."
         },
         {
-          "description": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-get-capabilities`\n- `allow-check-permission`\n- `allow-request-permission`\n- `allow-list-sources`\n- `allow-start-capture`\n- `allow-pause-capture`\n- `allow-resume-capture`\n- `allow-stop-capture`\n- `allow-get-capture-session`\n- `allow-get-capture-stats`\n- `allow-create-webrtc-offer`\n- `allow-accept-webrtc-answer`\n- `allow-add-webrtc-ice-candidate`",
+          "description": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-get-capabilities`\n- `allow-check-permission`\n- `allow-request-permission`\n- `allow-list-sources`\n- `allow-start-capture`\n- `allow-pause-capture`\n- `allow-resume-capture`\n- `allow-stop-capture`\n- `allow-get-capture-session`\n- `allow-get-capture-stats`\n- `allow-get-annotation-document`\n- `allow-get-annotation-input-target`\n- `allow-set-annotation-document`\n- `allow-set-annotation-interaction`\n- `allow-set-annotation-tool`\n- `allow-undo-annotation`\n- `allow-clear-annotations`\n- `allow-get-annotation-state`\n- `allow-create-webrtc-offer`\n- `allow-accept-webrtc-answer`\n- `allow-add-webrtc-ice-candidate`",
           "type": "string",
           "const": "screen-capture:default",
-          "markdownDescription": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-get-capabilities`\n- `allow-check-permission`\n- `allow-request-permission`\n- `allow-list-sources`\n- `allow-start-capture`\n- `allow-pause-capture`\n- `allow-resume-capture`\n- `allow-stop-capture`\n- `allow-get-capture-session`\n- `allow-get-capture-stats`\n- `allow-create-webrtc-offer`\n- `allow-accept-webrtc-answer`\n- `allow-add-webrtc-ice-candidate`"
+          "markdownDescription": "Default permissions for the plugin\n#### This default permission set includes:\n\n- `allow-get-capabilities`\n- `allow-check-permission`\n- `allow-request-permission`\n- `allow-list-sources`\n- `allow-start-capture`\n- `allow-pause-capture`\n- `allow-resume-capture`\n- `allow-stop-capture`\n- `allow-get-capture-session`\n- `allow-get-capture-stats`\n- `allow-get-annotation-document`\n- `allow-get-annotation-input-target`\n- `allow-set-annotation-document`\n- `allow-set-annotation-interaction`\n- `allow-set-annotation-tool`\n- `allow-undo-annotation`\n- `allow-clear-annotations`\n- `allow-get-annotation-state`\n- `allow-create-webrtc-offer`\n- `allow-accept-webrtc-answer`\n- `allow-add-webrtc-ice-candidate`"
         },
         {
           "description": "Enables the accept_webrtc_answer command without any pre-configured scope.",
@@ -2217,10 +2217,34 @@
           "markdownDescription": "Enables the check_permission command without any pre-configured scope."
         },
         {
+          "description": "Enables the clear_annotations command without any pre-configured scope.",
+          "type": "string",
+          "const": "screen-capture:allow-clear-annotations",
+          "markdownDescription": "Enables the clear_annotations command without any pre-configured scope."
+        },
+        {
           "description": "Enables the create_webrtc_offer command without any pre-configured scope.",
           "type": "string",
           "const": "screen-capture:allow-create-webrtc-offer",
           "markdownDescription": "Enables the create_webrtc_offer command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_annotation_document command without any pre-configured scope.",
+          "type": "string",
+          "const": "screen-capture:allow-get-annotation-document",
+          "markdownDescription": "Enables the get_annotation_document command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_annotation_input_target command without any pre-configured scope.",
+          "type": "string",
+          "const": "screen-capture:allow-get-annotation-input-target",
+          "markdownDescription": "Enables the get_annotation_input_target command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_annotation_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "screen-capture:allow-get-annotation-state",
+          "markdownDescription": "Enables the get_annotation_state command without any pre-configured scope."
         },
         {
           "description": "Enables the get_capabilities command without any pre-configured scope.",
@@ -2265,6 +2289,24 @@
           "markdownDescription": "Enables the resume_capture command without any pre-configured scope."
         },
         {
+          "description": "Enables the set_annotation_document command without any pre-configured scope.",
+          "type": "string",
+          "const": "screen-capture:allow-set-annotation-document",
+          "markdownDescription": "Enables the set_annotation_document command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_annotation_interaction command without any pre-configured scope.",
+          "type": "string",
+          "const": "screen-capture:allow-set-annotation-interaction",
+          "markdownDescription": "Enables the set_annotation_interaction command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the set_annotation_tool command without any pre-configured scope.",
+          "type": "string",
+          "const": "screen-capture:allow-set-annotation-tool",
+          "markdownDescription": "Enables the set_annotation_tool command without any pre-configured scope."
+        },
+        {
           "description": "Enables the start_capture command without any pre-configured scope.",
           "type": "string",
           "const": "screen-capture:allow-start-capture",
@@ -2275,6 +2317,12 @@
           "type": "string",
           "const": "screen-capture:allow-stop-capture",
           "markdownDescription": "Enables the stop_capture command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the undo_annotation command without any pre-configured scope.",
+          "type": "string",
+          "const": "screen-capture:allow-undo-annotation",
+          "markdownDescription": "Enables the undo_annotation command without any pre-configured scope."
         },
         {
           "description": "Denies the accept_webrtc_answer command without any pre-configured scope.",
@@ -2295,10 +2343,34 @@
           "markdownDescription": "Denies the check_permission command without any pre-configured scope."
         },
         {
+          "description": "Denies the clear_annotations command without any pre-configured scope.",
+          "type": "string",
+          "const": "screen-capture:deny-clear-annotations",
+          "markdownDescription": "Denies the clear_annotations command without any pre-configured scope."
+        },
+        {
           "description": "Denies the create_webrtc_offer command without any pre-configured scope.",
           "type": "string",
           "const": "screen-capture:deny-create-webrtc-offer",
           "markdownDescription": "Denies the create_webrtc_offer command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_annotation_document command without any pre-configured scope.",
+          "type": "string",
+          "const": "screen-capture:deny-get-annotation-document",
+          "markdownDescription": "Denies the get_annotation_document command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_annotation_input_target command without any pre-configured scope.",
+          "type": "string",
+          "const": "screen-capture:deny-get-annotation-input-target",
+          "markdownDescription": "Denies the get_annotation_input_target command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_annotation_state command without any pre-configured scope.",
+          "type": "string",
+          "const": "screen-capture:deny-get-annotation-state",
+          "markdownDescription": "Denies the get_annotation_state command without any pre-configured scope."
         },
         {
           "description": "Denies the get_capabilities command without any pre-configured scope.",
@@ -2343,6 +2415,24 @@
           "markdownDescription": "Denies the resume_capture command without any pre-configured scope."
         },
         {
+          "description": "Denies the set_annotation_document command without any pre-configured scope.",
+          "type": "string",
+          "const": "screen-capture:deny-set-annotation-document",
+          "markdownDescription": "Denies the set_annotation_document command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_annotation_interaction command without any pre-configured scope.",
+          "type": "string",
+          "const": "screen-capture:deny-set-annotation-interaction",
+          "markdownDescription": "Denies the set_annotation_interaction command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_annotation_tool command without any pre-configured scope.",
+          "type": "string",
+          "const": "screen-capture:deny-set-annotation-tool",
+          "markdownDescription": "Denies the set_annotation_tool command without any pre-configured scope."
+        },
+        {
           "description": "Denies the start_capture command without any pre-configured scope.",
           "type": "string",
           "const": "screen-capture:deny-start-capture",
@@ -2353,6 +2443,12 @@
           "type": "string",
           "const": "screen-capture:deny-stop-capture",
           "markdownDescription": "Denies the stop_capture command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the undo_annotation command without any pre-configured scope.",
+          "type": "string",
+          "const": "screen-capture:deny-undo-annotation",
+          "markdownDescription": "Denies the undo_annotation command without any pre-configured scope."
         }
       ]
     },

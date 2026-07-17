@@ -1,9 +1,12 @@
 use crate::{
-    capture::{CaptureFinishReason, FrameConsumer, RunningCapture},
+    capture::{FrameConsumer, RunningCapture},
     error::Error,
     models::{CaptureErrorCode, CaptureSource, ListSourcesOptions, StartCaptureOptions},
     Result,
 };
+
+#[cfg(feature = "macos-screencapturekit")]
+use crate::capture::CaptureFinishReason;
 
 #[cfg(feature = "macos-screencapturekit")]
 mod real {
@@ -16,7 +19,6 @@ mod real {
     use async_trait::async_trait;
     use screencapturekit::{
         cm::{CMSampleBuffer, CMSampleBufferExt, CMSampleBufferSCExt, SCFrameStatus},
-        cv::CVPixelBufferLockFlags,
         prelude::{
             PixelFormat as ScPixelFormat, SCContentFilter, SCShareableContent, SCStream,
             SCStreamConfiguration, SCStreamOutputType,
@@ -32,8 +34,8 @@ mod real {
     };
 
     use super::*;
-    use crate::models::{CaptureErrorPayload, CaptureSourceKind, PixelFormat};
-    use crate::pipeline::frame::VideoFrame;
+    use crate::models::{CaptureErrorPayload, CaptureSourceKind};
+    use crate::platform::macos::media::{CaptureFrameGeometry, FrameRect, MacCaptureFrame};
     use crate::platform::macos::window_filter::macos_window_filtered_reason;
     use crate::sources::{filter_sources, thumbnails::encode_png_base64, SourceFilterOptions};
 
@@ -284,7 +286,7 @@ mod real {
                             "[screen-capture] ScreenCaptureKit received sample count={count}"
                         );
                     }
-                    match video_frame_from_sample(sample) {
+                    match mac_capture_frame_from_sample(sample, count) {
                         FrameConversion::Frame(frame) => {
                             if dispatcher.push(frame) {
                                 let replaced = dispatcher.replaced_count();
@@ -457,7 +459,7 @@ mod real {
 
     #[derive(Clone)]
     struct LatestFrameDispatcherHandle {
-        pending: Arc<Mutex<Option<VideoFrame>>>,
+        pending: Arc<Mutex<Option<MacCaptureFrame>>>,
         notify: Arc<Notify>,
         stopped: Arc<AtomicBool>,
         replaced: Arc<AtomicU64>,
@@ -465,6 +467,7 @@ mod real {
 
     impl LatestFrameDispatcher {
         fn new(consumer: Arc<dyn FrameConsumer>, runtime_handle: Handle) -> Self {
+            let native_frames = consumer.supports_mac_capture_frames();
             let pending = Arc::new(Mutex::new(None));
             let notify = Arc::new(Notify::new());
             let stopped = Arc::new(AtomicBool::new(false));
@@ -475,6 +478,7 @@ mod real {
                 Arc::clone(&notify),
                 Arc::clone(&stopped),
                 consumer,
+                native_frames,
             );
 
             Self {
@@ -490,7 +494,7 @@ mod real {
     }
 
     impl LatestFrameDispatcherHandle {
-        fn push(&self, frame: VideoFrame) -> bool {
+        fn push(&self, frame: MacCaptureFrame) -> bool {
             if self.stopped.load(Ordering::Acquire) {
                 return false;
             }
@@ -514,17 +518,30 @@ mod real {
 
     fn runtime_handle_spawn_latest_worker(
         runtime_handle: Handle,
-        pending: Arc<Mutex<Option<VideoFrame>>>,
+        pending: Arc<Mutex<Option<MacCaptureFrame>>>,
         notify: Arc<Notify>,
         stopped: Arc<AtomicBool>,
         consumer: Arc<dyn FrameConsumer>,
+        native_frames: bool,
     ) -> JoinHandle<()> {
         runtime_handle.spawn(async move {
             loop {
                 notify.notified().await;
 
                 while let Some(frame) = pending.lock().ok().and_then(|mut pending| pending.take()) {
-                    if let Err(error) = consumer.push_frame(frame).await {
+                    let result = if native_frames {
+                        consumer.push_mac_capture_frame(frame).await
+                    } else {
+                        match frame.to_video_frame() {
+                            Ok(frame) => consumer.push_frame(frame).await,
+                            Err(message) => Err(Error::new(
+                                CaptureErrorCode::CaptureRuntimeFailed,
+                                message,
+                                true,
+                            )),
+                        }
+                    };
+                    if let Err(error) = result {
                         tracing::warn!(?error, "failed to publish ScreenCaptureKit frame");
                         eprintln!(
                             "[screen-capture] failed to publish ScreenCaptureKit frame: {error:?}"
@@ -651,12 +668,11 @@ mod real {
     enum FrameSkipReason {
         NoImageContent(Option<SCFrameStatus>),
         MissingImageBuffer(Option<SCFrameStatus>),
-        PixelBufferLockFailed(Option<SCFrameStatus>),
-        InvalidPixelBufferLayout,
+        InvalidGeometry,
     }
 
     enum FrameConversion {
-        Frame(VideoFrame),
+        Frame(MacCaptureFrame),
         Skipped(FrameSkipReason),
     }
 
@@ -690,32 +706,34 @@ mod real {
         });
     }
 
-    fn video_frame_from_sample(sample: CMSampleBuffer) -> FrameConversion {
+    fn mac_capture_frame_from_sample(sample: CMSampleBuffer, generation: u64) -> FrameConversion {
         let frame_status = sample.frame_status();
-        if matches!(frame_status, Some(status) if !status.has_content()) {
+        if frame_status != Some(SCFrameStatus::Complete) {
             return FrameConversion::Skipped(FrameSkipReason::NoImageContent(frame_status));
         }
 
         let Some(buffer) = sample.image_buffer() else {
             return FrameConversion::Skipped(FrameSkipReason::MissingImageBuffer(frame_status));
         };
-        let Ok(guard) = buffer.lock(CVPixelBufferLockFlags::READ_ONLY) else {
-            return FrameConversion::Skipped(FrameSkipReason::PixelBufferLockFailed(frame_status));
-        };
-        let width = guard.width();
-        let height = guard.height();
-        let bytes_per_row = guard.bytes_per_row();
-        let Some(data) = tightly_packed_bgra(guard.as_slice(), width, height, bytes_per_row) else {
-            return FrameConversion::Skipped(FrameSkipReason::InvalidPixelBufferLayout);
+        let content_rect = sample
+            .content_rect()
+            .map(|rect| FrameRect::new(rect.x, rect.y, rect.width, rect.height));
+        let Ok(geometry) = CaptureFrameGeometry::from_attachments(
+            positive_usize_u32(buffer.width()),
+            positive_usize_u32(buffer.height()),
+            content_rect,
+            sample.content_scale(),
+            sample.scale_factor(),
+        ) else {
+            return FrameConversion::Skipped(FrameSkipReason::InvalidGeometry);
         };
 
-        FrameConversion::Frame(VideoFrame {
-            width: positive_usize_u32(width),
-            height: positive_usize_u32(height),
-            pixel_format: PixelFormat::Bgra,
-            timestamp_ns: sample.display_time().unwrap_or_default(),
-            data: data.into(),
-        })
+        FrameConversion::Frame(MacCaptureFrame::new(
+            buffer,
+            sample.display_time().unwrap_or_default(),
+            geometry,
+            generation,
+        ))
     }
 
     fn should_log_conversion_skip(reason: FrameSkipReason, count: u64) -> bool {
@@ -724,35 +742,8 @@ mod real {
                 count == 1 || count % 300 == 0
             }
             FrameSkipReason::MissingImageBuffer(None) => count == 1 || count % 300 == 0,
-            FrameSkipReason::PixelBufferLockFailed(status) => {
-                let _ = status;
-                count == 1 || count % 30 == 0
-            }
             _ => count == 1 || count % 30 == 0,
         }
-    }
-
-    fn tightly_packed_bgra(
-        source: &[u8],
-        width: usize,
-        height: usize,
-        bytes_per_row: usize,
-    ) -> Option<Vec<u8>> {
-        let tight_row_len = width.checked_mul(4)?;
-        let tight_len = tight_row_len.checked_mul(height)?;
-        if bytes_per_row < tight_row_len || source.len() < bytes_per_row.checked_mul(height)? {
-            return None;
-        }
-
-        if bytes_per_row == tight_row_len {
-            return Some(source[..tight_len].to_vec());
-        }
-
-        let mut data = Vec::with_capacity(tight_len);
-        for row in source.chunks(bytes_per_row).take(height) {
-            data.extend_from_slice(&row[..tight_row_len]);
-        }
-        Some(data)
     }
 
     fn parse_source_id(source_id: &str, expected_kind: &str) -> Result<u32> {
