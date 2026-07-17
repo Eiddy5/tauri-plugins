@@ -451,6 +451,53 @@ mod macos {
 
             assert!(sample.is_h264_idr());
         }
+
+        #[cfg(feature = "macos-screencapturekit")]
+        #[test]
+        #[ignore = "requires a logged-in macOS Metal session"]
+        fn videotoolbox_encodes_a_metal_composited_iosurface() {
+            use crate::{
+                annotation::AnnotationSession,
+                platform::macos::media::{
+                    CaptureFrameGeometry, MacCaptureFrame, MacMetalCompositor,
+                },
+            };
+
+            let width = 64_u32;
+            let height = 64_u32;
+            let bytes_per_row = width as usize * 4;
+            let io_surface = apple_cf::iosurface::IOSurface::create_with_properties(
+                width as usize,
+                height as usize,
+                u32::from_be_bytes(*b"BGRA"),
+                4,
+                bytes_per_row,
+                bytes_per_row * height as usize,
+                None,
+            )
+            .expect("source IOSurface");
+            let pixel_buffer = apple_cf::cv::CVPixelBuffer::create_with_io_surface(&io_surface)
+                .expect("source pixel buffer");
+            let geometry =
+                CaptureFrameGeometry::from_attachments(width, height, None, None, None).unwrap();
+            let source = MacCaptureFrame::new(pixel_buffer, 0, geometry, 1);
+            let compositor = MacMetalCompositor::new(width, height).expect("Metal compositor");
+            let surface = compositor
+                .compose(&source, &AnnotationSession::default().snapshot())
+                .expect("compose IOSurface");
+
+            let mut encoder = H264Encoder::new(width, height, 30).expect("VideoToolbox encoder");
+            encoder.force_keyframe().expect("force keyframe");
+            encoder
+                .encode_gpu_surface(surface)
+                .expect("encode GPU surface");
+            encoder.complete_frames();
+            let sample = encoder
+                .receiver
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("receive GPU frame");
+            assert!(sample.is_h264_idr());
+        }
     }
 
     fn encode_video_frame(

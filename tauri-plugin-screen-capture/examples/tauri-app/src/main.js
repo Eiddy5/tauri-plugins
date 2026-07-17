@@ -1,21 +1,14 @@
 import "./style.css"
 import {
   checkPermission,
-  clearAnnotations,
-  getAnnotationState,
-  getCapabilities,
   getCaptureStats,
   listSources,
-  onAnnotationStateChanged,
   onCaptureSessionEnded,
   pauseCapture,
   requestPermission,
-  setAnnotationInteraction,
-  setAnnotationTool,
   resumeCapture,
   startCapture,
   stopCapture,
-  undoAnnotation,
 } from "tauri-plugin-screen-capture-api"
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow"
 import { publishAgoraScreenTrack } from "./lib/agoraPublisher.js"
@@ -56,10 +49,7 @@ const state = {
   agoraUid: localStorage.getItem("screenCapture.agora.uid") ?? "",
   pollTimer: null,
   pickerOpen: false,
-  capabilities: null,
-  annotation: null,
-  annotationColor: "#ff3b30",
-  annotationWidth: 4,
+  videoReady: false,
 }
 
 const app = document.querySelector("#app")
@@ -94,15 +84,6 @@ app.innerHTML = `
           <span class="board-icon" aria-hidden="true">✎</span>
           <span>画板</span>
         </button>
-        <div class="annotation-toolbar" data-annotation-toolbar hidden>
-          <button type="button" data-annotation-mode>关闭画板</button>
-          <button type="button" data-annotation-tool="pen">画笔</button>
-          <button type="button" data-annotation-tool="eraser">橡皮擦</button>
-          <input type="color" value="#ff3b30" data-annotation-color aria-label="标注颜色" />
-          <input type="range" min="1" max="64" value="4" data-annotation-width aria-label="标注粗细" />
-          <button type="button" data-annotation-undo>撤销</button>
-          <button type="button" data-annotation-clear>清空</button>
-        </div>
       </div>
 
       <div class="hidden-runtime-controls" hidden>
@@ -201,13 +182,6 @@ app.innerHTML = `
 
 const annotationElements = {
   toggle: app.querySelector("[data-board-toggle]"),
-  toolbar: app.querySelector("[data-annotation-toolbar]"),
-  mode: app.querySelector("[data-annotation-mode]"),
-  tools: [...app.querySelectorAll("[data-annotation-tool]")],
-  color: app.querySelector("[data-annotation-color]"),
-  width: app.querySelector("[data-annotation-width]"),
-  undo: app.querySelector("[data-annotation-undo]"),
-  clear: app.querySelector("[data-annotation-clear]"),
 }
 
 const elements = {
@@ -253,10 +227,6 @@ const annotationBoard = createAnnotationTargetWindowController({
   },
 })
 
-annotationElements.toggle.addEventListener("click", () => {
-  if (supportsNativeAnnotation()) toggleNativeAnnotationSafely()
-})
-
 elements.openPicker.addEventListener("click", openPicker)
 for (const button of elements.closePicker) button.addEventListener("click", closePicker)
 elements.picker.addEventListener("click", (event) => {
@@ -270,20 +240,10 @@ elements.start.addEventListener("click", start)
 elements.pause.addEventListener("click", pause)
 elements.resume.addEventListener("click", resume)
 elements.stop.addEventListener("click", () => void stop())
-annotationElements.mode.addEventListener("click", toggleNativeAnnotationSafely)
-for (const button of annotationElements.tools) {
-  button.addEventListener("click", () => void selectNativeAnnotationTool(button.dataset.annotationTool))
-}
-annotationElements.color.addEventListener("input", () => {
-  state.annotationColor = annotationElements.color.value
-  if (state.annotation?.tool.kind === "pen") void applyNativeAnnotationTool("pen")
+elements.video.addEventListener("playing", () => {
+  state.videoReady = true
+  renderPreview()
 })
-annotationElements.width.addEventListener("change", () => {
-  state.annotationWidth = Number(annotationElements.width.value)
-  void applyNativeAnnotationTool(state.annotation?.tool.kind ?? "pen")
-})
-annotationElements.undo.addEventListener("click", () => void mutateNativeAnnotation(undoAnnotation))
-annotationElements.clear.addEventListener("click", () => void mutateNativeAnnotation(clearAnnotations))
 elements.quality.addEventListener("change", () => {
   if (!Object.hasOwn(captureQualityPresets, elements.quality.value)) return
   state.captureQuality = elements.quality.value
@@ -320,21 +280,6 @@ void onCaptureSessionEnded(({ payload }) => {
 }).catch((error) => {
   console.error("[screen-capture] failed to listen for session ended events", error)
 })
-
-void onAnnotationStateChanged(({ payload }) => {
-  if (payload.sessionId !== state.session?.sessionId) return
-  state.annotation = payload.state
-  renderAnnotationToolbar()
-}).catch((error) => {
-  console.error("[screen-capture] failed to listen for annotation events", error)
-})
-
-void getCapabilities()
-  .then((capabilities) => {
-    state.capabilities = capabilities
-    render()
-  })
-  .catch((error) => console.error("[screen-capture] failed to read capabilities", error))
 
 render()
 
@@ -415,17 +360,14 @@ async function start() {
       captureCursor: true,
       annotations: { enabled: true },
     })
-    if (supportsNativeAnnotation()) {
-      state.annotation = await getAnnotationState(state.session.sessionId)
-    }
     state.pickerOpen = false
-    if (!supportsNativeAnnotation()) {
-      annotationBoard.attach({
-        sessionId: state.session.sessionId,
-        width: captureSize.width,
-        height: captureSize.height,
-      })
-    }
+    state.videoReady = false
+    annotationBoard.attach({
+      sessionId: state.session.sessionId,
+      width: captureSize.width,
+      height: captureSize.height,
+    })
+    render()
     console.info("[screen-capture] capture session started", state.session)
     const videoConnection = await connectVideo(state.session, elements.video)
     state.peerConnection = videoConnection.peerConnection
@@ -495,11 +437,11 @@ async function stop({ stopBackend = true } = {}) {
   const activeSession = state.session
   state.session = null
   state.stats = null
-  state.annotation = null
+  state.videoReady = false
   if (state.pollTimer) clearInterval(state.pollTimer)
   state.pollTimer = null
   try {
-    if (!supportsNativeAnnotation()) await annotationBoard.detach()
+    await annotationBoard.detach()
   } catch (err) {
     state.error = errorMessage(err)
   }
@@ -582,7 +524,6 @@ function render() {
   renderSourceList(activeSources)
   renderPreview()
   renderStats()
-  renderAnnotationToolbar()
 
   elements.start.disabled = !state.selected || hasSession
   elements.pause.disabled = !hasSession
@@ -591,72 +532,6 @@ function render() {
 
   elements.error.hidden = !state.error
   elements.error.textContent = state.error
-}
-
-function supportsNativeAnnotation() {
-  return Boolean(state.capabilities?.annotationTools?.includes("pen"))
-}
-
-async function toggleNativeAnnotation() {
-  if (!state.session || !supportsNativeAnnotation()) return
-  state.annotation = await setAnnotationInteraction(
-    state.session.sessionId,
-    !state.annotation?.interactionEnabled,
-  )
-  renderAnnotationToolbar()
-}
-
-function toggleNativeAnnotationSafely() {
-  void toggleNativeAnnotation().catch((error) => {
-    state.error = errorMessage(error)
-    render()
-  })
-}
-
-async function selectNativeAnnotationTool(kind) {
-  if (!state.session) return
-  await applyNativeAnnotationTool(kind)
-}
-
-async function applyNativeAnnotationTool(kind) {
-  if (!state.session || !supportsNativeAnnotation()) return
-  const tool = kind === "eraser"
-    ? { kind: "eraser", width: Math.max(4, state.annotationWidth) }
-    : { kind: "pen", color: state.annotationColor.toUpperCase(), width: state.annotationWidth }
-  state.annotation = await setAnnotationTool(state.session.sessionId, tool)
-  renderAnnotationToolbar()
-}
-
-async function mutateNativeAnnotation(command) {
-  if (!state.session || !supportsNativeAnnotation()) return
-  state.annotation = await command(state.session.sessionId)
-  renderAnnotationToolbar()
-}
-
-function renderAnnotationToolbar() {
-  const native = supportsNativeAnnotation()
-  if (!native) {
-    annotationElements.toolbar.hidden = true
-    return
-  }
-  const annotation = state.annotation
-  const enabled = Boolean(annotation?.interactionEnabled)
-  annotationElements.toggle.hidden = false
-  annotationElements.toggle.disabled = !state.session
-  annotationElements.toggle.textContent = enabled ? "关闭画板" : "开启画板"
-  annotationElements.toggle.setAttribute("aria-pressed", String(enabled))
-  annotationElements.toolbar.hidden = !state.session || !enabled
-  annotationElements.mode.classList.toggle("selected", enabled)
-  annotationElements.mode.setAttribute("aria-pressed", String(enabled))
-  for (const button of annotationElements.tools) {
-    button.classList.toggle("selected", annotation?.tool.kind === button.dataset.annotationTool)
-    button.disabled = !state.session
-  }
-  annotationElements.color.value = state.annotationColor
-  annotationElements.width.value = String(state.annotationWidth)
-  annotationElements.color.disabled = annotation?.tool.kind === "eraser"
-  annotationElements.undo.disabled = !annotation?.canUndo
-  annotationElements.clear.disabled = !annotation?.operationCount
 }
 
 function renderSourceList(activeSources) {
@@ -715,8 +590,10 @@ function sourceCardTemplate(source) {
 function renderPreview() {
   elements.selectedTitle.textContent = state.selected ? state.selected.name : "未选择共享源"
   elements.sessionStatus.textContent = state.session ? state.session.status : "idle"
-  elements.previewIdle.hidden = Boolean(state.session)
-  elements.previewTitle.textContent = state.selected ? state.selected.name : "请选择左侧来源"
+  elements.previewIdle.hidden = state.videoReady
+  elements.previewTitle.textContent = state.session && !state.videoReady
+    ? "正在连接共享视频"
+    : state.selected ? state.selected.name : "请选择左侧来源"
   elements.previewSubtitle.textContent = state.selected
     ? `${sourceSubtitle(state.selected)} · 输出 ${captureSizeLabel(state.selected)}`
     : "选择后点击开始共享"

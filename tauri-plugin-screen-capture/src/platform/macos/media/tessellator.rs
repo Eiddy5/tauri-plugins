@@ -1,4 +1,8 @@
-use crate::annotation::{AnnotationOperation, AnnotationRgba, Size, Stroke};
+use crate::{
+    annotation::{AnnotationOperation, AnnotationRgba, NormalizedPoint, Size, Stroke},
+    models::{AnnotationDocument, AnnotationElement, AnnotationElementKind},
+    Result,
+};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -51,6 +55,94 @@ impl StrokeMesh {
 
 pub fn tessellate_operation(operation: &AnnotationOperation, output: Size) -> StrokeMesh {
     tessellate(operation.stroke(), output, operation.is_eraser())
+}
+
+pub fn document_operations(
+    document: &AnnotationDocument,
+    output: Size,
+) -> Result<Vec<AnnotationOperation>> {
+    if !document.visible {
+        return Ok(Vec::new());
+    }
+    let mut operations = Vec::new();
+    for element in &document.elements {
+        append_document_element(&mut operations, element, output)?;
+    }
+    Ok(operations)
+}
+
+fn append_document_element(
+    operations: &mut Vec<AnnotationOperation>,
+    element: &AnnotationElement,
+    output: Size,
+) -> Result<()> {
+    let Some(first) = element.points.first().map(normalized_point) else {
+        return Ok(());
+    };
+    let last = element.points.last().map(normalized_point).unwrap_or(first);
+    let color = Some(AnnotationRgba {
+        red: element.color.red,
+        green: element.color.green,
+        blue: element.color.blue,
+        alpha: element.color.alpha,
+    });
+    let width = element.width as f32;
+    let mut push_stroke = |points: Vec<NormalizedPoint>| -> Result<()> {
+        operations.push(AnnotationOperation::Pen(Stroke::new(points, width, color)?));
+        Ok(())
+    };
+
+    match element.kind {
+        AnnotationElementKind::Pen => {
+            push_stroke(element.points.iter().map(normalized_point).collect())?;
+        }
+        AnnotationElementKind::Line => push_stroke(vec![first, last])?,
+        AnnotationElementKind::Rectangle => push_stroke(vec![
+            first,
+            NormalizedPoint::new(last.x, first.y),
+            last,
+            NormalizedPoint::new(first.x, last.y),
+            first,
+        ])?,
+        AnnotationElementKind::Ellipse => {
+            const SEGMENTS: usize = 64;
+            let center_x = (first.x + last.x) / 2.0;
+            let center_y = (first.y + last.y) / 2.0;
+            let radius_x = (last.x - first.x).abs() / 2.0;
+            let radius_y = (last.y - first.y).abs() / 2.0;
+            let points = (0..=SEGMENTS)
+                .map(|index| {
+                    let angle = std::f32::consts::TAU * index as f32 / SEGMENTS as f32;
+                    NormalizedPoint::new(
+                        center_x + angle.cos() * radius_x,
+                        center_y + angle.sin() * radius_y,
+                    )
+                })
+                .collect();
+            push_stroke(points)?;
+        }
+        AnnotationElementKind::Arrow => {
+            push_stroke(vec![first, last])?;
+            let dx = (last.x - first.x) * output.width as f32;
+            let dy = (last.y - first.y) * output.height as f32;
+            let angle = dy.atan2(dx);
+            let head = (dx.hypot(dy) * 0.25).clamp(10.0, 30.0);
+            for offset in [2.6_f32, -2.6_f32] {
+                push_stroke(vec![
+                    last,
+                    NormalizedPoint::new(
+                        last.x + head * (angle + offset).cos() / output.width as f32,
+                        last.y + head * (angle + offset).sin() / output.height as f32,
+                    ),
+                ])?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn normalized_point(point: &crate::models::AnnotationPoint) -> NormalizedPoint {
+    NormalizedPoint::new(point.x as f32, point.y as f32)
 }
 
 pub fn tessellate(stroke: &Stroke, output: Size, eraser: bool) -> StrokeMesh {

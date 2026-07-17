@@ -1,6 +1,9 @@
 use std::{
     collections::HashSet,
-    sync::{Arc, RwLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, RwLock,
+    },
 };
 
 mod geometry;
@@ -388,12 +391,14 @@ const MAX_NORMALIZED_WIDTH: f64 = 0.1;
 #[derive(Debug)]
 pub(crate) struct AnnotationLayer {
     document: RwLock<Arc<AnnotationDocument>>,
+    revision: AtomicU64,
 }
 
 impl Default for AnnotationLayer {
     fn default() -> Self {
         Self {
             document: RwLock::new(Arc::new(AnnotationDocument::default())),
+            revision: AtomicU64::new(0),
         }
     }
 }
@@ -401,7 +406,11 @@ impl Default for AnnotationLayer {
 impl AnnotationLayer {
     pub(crate) fn set_document(&self, document: AnnotationDocument) -> Result<()> {
         validate_document(&document)?;
-        *self.document.write().map_err(lock_error)? = Arc::new(document);
+        let mut current = self.document.write().map_err(lock_error)?;
+        if current.as_ref() != &document {
+            *current = Arc::new(document);
+            self.revision.fetch_add(1, Ordering::AcqRel);
+        }
         Ok(())
     }
 
@@ -409,11 +418,14 @@ impl AnnotationLayer {
         Ok(self.document.read().map_err(lock_error)?.as_ref().clone())
     }
 
+    pub(crate) fn document_snapshot(&self) -> Result<(u64, Arc<AnnotationDocument>)> {
+        let current = self.document.read().map_err(lock_error)?;
+        let document = Arc::clone(&current);
+        Ok((self.revision.load(Ordering::Acquire), document))
+    }
+
     pub(crate) fn composite(&self, frame: VideoFrame) -> Result<VideoFrame> {
-        let document = {
-            let document = self.document.read().map_err(lock_error)?;
-            Arc::clone(&document)
-        };
+        let (_, document) = self.document_snapshot()?;
         if !document.visible || document.elements.is_empty() {
             return Ok(frame);
         }

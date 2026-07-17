@@ -475,7 +475,7 @@ fn composite_annotations(
     }
     #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
     if let PipelineFrame::MacCapture(source) = frame {
-        let annotations = native_annotations.as_ref().ok_or_else(|| {
+        let native_annotations = native_annotations.as_ref().ok_or_else(|| {
             crate::Error::new(
                 crate::CaptureErrorCode::AnnotationUnavailable,
                 "native annotation session is unavailable",
@@ -489,8 +489,19 @@ fn composite_annotations(
                 true,
             )
         })?;
+        let (document_revision, document) = annotations
+            .as_ref()
+            .map(|annotations| annotations.document_snapshot())
+            .transpose()?
+            .map(|(revision, document)| (revision, Some(document)))
+            .unwrap_or((0, None));
         return compositor
-            .compose(&source, &annotations.snapshot())
+            .compose_with_document(
+                &source,
+                &native_annotations.snapshot(),
+                document_revision,
+                document.as_deref(),
+            )
             .map(PipelineFrame::MacGpu);
     }
     Ok(frame)

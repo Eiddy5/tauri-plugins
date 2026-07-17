@@ -18,6 +18,8 @@ use crate::{
 
 use super::track::WebRtcH264SampleSender;
 
+const SAMPLE_QUEUE_CAPACITY: usize = 8;
+
 #[derive(Default)]
 pub struct EncoderControlState {
     force_keyframe: AtomicBool,
@@ -102,6 +104,26 @@ impl MacEncoderWorker {
         let worker_pending = Arc::clone(&pending);
         let worker_control = Arc::clone(&control);
         let worker_telemetry = Arc::clone(&telemetry);
+        let (sample_sender, mut sample_receiver) =
+            tokio::sync::mpsc::channel::<EncodedVideoSample>(SAMPLE_QUEUE_CAPACITY);
+        let publish_telemetry = Arc::clone(&telemetry);
+        runtime.spawn(async move {
+            while let Some(sample) = sample_receiver.recv().await {
+                match sender.send_sample(sample).await {
+                    Ok(()) => {
+                        publish_telemetry
+                            .frames_published
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(error) => {
+                        publish_telemetry
+                            .frames_encoder_dropped
+                            .fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!(%error, "failed to publish VideoToolbox sample");
+                    }
+                }
+            }
+        });
         let join = thread::Builder::new()
             .name("screen-capture-videotoolbox".to_string())
             .spawn(move || {
@@ -110,8 +132,7 @@ impl MacEncoderWorker {
                     worker_pending,
                     worker_control,
                     worker_telemetry,
-                    sender,
-                    runtime,
+                    sample_sender,
                 );
             })
             .map_err(|error| {
@@ -208,8 +229,7 @@ fn run_worker(
     pending: Arc<(Mutex<PendingState>, Condvar)>,
     control: Arc<EncoderControlState>,
     telemetry: Arc<WorkerTelemetry>,
-    sender: WebRtcH264SampleSender,
-    runtime: tokio::runtime::Handle,
+    sample_sender: tokio::sync::mpsc::Sender<EncodedVideoSample>,
 ) {
     loop {
         let input = {
@@ -238,7 +258,7 @@ fn run_worker(
             let result = match input {
                 EncoderInput::Cpu(frame) => encoder.encode_frame(&frame).map(|sample| {
                     if let Some(sample) = sample {
-                        dispatch_sample(sample, &sender, &runtime, Arc::clone(&telemetry));
+                        dispatch_sample(sample, &sample_sender, &telemetry);
                     }
                 }),
                 EncoderInput::Gpu(surface) => encoder.encode_gpu_surface(surface),
@@ -252,7 +272,7 @@ fn run_worker(
         }
 
         for sample in encoder.take_encoded_samples() {
-            dispatch_sample(sample, &sender, &runtime, Arc::clone(&telemetry));
+            dispatch_sample(sample, &sample_sender, &telemetry);
         }
 
         let stopping = pending
@@ -263,7 +283,7 @@ fn run_worker(
         if stopping {
             encoder.complete_frames();
             for sample in encoder.take_encoded_samples() {
-                dispatch_sample(sample, &sender, &runtime, Arc::clone(&telemetry));
+                dispatch_sample(sample, &sample_sender, &telemetry);
             }
             break;
         }
@@ -272,22 +292,12 @@ fn run_worker(
 
 fn dispatch_sample(
     sample: EncodedVideoSample,
-    sender: &WebRtcH264SampleSender,
-    runtime: &tokio::runtime::Handle,
-    telemetry: Arc<WorkerTelemetry>,
+    sender: &tokio::sync::mpsc::Sender<EncodedVideoSample>,
+    telemetry: &WorkerTelemetry,
 ) {
-    let sender = sender.clone();
-    runtime.spawn(async move {
-        match sender.send_sample(sample).await {
-            Ok(()) => {
-                telemetry.frames_published.fetch_add(1, Ordering::Relaxed);
-            }
-            Err(error) => {
-                telemetry
-                    .frames_encoder_dropped
-                    .fetch_add(1, Ordering::Relaxed);
-                tracing::warn!(%error, "failed to publish VideoToolbox sample");
-            }
-        }
-    });
+    if sender.blocking_send(sample).is_err() {
+        telemetry
+            .frames_encoder_dropped
+            .fetch_add(1, Ordering::Relaxed);
+    }
 }

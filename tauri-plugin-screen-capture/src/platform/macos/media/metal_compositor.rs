@@ -10,13 +10,13 @@ use screencapturekit::metal::{
 
 use crate::{
     annotation::{AnnotationSnapshot, Size},
-    models::CaptureErrorCode,
+    models::{AnnotationDocument, CaptureErrorCode},
     Error, Result,
 };
 
 use super::{
     surface_pool::create_aligned_bgra_surface,
-    tessellator::{tessellate_operation, StrokeVertex},
+    tessellator::{document_operations, tessellate_operation, StrokeVertex},
     MacCaptureFrame, MacGpuSurface, MacMetalDevice, MacSurfacePool, SurfacePoolError,
 };
 
@@ -28,7 +28,8 @@ struct SourceVertex {
 }
 
 struct CachedAnnotation {
-    revision: u64,
+    native_revision: u64,
+    document_revision: u64,
     size: (u32, u32),
     _pixel_buffer: CVPixelBuffer,
     texture: MetalTexture,
@@ -115,6 +116,16 @@ impl MacMetalCompositor {
         source: &MacCaptureFrame,
         annotations: &AnnotationSnapshot,
     ) -> Result<MacGpuSurface> {
+        self.compose_with_document(source, annotations, 0, None)
+    }
+
+    pub(crate) fn compose_with_document(
+        &self,
+        source: &MacCaptureFrame,
+        annotations: &AnnotationSnapshot,
+        document_revision: u64,
+        document: Option<&AnnotationDocument>,
+    ) -> Result<MacGpuSurface> {
         let lease = self.pool.acquire().map_err(surface_error)?;
         let output_texture = self
             .device
@@ -125,7 +136,8 @@ impl MacMetalCompositor {
             .texture_for_bgra(source.pixel_buffer())
             .map_err(surface_error)?;
         let (width, height) = lease.size();
-        let annotation_texture = self.annotation_texture(annotations, width, height)?;
+        let annotation_texture =
+            self.annotation_texture(annotations, document_revision, document, width, height)?;
 
         let command = self
             .queue
@@ -187,6 +199,8 @@ impl MacMetalCompositor {
     fn annotation_texture(
         &self,
         snapshot: &AnnotationSnapshot,
+        document_revision: u64,
+        document: Option<&AnnotationDocument>,
         width: u32,
         height: u32,
     ) -> Result<MetalTexture> {
@@ -195,7 +209,10 @@ impl MacMetalCompositor {
             .lock()
             .map_err(|_| metal_error("annotation texture lock was poisoned"))?;
         if let Some(cached) = cached.as_ref() {
-            if cached.revision == snapshot.revision() && cached.size == (width, height) {
+            if cached.native_revision == snapshot.revision()
+                && cached.document_revision == document_revision
+                && cached.size == (width, height)
+            {
                 return Ok(cached.texture.clone());
             }
         }
@@ -217,7 +234,11 @@ impl MacMetalCompositor {
             .render_command_encoder(&pass)
             .ok_or_else(|| metal_error("failed to create annotation render encoder"))?;
 
-        for operation in snapshot.operations() {
+        let document_operations = document
+            .map(|document| document_operations(document, Size::new(width as f64, height as f64)))
+            .transpose()?
+            .unwrap_or_default();
+        for operation in snapshot.operations().iter().chain(&document_operations) {
             let mesh = tessellate_operation(operation, Size::new(width as f64, height as f64));
             if mesh.vertices().is_empty() {
                 continue;
@@ -243,7 +264,8 @@ impl MacMetalCompositor {
         command.commit();
 
         *cached = Some(CachedAnnotation {
-            revision: snapshot.revision(),
+            native_revision: snapshot.revision(),
+            document_revision,
             size: (width, height),
             _pixel_buffer: pixel_buffer,
             texture: texture.clone(),
