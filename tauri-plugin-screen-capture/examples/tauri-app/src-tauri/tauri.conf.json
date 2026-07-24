@@ -3,8 +3,13 @@
   "version": "0.1.0",
   "identifier": "com.example.screen-capture-performance",
   "build": {
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "vite",
+    "beforeBuildCommand": "vite build",
+    "additionalWatchFolders": [
+      "../../../src",
+      "../../../Cargo.toml",
+      "../../../build.rs"
+    ],
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist"
   },

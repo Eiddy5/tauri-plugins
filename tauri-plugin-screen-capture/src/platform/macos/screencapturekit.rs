@@ -202,14 +202,7 @@ mod real {
         );
         let content = shareable_content()?;
         let filter = content_filter(&content, &options)?;
-        let mut config = SCStreamConfiguration::new()
-            .with_width(options.width.unwrap_or(1280))
-            .with_height(options.height.unwrap_or(720))
-            .with_pixel_format(ScPixelFormat::BGRA)
-            .with_fps(options.effective_fps())
-            .with_shows_cursor(options.effective_capture_cursor());
-
-        config.set_queue_depth(3);
+        let config = capture_stream_configuration(&options);
 
         let runtime_handle = tokio::runtime::Handle::try_current().map_err(|err| {
             Error::new(
@@ -342,6 +335,19 @@ mod real {
             worker_notify: dispatcher.handle.notify,
             finish_sender,
         }))
+    }
+
+    fn capture_stream_configuration(options: &StartCaptureOptions) -> SCStreamConfiguration {
+        let mut config = SCStreamConfiguration::new()
+            .with_width(options.width.unwrap_or(1280))
+            .with_height(options.height.unwrap_or(720))
+            .with_pixel_format(ScPixelFormat::BGRA)
+            .with_fps(options.effective_fps())
+            .with_shows_cursor(options.effective_capture_cursor())
+            .with_scales_to_fit(true)
+            .with_preserves_aspect_ratio(true);
+        config.set_queue_depth(3);
+        config
     }
 
     struct ScreenCaptureKitRunningCapture {
@@ -708,7 +714,7 @@ mod real {
 
     fn mac_capture_frame_from_sample(sample: CMSampleBuffer, generation: u64) -> FrameConversion {
         let frame_status = sample.frame_status();
-        if frame_status != Some(SCFrameStatus::Complete) {
+        if !frame_status_allows_image(frame_status) {
             return FrameConversion::Skipped(FrameSkipReason::NoImageContent(frame_status));
         }
 
@@ -734,6 +740,16 @@ mod real {
             geometry,
             generation,
         ))
+    }
+
+    fn frame_status_allows_image(frame_status: Option<SCFrameStatus>) -> bool {
+        match frame_status {
+            Some(status) => status.has_content(),
+            // screencapturekit 3.0.0 cannot decode the NSNumber-backed status
+            // attachment on some macOS versions. The image-buffer check below
+            // remains the authoritative fallback in that case.
+            None => true,
+        }
     }
 
     fn should_log_conversion_skip(reason: FrameSkipReason, count: u64) -> bool {
@@ -851,6 +867,37 @@ mod real {
             ];
 
             assert_eq!(current_app_window_exceptions(123, &windows), vec![2]);
+        }
+
+        #[test]
+        fn accepts_valid_images_when_the_frame_status_attachment_is_unavailable() {
+            assert!(frame_status_allows_image(None));
+            assert!(frame_status_allows_image(Some(SCFrameStatus::Complete)));
+            assert!(frame_status_allows_image(Some(SCFrameStatus::Started)));
+            assert!(!frame_status_allows_image(Some(SCFrameStatus::Idle)));
+            assert!(!frame_status_allows_image(Some(SCFrameStatus::Blank)));
+            assert!(!frame_status_allows_image(Some(SCFrameStatus::Suspended)));
+            assert!(!frame_status_allows_image(Some(SCFrameStatus::Stopped)));
+        }
+
+        #[test]
+        fn capture_configuration_scales_resized_windows_to_the_fixed_output() {
+            let options = StartCaptureOptions {
+                source_id: "window:1".to_string(),
+                source_kind: CaptureSourceKind::Window,
+                fps: Some(60),
+                width: Some(1920),
+                height: Some(1080),
+                capture_cursor: Some(true),
+                publisher: None,
+                annotations: None,
+            };
+
+            let config = capture_stream_configuration(&options);
+
+            assert_eq!(config.width(), 1920);
+            assert_eq!(config.height(), 1080);
+            assert!(config.scales_to_fit());
         }
     }
 }

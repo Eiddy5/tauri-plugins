@@ -77,7 +77,14 @@ mod macos {
                 ));
             }
 
-            configure_session(session, width, height, fps)?;
+            if let Err(error) = configure_session(session, width, height, fps) {
+                unsafe {
+                    VTCompressionSessionInvalidate(session);
+                    CFRelease(session.cast());
+                    drop(Box::from_raw(context));
+                }
+                return Err(error);
+            }
 
             let status = unsafe { VTCompressionSessionPrepareToEncodeFrames(session) };
             if status != 0 {
@@ -383,7 +390,6 @@ mod macos {
             "AverageBitRate",
             recommended_bitrate(width, height, fps),
         )?;
-        set_f64_property(session, "Quality", 1.0)?;
         set_i32_property(
             session,
             "MaxKeyFrameInterval",
@@ -604,34 +610,6 @@ mod macos {
         })
     }
 
-    fn set_f64_property(session: VTCompressionSessionRef, key: &str, value: f64) -> Result<()> {
-        with_cf_string(key, |key| {
-            let number = unsafe {
-                CFNumberCreate(
-                    ptr::null(),
-                    K_CF_NUMBER_FLOAT64_TYPE,
-                    (&value as *const f64).cast(),
-                )
-            };
-            if number.is_null() {
-                return Err(video_toolbox_error(
-                    "failed to create CoreFoundation number",
-                    -1,
-                ));
-            }
-            let status = unsafe { VTSessionSetProperty(session, key, number.cast()) };
-            unsafe { CFRelease(number.cast()) };
-            if status == 0 {
-                Ok(())
-            } else {
-                Err(video_toolbox_error(
-                    "failed to set VideoToolbox floating-point property",
-                    status,
-                ))
-            }
-        })
-    }
-
     fn set_string_property(session: VTCompressionSessionRef, key: &str, value: &str) -> Result<()> {
         with_cf_string(key, |key| {
             with_cf_string(value, |value| {
@@ -673,7 +651,6 @@ mod macos {
     type VTCompressionSessionRef = *mut c_void;
     const K_CF_STRING_ENCODING_UTF8: u32 = 0x0800_0100;
     const K_CF_NUMBER_SINT32_TYPE: i32 = 3;
-    const K_CF_NUMBER_FLOAT64_TYPE: i32 = 6;
 
     #[link(name = "VideoToolbox", kind = "framework")]
     #[link(name = "CoreMedia", kind = "framework")]

@@ -11,10 +11,12 @@ import {
   stopCapture,
 } from "tauri-plugin-screen-capture-api"
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow"
-import { publishAgoraScreenTrack } from "./lib/agoraPublisher.js"
 import { createAnnotationTargetWindowController } from "./lib/annotationTargetWindow.js"
 import { connectVideo } from "./lib/screenCapture.js"
-import { shareExperienceMode } from "./lib/shareExperience.js"
+import {
+  returnToPickerAfterSharing,
+  shareExperienceMode,
+} from "./lib/shareExperience.js"
 
 const captureQualityPresets = {
   "720p": { label: "720p HD", maxWidth: 1280, maxHeight: 720, fps: 60 },
@@ -400,6 +402,7 @@ async function publishToAgora() {
   }
   state.agoraPublishing = true
   renderStats()
+  const { publishAgoraScreenTrack } = await import("./lib/agoraPublisher.js")
   state.agoraPublication = await publishAgoraScreenTrack(
     {
       appId: state.agoraAppId,
@@ -435,9 +438,7 @@ async function handleCaptureSessionEnded(event) {
 
 async function stop({ stopBackend = true } = {}) {
   const activeSession = state.session
-  state.session = null
-  state.stats = null
-  state.videoReady = false
+  returnToPickerAfterSharing(state)
   if (state.pollTimer) clearInterval(state.pollTimer)
   state.pollTimer = null
   try {
