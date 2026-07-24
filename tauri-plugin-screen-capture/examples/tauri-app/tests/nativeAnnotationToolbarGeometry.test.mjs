@@ -2,24 +2,25 @@ import assert from "node:assert/strict"
 import test from "node:test"
 
 import {
-  applyAnnotationTargetGeometry,
-  createAnnotationTargetSynchronizer,
-} from "../src/lib/annotationTargetGeometry.js"
+  applyNativeAnnotationToolbarGeometry,
+  createNativeAnnotationToolbarSynchronizer,
+} from "../src/lib/nativeAnnotationToolbarGeometry.js"
 
-test("physical target bounds move and size the overlay in physical pixels", async () => {
+test("physical target bounds center the native toolbar above the shared content", async () => {
   const calls = []
   const window = fakeWindow(calls)
   const dpi = fakeDpi()
 
-  await applyAnnotationTargetGeometry(
+  await applyNativeAnnotationToolbarGeometry(
     window,
     { x: -1920, y: 0, width: 1920, height: 1080, coordinateSpace: "physical" },
     dpi,
+    { width: 460, height: 64, topInset: 12 },
   )
 
   assert.deepEqual(calls, [
-    ["position", { kind: "physical-position", x: -1920, y: 0 }],
-    ["size", { kind: "physical-size", width: 1920, height: 1080 }],
+    ["position", { kind: "physical-position", x: -1190, y: 12 }],
+    ["size", { kind: "physical-size", width: 460, height: 64 }],
     ["show"],
   ])
 })
@@ -29,16 +30,21 @@ test("logical target bounds use logical units and missing targets hide input", a
   const window = fakeWindow(calls)
   const dpi = fakeDpi()
 
-  await applyAnnotationTargetGeometry(
+  await applyNativeAnnotationToolbarGeometry(
     window,
     { x: 10, y: 20, width: 800, height: 600, coordinateSpace: "logical" },
     dpi,
+    { width: 460, height: 64, topInset: 12 },
   )
-  await applyAnnotationTargetGeometry(window, null, dpi)
+  await applyNativeAnnotationToolbarGeometry(window, null, dpi, {
+    width: 460,
+    height: 64,
+    topInset: 12,
+  })
 
   assert.deepEqual(calls, [
-    ["position", { kind: "logical-position", x: 10, y: 20 }],
-    ["size", { kind: "logical-size", width: 800, height: 600 }],
+    ["position", { kind: "logical-position", x: 180, y: 32 }],
+    ["size", { kind: "logical-size", width: 460, height: 64 }],
     ["show"],
     ["hide"],
   ])
@@ -47,7 +53,11 @@ test("logical target bounds use logical units and missing targets hide input", a
 test("target synchronization focuses once and resets focus after hiding", async () => {
   const calls = []
   const window = fakeWindow(calls)
-  const sync = createAnnotationTargetSynchronizer(window, fakeDpi())
+  const sync = createNativeAnnotationToolbarSynchronizer(window, fakeDpi(), {
+    width: 460,
+    height: 64,
+    topInset: 12,
+  })
   const target = {
     x: 10,
     y: 20,

@@ -19,9 +19,10 @@ tauri-build = { version = "2.6.2", default-features = false, features = [] }
 
 [dependencies]
 async-trait = "0.1"
-tauri = { version = "2.11.2", features = [] }
+tauri = { version = "2.11.2", features = ["macos-private-api"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3", default-features = false, features = ["NSWindow"] }
 tauri-plugin-screen-capture = { path = "../../../", features = ["macos-screencapturekit"] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]

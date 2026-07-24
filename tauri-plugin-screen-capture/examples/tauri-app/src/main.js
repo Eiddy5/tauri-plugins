@@ -7,11 +7,12 @@ import {
   pauseCapture,
   requestPermission,
   resumeCapture,
+  setAnnotationInteraction,
   startCapture,
   stopCapture,
 } from "tauri-plugin-screen-capture-api"
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow"
-import { createAnnotationTargetWindowController } from "./lib/annotationTargetWindow.js"
+import { createNativeAnnotationToolbarWindow } from "./lib/nativeAnnotationToolbarWindow.js"
 import { connectVideo } from "./lib/screenCapture.js"
 import {
   returnToPickerAfterSharing,
@@ -220,9 +221,10 @@ const elements = {
   error: app.querySelector("[data-error]"),
 }
 
-const annotationBoard = createAnnotationTargetWindowController({
+const nativeAnnotationToolbar = createNativeAnnotationToolbarWindow({
   toggle: annotationElements.toggle,
   createWindow: (label, options) => new WebviewWindow(label, options),
+  setInteraction: setAnnotationInteraction,
   onError(error) {
     state.error = errorMessage(error)
     render()
@@ -364,10 +366,8 @@ async function start() {
     })
     state.pickerOpen = false
     state.videoReady = false
-    annotationBoard.attach({
+    nativeAnnotationToolbar.attach({
       sessionId: state.session.sessionId,
-      width: captureSize.width,
-      height: captureSize.height,
     })
     render()
     console.info("[screen-capture] capture session started", state.session)
@@ -442,7 +442,7 @@ async function stop({ stopBackend = true } = {}) {
   if (state.pollTimer) clearInterval(state.pollTimer)
   state.pollTimer = null
   try {
-    await annotationBoard.detach()
+    await nativeAnnotationToolbar.detach()
   } catch (err) {
     state.error = errorMessage(err)
   }

@@ -6,8 +6,7 @@
 
 html,
 body,
-#app,
-.annotation-overlay {
+#app {
   width: 100%;
   height: 100%;
   margin: 0;
@@ -15,47 +14,30 @@ body,
   background: transparent;
 }
 
-.annotation-overlay {
-  position: relative;
-  cursor: crosshair;
-  user-select: none;
-  -webkit-user-select: none;
-}
-
-[data-board-canvas] {
-  position: absolute;
-  inset: 0;
+.native-annotation-toolbar {
+  box-sizing: border-box;
+  display: flex;
   width: 100%;
   height: 100%;
-  touch-action: none;
-}
-
-.annotation-toolbar {
-  position: absolute;
-  z-index: 2;
-  top: 16px;
-  left: 50%;
-  display: flex;
   align-items: center;
+  justify-content: center;
   gap: 6px;
   padding: 8px;
   border: 1px solid rgb(203 213 225 / 90%);
-  border-radius: 9px;
-  background: rgb(255 255 255 / 94%);
+  border-radius: 10px;
+  background: rgb(255 255 255 / 96%);
   box-shadow: 0 8px 24px rgb(15 23 42 / 22%);
-  transform: translateX(-50%);
-  cursor: default;
-  pointer-events: auto;
   user-select: none;
   -webkit-user-select: none;
 }
 
-.annotation-toolbar button,
-.annotation-toolbar input {
+.native-annotation-toolbar button,
+.native-annotation-toolbar input {
+  flex: 0 0 auto;
   font: inherit;
 }
 
-.annotation-toolbar button {
+.native-annotation-toolbar button {
   padding: 7px 9px;
   border: 1px solid #cbd5e1;
   border-radius: 6px;
@@ -64,18 +46,18 @@ body,
   cursor: pointer;
 }
 
-.annotation-toolbar button.active {
+.native-annotation-toolbar button.active {
   color: #ffffff;
   border-color: #2563eb;
   background: #2563eb;
 }
 
-.annotation-toolbar .close {
+.native-annotation-toolbar .close {
   color: #b42318;
   border-color: #fecdca;
 }
 
-[data-board-color] {
+[data-native-color] {
   width: 34px;
   height: 32px;
   padding: 2px;
@@ -84,18 +66,14 @@ body,
   background: #ffffff;
 }
 
-.annotation-error {
+.native-annotation-error {
   position: absolute;
-  z-index: 3;
-  top: 78px;
-  left: 50%;
-  max-width: calc(100% - 32px);
-  padding: 6px 10px;
-  border: 1px solid #fecdca;
-  border-radius: 6px;
+  inset: auto 8px 4px;
+  overflow: hidden;
   color: #b42318;
-  background: rgb(254 243 242 / 96%);
-  box-shadow: 0 6px 18px rgb(15 23 42 / 18%);
-  transform: translateX(-50%);
+  font-size: 11px;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   pointer-events: none;
 }

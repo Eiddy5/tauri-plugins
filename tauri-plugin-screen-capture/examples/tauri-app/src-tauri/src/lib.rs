@@ -17,8 +17,23 @@ fn greet(name: &str) -> String {
 
 #[tauri::command]
 fn prepare_annotation_overlay(window: tauri::WebviewWindow) -> std::result::Result<(), String> {
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let _ = &window;
+
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::{NSStatusWindowLevel, NSWindow};
+
+        let toolbar = window.clone();
+        window
+            .run_on_main_thread(move || {
+                let ns_window: &NSWindow =
+                    unsafe { &*(toolbar.ns_window().expect("toolbar NSWindow").cast()) };
+                ns_window.setLevel(NSStatusWindowLevel + 1);
+                ns_window.orderFrontRegardless();
+            })
+            .map_err(|error| error.to_string())?;
+    }
 
     #[cfg(target_os = "windows")]
     {

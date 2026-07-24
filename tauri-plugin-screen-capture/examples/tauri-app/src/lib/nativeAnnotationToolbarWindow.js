@@ -1,10 +1,13 @@
-export function createAnnotationTargetWindowController({
+export function createNativeAnnotationToolbarWindow({
   toggle,
   createWindow,
+  setInteraction,
   onError = console.error,
 }) {
   let session = null
   let overlay = null
+  let overlaySessionId = null
+  let nativeInputMayBeEnabled = false
 
   const render = () => {
     toggle.disabled = !session
@@ -14,23 +17,32 @@ export function createAnnotationTargetWindowController({
 
   const close = async () => {
     const activeOverlay = overlay
+    const activeSessionId = overlaySessionId
     overlay = null
+    overlaySessionId = null
     render()
-    await activeOverlay?.close()
+    try {
+      if (nativeInputMayBeEnabled && activeSessionId) {
+        nativeInputMayBeEnabled = false
+        await setInteraction(activeSessionId, false)
+      }
+    } finally {
+      await activeOverlay?.close()
+    }
   }
 
   const open = async () => {
     if (!session || overlay) return
     const label = `annotation-${session.sessionId}`.replace(/[^a-zA-Z0-9-/:_]/g, "-")
     const params = new URLSearchParams({
-      annotationOverlay: "1",
+      nativeAnnotationToolbar: "1",
       sessionId: session.sessionId,
-      width: String(session.width),
-      height: String(session.height),
     })
     const window = createWindow(label, {
       url: `/?${params}`,
       title: `TAURI_SCREEN_CAPTURE_OVERLAY:${session.sessionId}`,
+      width: 460,
+      height: 64,
       transparent: true,
       decorations: false,
       shadow: false,
@@ -41,11 +53,19 @@ export function createAnnotationTargetWindowController({
       visible: false,
     })
     overlay = window
+    overlaySessionId = session.sessionId
+    nativeInputMayBeEnabled = true
     render()
     await window.once("tauri://destroyed", () => {
       if (overlay === window) {
+        const destroyedSessionId = overlaySessionId
         overlay = null
+        overlaySessionId = null
         render()
+        if (nativeInputMayBeEnabled && destroyedSessionId) {
+          nativeInputMayBeEnabled = false
+          void setInteraction(destroyedSessionId, false).catch(onError)
+        }
       }
     })
   }
@@ -58,7 +78,7 @@ export function createAnnotationTargetWindowController({
 
   return {
     attach(nextSession) {
-      session = { ...nextSession }
+      session = { sessionId: nextSession.sessionId }
       render()
     },
     async detach() {
