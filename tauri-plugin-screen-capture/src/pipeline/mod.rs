@@ -5,6 +5,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+#[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+use std::time::Duration;
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -25,6 +27,10 @@ use crate::{
 // OpenH264 uses millisecond timestamps, while the native encoders use finer timebases.
 // Advancing by one millisecond keeps republished static frames distinct for every backend.
 const MIN_PUBLISH_TIMESTAMP_STEP_NS: u64 = 1_000_000;
+#[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+const ANNOTATION_BACKPRESSURE_RETRY_DELAY: Duration = Duration::from_millis(4);
+#[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+const ANNOTATION_BACKPRESSURE_MAX_ATTEMPTS: usize = 10;
 
 pub struct CapturePipeline {
     publisher: Arc<dyn CapturePublisher>,
@@ -409,14 +415,30 @@ fn spawn_latest_frame_worker(
                 let was_mac_capture = matches!(&pending.frame, PipelineFrame::MacCapture(_));
                 let frame = pending.frame.with_timestamp(timestamp_ns);
                 let _compose_started = Instant::now();
-                let composed = composite_annotations(
-                    &annotations,
-                    frame,
-                    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
-                    &native_annotations,
-                    #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
-                    &mac_compositor,
-                );
+                #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+                let composed = {
+                    let mut attempt = 0;
+                    loop {
+                        attempt += 1;
+                        let result = composite_annotations(
+                            &annotations,
+                            frame.clone(),
+                            &native_annotations,
+                            &mac_compositor,
+                        );
+                        let should_retry = !pending.is_capture_frame
+                            && attempt < ANNOTATION_BACKPRESSURE_MAX_ATTEMPTS
+                            && result.as_ref().err().is_some_and(
+                                crate::platform::macos::media::is_surface_backpressure,
+                            );
+                        if !should_retry {
+                            break result;
+                        }
+                        tokio::time::sleep(ANNOTATION_BACKPRESSURE_RETRY_DELAY).await;
+                    }
+                };
+                #[cfg(not(all(target_os = "macos", feature = "macos-screencapturekit")))]
+                let composed = composite_annotations(&annotations, frame);
                 #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
                 {
                     let mut current = stats.lock().await;
@@ -445,7 +467,14 @@ fn spawn_latest_frame_worker(
                 let completion_result = match result {
                     Ok(()) => Ok(()),
                     Err(error) => {
-                        eprintln!("[screen-capture] pipeline publish failed: {error:?}");
+                        #[cfg(all(target_os = "macos", feature = "macos-screencapturekit"))]
+                        let expected_capture_backpressure = pending.is_capture_frame
+                            && crate::platform::macos::media::is_surface_backpressure(&error);
+                        #[cfg(not(all(target_os = "macos", feature = "macos-screencapturekit")))]
+                        let expected_capture_backpressure = false;
+                        if !expected_capture_backpressure {
+                            eprintln!("[screen-capture] pipeline publish failed: {error:?}");
+                        }
                         Err(error.payload())
                     }
                 };

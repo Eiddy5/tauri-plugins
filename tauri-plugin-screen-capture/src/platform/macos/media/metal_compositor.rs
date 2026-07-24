@@ -16,7 +16,7 @@ use crate::{
 
 use super::{
     surface_pool::create_aligned_bgra_surface,
-    tessellator::{document_operations, tessellate_operation, StrokeVertex},
+    tessellator::{document_operations, tessellate_operation},
     MacCaptureFrame, MacGpuSurface, MacMetalDevice, MacSurfacePool, SurfacePoolError,
 };
 
@@ -238,27 +238,21 @@ impl MacMetalCompositor {
             .map(|document| document_operations(document, Size::new(width as f64, height as f64)))
             .transpose()?
             .unwrap_or_default();
+        let viewport_buffer = upload_slice(self.device.inner(), &[[width as f32, height as f32]])?;
         for operation in snapshot.operations().iter().chain(&document_operations) {
             let mesh = tessellate_operation(operation, Size::new(width as f64, height as f64));
             if mesh.vertices().is_empty() {
                 continue;
             }
-            let clip_vertices = mesh
-                .vertices()
-                .iter()
-                .map(|vertex| StrokeVertex {
-                    position: pixel_to_clip(vertex.position, width as f32, height as f32),
-                    color: vertex.color,
-                })
-                .collect::<Vec<_>>();
-            let buffer = upload_slice(self.device.inner(), &clip_vertices)?;
+            let buffer = upload_slice(self.device.inner(), mesh.vertices())?;
             encoder.set_render_pipeline_state(if mesh.is_eraser() {
                 &self.eraser_pipeline
             } else {
                 &self.pen_pipeline
             });
             encoder.set_vertex_buffer(&buffer, 0, 0);
-            encoder.draw_primitives(MTLPrimitiveType::Triangle, 0, clip_vertices.len());
+            encoder.set_vertex_buffer(&viewport_buffer, 0, 1);
+            encoder.draw_primitives(MTLPrimitiveType::Triangle, 0, mesh.vertices().len());
         }
         encoder.end_encoding();
         command.commit();
@@ -398,6 +392,114 @@ fn surface_error(error: SurfacePoolError) -> Error {
     )
 }
 
+pub(crate) fn is_surface_backpressure(error: &Error) -> bool {
+    let Error::Structured { payload } = error;
+    payload.code == CaptureErrorCode::CaptureRuntimeFailed
+        && payload.message == SurfacePoolError::Backpressure.to_string()
+}
+
 fn metal_error(message: &str) -> Error {
     Error::new(CaptureErrorCode::CaptureRuntimeFailed, message, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_surface_backpressure, metal_error, surface_error};
+    use crate::platform::macos::media::tessellator::StrokeVertex;
+    use crate::platform::macos::media::SurfacePoolError;
+    use crate::{
+        annotation::AnnotationSession,
+        models::{
+            AnnotationColor, AnnotationDocument, AnnotationElement, AnnotationElementKind,
+            AnnotationPoint,
+        },
+        platform::macos::media::{CaptureFrameGeometry, MacCaptureFrame, MacMetalCompositor},
+    };
+
+    #[test]
+    fn surface_pool_pressure_is_distinguished_from_other_metal_failures() {
+        assert!(is_surface_backpressure(&surface_error(
+            SurfacePoolError::Backpressure
+        )));
+        assert!(!is_surface_backpressure(&metal_error(
+            "failed to create Metal command buffer"
+        )));
+    }
+
+    #[test]
+    fn stroke_vertex_matches_tightly_packed_metal_layout() {
+        assert_eq!(std::mem::size_of::<StrokeVertex>(), 24);
+        assert_eq!(std::mem::offset_of!(StrokeVertex, color), 8);
+    }
+
+    #[test]
+    #[ignore = "requires a logged-in macOS Metal session"]
+    fn document_annotation_pixels_are_burned_into_the_published_gpu_surface() {
+        let width = 64_u32;
+        let height = 64_u32;
+        let bytes_per_row = width as usize * 4;
+        let io_surface = apple_cf::iosurface::IOSurface::create_with_properties(
+            width as usize,
+            height as usize,
+            u32::from_be_bytes(*b"BGRA"),
+            4,
+            bytes_per_row,
+            bytes_per_row * height as usize,
+            None,
+        )
+        .expect("source IOSurface");
+        let pixel_buffer = apple_cf::cv::CVPixelBuffer::create_with_io_surface(&io_surface)
+            .expect("source pixel buffer");
+        {
+            let mut pixels = pixel_buffer
+                .lock_read_write()
+                .expect("lock source pixel buffer");
+            let bytes_per_row = pixels.bytes_per_row();
+            let data = pixels.as_slice_mut().expect("source pixel bytes");
+            for row in data.chunks_mut(bytes_per_row).take(height as usize) {
+                for pixel in row[..width as usize * 4].chunks_exact_mut(4) {
+                    pixel.copy_from_slice(&[0, 0, 0, 255]);
+                }
+            }
+        }
+        let geometry =
+            CaptureFrameGeometry::from_attachments(width, height, None, None, None).unwrap();
+        let source = MacCaptureFrame::new(pixel_buffer, 0, geometry, 1);
+        let document = AnnotationDocument {
+            visible: true,
+            elements: vec![AnnotationElement {
+                id: "remote-line".to_string(),
+                kind: AnnotationElementKind::Line,
+                points: vec![
+                    AnnotationPoint { x: 0.1, y: 0.5 },
+                    AnnotationPoint { x: 0.9, y: 0.5 },
+                ],
+                color: AnnotationColor {
+                    red: 255,
+                    green: 0,
+                    blue: 0,
+                    alpha: 255,
+                },
+                width: 0.1,
+            }],
+        };
+        let compositor = MacMetalCompositor::new(width, height).expect("Metal compositor");
+
+        let output = compositor
+            .compose_with_document(
+                &source,
+                &AnnotationSession::default().snapshot(),
+                1,
+                Some(&document),
+            )
+            .expect("compose annotation into remote frame");
+        let guard = output
+            .pixel_buffer()
+            .lock_read_only()
+            .expect("read composited surface");
+        let stride = guard.bytes_per_row();
+        let center = 32 * stride + 32 * 4;
+
+        assert_eq!(&guard.as_slice()[center..center + 4], &[0, 0, 255, 255]);
+    }
 }

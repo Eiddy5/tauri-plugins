@@ -13,8 +13,8 @@ struct SourceVertex {
 };
 
 struct StrokeVertex {
-    float2 position;
-    float4 color;
+    packed_float2 position;
+    packed_float4 color;
 };
 
 vertex VertexOut source_vertex(const device SourceVertex* vertices [[buffer(0)]],
@@ -28,12 +28,16 @@ vertex VertexOut source_vertex(const device SourceVertex* vertices [[buffer(0)]]
 }
 
 vertex VertexOut stroke_vertex(const device StrokeVertex* vertices [[buffer(0)]],
+                               constant float2& viewport_size [[buffer(1)]],
                                uint vertex_id [[vertex_id]]) {
     StrokeVertex input = vertices[vertex_id];
+    float2 position = float2(input.position);
     VertexOut output;
-    output.position = float4(input.position, 0.0, 1.0);
+    output.position = float4(position.x / viewport_size.x * 2.0 - 1.0,
+                             1.0 - position.y / viewport_size.y * 2.0,
+                             0.0, 1.0);
     output.uv = float2(0.0);
-    output.color = input.color;
+    output.color = float4(input.color);
     return output;
 }
 
