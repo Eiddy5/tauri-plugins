@@ -1,0 +1,159 @@
+:root {
+  font-family:
+    Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  font-weight: 400;
+  color: #eef4f0;
+  background: #0c1110;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 18% 12%, rgba(49, 214, 132, 0.13), transparent 30%),
+    #0c1110;
+}
+
+button {
+  font: inherit;
+}
+
+main {
+  width: min(1080px, calc(100% - 48px));
+  margin: 0 auto;
+  padding: 64px 0;
+  display: grid;
+  grid-template-columns: minmax(280px, 0.85fr) minmax(360px, 1.15fr);
+  align-items: center;
+  gap: 72px;
+  min-height: 100vh;
+}
+
+.hero {
+  max-width: 480px;
+}
+
+.eyebrow {
+  display: block;
+  margin-bottom: 18px;
+  color: #31d684;
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0.16em;
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(36px, 5vw, 58px);
+  line-height: 1.08;
+  letter-spacing: -0.045em;
+}
+
+.hero > p {
+  margin: 22px 0 32px;
+  max-width: 420px;
+  color: #9eaaa4;
+  font-size: 17px;
+}
+
+button {
+  min-width: 140px;
+  border: 0;
+  border-radius: 12px;
+  padding: 13px 22px;
+  color: #07110c;
+  background: #31d684;
+  box-shadow: 0 10px 36px rgba(49, 214, 132, 0.2);
+  cursor: pointer;
+  font-weight: 750;
+  transition:
+    transform 160ms ease,
+    background 160ms ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+  background: #42e493;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: wait;
+  transform: none;
+}
+
+.status {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 22px;
+  color: #dbe4df;
+  font-size: 14px;
+}
+
+.status span {
+  color: #718079;
+  font-variant-numeric: tabular-nums;
+}
+
+.preview {
+  position: relative;
+  overflow: hidden;
+  aspect-ratio: 4 / 3;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 22px;
+  background: #111816;
+  box-shadow: 0 32px 90px rgba(0, 0, 0, 0.36);
+}
+
+.preview::before {
+  position: absolute;
+  inset: 12px;
+  border: 1px dashed rgba(49, 214, 132, 0.16);
+  border-radius: 14px;
+  content: "";
+  pointer-events: none;
+}
+
+.preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.placeholder {
+  height: 100%;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  color: #718079;
+}
+
+.placeholder span {
+  color: #31d684;
+  font-size: 42px;
+}
+
+.placeholder p {
+  margin: 10px 0 0;
+}
+
+@media (max-width: 780px) {
+  main {
+    grid-template-columns: 1fr;
+    gap: 44px;
+    padding: 48px 0;
+  }
+}

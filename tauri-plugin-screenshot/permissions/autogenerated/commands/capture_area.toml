@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-capture-area"
+description = "Enables the capture_area command without any pre-configured scope."
+commands.allow = ["capture_area"]
+
+[[permission]]
+identifier = "deny-capture-area"
+description = "Denies the capture_area command without any pre-configured scope."
+commands.deny = ["capture_area"]

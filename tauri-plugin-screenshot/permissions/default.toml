@@ -1,0 +1,3 @@
+[default]
+description = "Allows starting an area screenshot and reading the confirmed PNG result"
+permissions = ["allow-capture-area", "allow-take-capture"]
