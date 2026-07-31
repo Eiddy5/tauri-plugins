@@ -21,6 +21,7 @@ fn start_options() -> StartCaptureOptions {
         capture_cursor: Some(true),
         publisher: None,
         annotations: None,
+        quality: None,
     }
 }
 

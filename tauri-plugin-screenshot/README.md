@@ -8,11 +8,11 @@ Tauri 2 原生区域截图插件。调用后冻结当前虚拟桌面，并显示
 
 ## Supported Platforms
 
-本插件要求 Rust `1.77.2` 或更高版本，并面向 Tauri 2。
+本插件要求 Rust `1.85` 或更高版本，并面向 Tauri 2。
 
 | Platform | Level | Notes |
 | --- | --- | --- |
-| Windows 10/11 | ✅ | Win32 GDI 捕获，Win32 原生浮层 |
+| Windows 10 1903+/11 | ✅ | Windows Graphics Capture，Direct2D 原生浮层 |
 | macOS 15.2+ | ✅ | ScreenCaptureKit 捕获，AppKit `NSPanel` + `NSView` 原生浮层 |
 | Linux | ❌ | 返回 `unsupported` |
 | Android | ❌ | 返回 `unsupported` |
@@ -228,6 +228,8 @@ type CaptureResult =
 ### Windows
 
 - Windows 10 和 Windows 11 无需额外的系统录屏授权。
+- Windows 实现只使用 Windows Graphics Capture，不提供 GDI 或 DXGI 降级路径；最低版本为 Windows 10 1903。
+- 截图选区通过硬件 Direct2D 渲染，拖选过程中不执行 GDI 位图拷贝或重绘。
 - 捕获和浮层均使用当前桌面会话；服务进程、锁屏桌面或不可交互会话不在支持范围内。
 
 ## Errors

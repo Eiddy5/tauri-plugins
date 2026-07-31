@@ -25,6 +25,12 @@ const captureQualityPresets = {
   "2k": { label: "2K QHD（推荐）", maxWidth: 2560, maxHeight: 1440, fps: 60 },
   "4k": { label: "4K UHD", maxWidth: 3840, maxHeight: 2160, fps: 30 },
 }
+const qualityStrategies = {
+  auto: "自动识别（推荐）",
+  clarity: "文字清晰优先",
+  motion: "动态流畅优先",
+  fixed: "固定参数",
+}
 const storedCaptureQuality = localStorage.getItem("screenCapture.quality")
 const defaultCaptureQuality = Object.hasOwn(captureQualityPresets, storedCaptureQuality)
   ? storedCaptureQuality
@@ -34,12 +40,15 @@ const state = {
   selected: null,
   session: null,
   stats: null,
+  receiverStats: null,
+  receiverSample: null,
   error: "",
   loading: false,
   debugRawSources: false,
   includeCurrentApp: false,
   includeSystemUi: false,
   captureQuality: defaultCaptureQuality,
+  qualityStrategy: localStorage.getItem("screenCapture.qualityStrategy") ?? "auto",
   activeKind: "display",
   peerConnection: null,
   captureVideoTrack: null,
@@ -98,6 +107,7 @@ app.innerHTML = `
         <span data-published>Published 0</span>
         <span data-dropped>Dropped 0</span>
         <span data-fps>FPS 0.0</span>
+        <span data-receiver>RX waiting</span>
         <span data-streaming>Stopped</span>
         <span data-agora-status>Agora off</span>
       </div>
@@ -144,6 +154,14 @@ app.innerHTML = `
               <select data-quality aria-label="共享清晰度">
                 ${Object.entries(captureQualityPresets)
                   .map(([value, preset]) => `<option value="${value}">${preset.label} · ${preset.fps} FPS</option>`)
+                  .join("")}
+              </select>
+            </label>
+            <label class="quality-control">
+              <span>内容策略</span>
+              <select data-quality-strategy aria-label="内容策略">
+                ${Object.entries(qualityStrategies)
+                  .map(([value, label]) => `<option value="${value}">${label}</option>`)
                   .join("")}
               </select>
             </label>
@@ -196,6 +214,7 @@ const elements = {
   refresh: app.querySelector("[data-refresh]"),
   kindButtons: [...app.querySelectorAll("[data-kind]")],
   quality: app.querySelector("[data-quality]"),
+  qualityStrategy: app.querySelector("[data-quality-strategy]"),
   displayCount: app.querySelector("[data-display-count]"),
   windowCount: app.querySelector("[data-window-count]"),
   optionInputs: [...app.querySelectorAll("[data-option]")],
@@ -216,6 +235,7 @@ const elements = {
   published: app.querySelector("[data-published]"),
   dropped: app.querySelector("[data-dropped]"),
   fps: app.querySelector("[data-fps]"),
+  receiver: app.querySelector("[data-receiver]"),
   streaming: app.querySelector("[data-streaming]"),
   agoraStatus: app.querySelector("[data-agora-status]"),
   error: app.querySelector("[data-error]"),
@@ -252,6 +272,12 @@ elements.quality.addEventListener("change", () => {
   if (!Object.hasOwn(captureQualityPresets, elements.quality.value)) return
   state.captureQuality = elements.quality.value
   localStorage.setItem("screenCapture.quality", state.captureQuality)
+  render()
+})
+elements.qualityStrategy.addEventListener("change", () => {
+  if (!Object.hasOwn(qualityStrategies, elements.qualityStrategy.value)) return
+  state.qualityStrategy = elements.qualityStrategy.value
+  localStorage.setItem("screenCapture.qualityStrategy", state.qualityStrategy)
   render()
 })
 
@@ -363,6 +389,7 @@ async function start() {
       height: captureSize.height,
       captureCursor: true,
       annotations: { enabled: true },
+      quality: { mode: state.qualityStrategy },
     })
     state.pickerOpen = false
     state.videoReady = false
@@ -392,8 +419,38 @@ async function start() {
 async function updateStats() {
   if (!state.session) return
   state.stats = await getCaptureStats(state.session.sessionId)
+  state.receiverStats = await collectReceiverStats()
   console.info("[screen-capture] stats", state.stats)
   renderStats()
+}
+
+async function collectReceiverStats() {
+  if (!state.peerConnection) return null
+  const reports = await state.peerConnection.getStats()
+  const inbound = [...reports.values()].find(
+    (report) => report.type === "inbound-rtp" && report.kind === "video",
+  )
+  if (!inbound) return null
+  const previous = state.receiverSample
+  const bitrateKbps = previous && inbound.timestamp > previous.timestamp
+    ? Math.round(
+        ((inbound.bytesReceived - previous.bytesReceived) * 8) /
+          (inbound.timestamp - previous.timestamp),
+      )
+    : 0
+  state.receiverSample = {
+    bytesReceived: inbound.bytesReceived,
+    timestamp: inbound.timestamp,
+  }
+  return {
+    width: inbound.frameWidth ?? 0,
+    height: inbound.frameHeight ?? 0,
+    fps: inbound.framesPerSecond ?? 0,
+    bitrateKbps,
+    framesDecoded: inbound.framesDecoded ?? 0,
+    framesDropped: inbound.framesDropped ?? 0,
+    packetsLost: inbound.packetsLost ?? 0,
+  }
 }
 
 async function publishToAgora() {
@@ -514,6 +571,8 @@ function render() {
 
   elements.quality.value = state.captureQuality
   elements.quality.disabled = hasSession
+  elements.qualityStrategy.value = state.qualityStrategy
+  elements.qualityStrategy.disabled = hasSession
 
   elements.agoraEnabled.checked = state.agoraEnabled
   elements.agoraEnabled.disabled = hasSession
@@ -605,7 +664,14 @@ function renderStats() {
   elements.captured.textContent = `Captured ${stats.framesCaptured ?? 0} @ ${(stats.captureFps ?? 0).toFixed(1)}`
   elements.published.textContent = `Published ${stats.framesPublished ?? 0} @ ${(stats.publishFps ?? 0).toFixed(1)}`
   elements.dropped.textContent = `Dropped ${stats.framesDropped ?? 0} C/P/E ${stats.framesCaptureDropped ?? 0}/${stats.framesPipelineDropped ?? 0}/${stats.framesEncoderDropped ?? 0}`
-  elements.fps.textContent = `FPS ${(stats.fps ?? 0).toFixed(1)} ${(stats.bitrateKbps ?? 0)}kbps readback ${stats.framesCpuReadback ?? 0} ${stats.encoderBackend ?? "no-encoder"}`
+  const adaptation = stats.qualityMode
+    ? ` ${stats.qualityMode}/${stats.contentState ?? "-"} target ${stats.targetFps ?? "-"}fps ${stats.targetBitrateKbps ?? "-"}kbps ${stats.adaptationReason ?? ""}`
+    : ""
+  elements.fps.textContent = `FPS ${(stats.fps ?? 0).toFixed(1)} ${(stats.bitrateKbps ?? 0)}kbps readback ${stats.framesCpuReadback ?? 0} ${stats.encoderBackend ?? "no-encoder"}${adaptation}`
+  const receiver = state.receiverStats
+  elements.receiver.textContent = receiver
+    ? `RX ${receiver.width}x${receiver.height} @ ${receiver.fps} ${receiver.bitrateKbps}kbps decoded ${receiver.framesDecoded} dropped ${receiver.framesDropped} lost ${receiver.packetsLost}`
+    : "RX waiting"
   elements.streaming.textContent = state.stats?.started ? "Streaming" : "Stopped"
   elements.agoraStatus.textContent = state.agoraPublication
     ? `Agora ${state.agoraPublication.channel} / ${state.agoraPublication.uid}`

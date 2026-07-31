@@ -504,7 +504,8 @@ interface CaptureErrorPayload {
 
 ### Windows
 
-- Windows 通过 `GraphicsCaptureSession::IsSupported()` 检查能力，不显示额外权限弹窗。
+- Windows 通过 `GraphicsCaptureSession::IsSupported()` 检查捕获能力。`requestPermission()` 会请求无系统捕获边框权限，`startCapture()` 也会在启动前确保该权限已授予；用户拒绝时不会静默回退为带边框捕获。
+- 无边框捕获要求 Windows 10 20348 或更高版本。Appx/MSIX 打包应用还必须在 package manifest 的 `Capabilities` 中声明 `<uap11:Capability Name="graphicsCaptureWithoutBorder" />`；否则权限状态为 `restricted`。
 - 显示器缩略图先读取完整屏幕，再缩放到最大 420px 宽；不会只截取桌面左上角。
 - 硬件 H.264 使用系统/驱动提供的 Media Foundation MFT，不依赖外部编码进程。
 - 未启用批注时优先使用 D3D11 GPU surface 快路径；启用批注时使用可由 Rust 合成的 BGRA 路径。

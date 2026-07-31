@@ -2,10 +2,10 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use interceptor::registry::Registry;
@@ -48,8 +48,13 @@ pub struct WebRtcSignalingState {
     video_track: Arc<TrackLocalStaticSample>,
     connected_rx: watch::Receiver<bool>,
     keyframe_requests: Arc<AtomicU64>,
-    estimated_bitrate_bps: Arc<AtomicU64>,
-    received_bitrate_estimate: Arc<AtomicBool>,
+    bandwidth_estimate: Arc<Mutex<Option<BandwidthEstimate>>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BandwidthEstimate {
+    pub(crate) bitrate_bps: u64,
+    pub(crate) received_at: Instant,
 }
 
 impl WebRtcSignalingState {
@@ -82,10 +87,8 @@ impl WebRtcSignalingState {
         ));
         let keyframe_requests = Arc::new(AtomicU64::new(0));
         let rtcp_keyframe_requests = Arc::clone(&keyframe_requests);
-        let estimated_bitrate_bps = Arc::new(AtomicU64::new(0));
-        let rtcp_estimated_bitrate_bps = Arc::clone(&estimated_bitrate_bps);
-        let received_bitrate_estimate = Arc::new(AtomicBool::new(false));
-        let rtcp_received_bitrate_estimate = Arc::clone(&received_bitrate_estimate);
+        let bandwidth_estimate = Arc::new(Mutex::new(None));
+        let rtcp_bandwidth_estimate = Arc::clone(&bandwidth_estimate);
         let rtp_sender = peer_connection
             .add_track(Arc::clone(&video_track) as Arc<dyn TrackLocal + Send + Sync>)
             .await
@@ -98,9 +101,12 @@ impl WebRtcSignalingState {
                         .as_any()
                         .downcast_ref::<ReceiverEstimatedMaximumBitrate>()
                     {
-                        rtcp_estimated_bitrate_bps
-                            .store(remb.bitrate.max(0.0) as u64, Ordering::Relaxed);
-                        rtcp_received_bitrate_estimate.store(true, Ordering::Release);
+                        *rtcp_bandwidth_estimate
+                            .lock()
+                            .expect("WebRTC bandwidth estimate lock") = Some(BandwidthEstimate {
+                            bitrate_bps: remb.bitrate.max(0.0) as u64,
+                            received_at: Instant::now(),
+                        });
                     }
                     if packet
                         .as_any()
@@ -130,8 +136,7 @@ impl WebRtcSignalingState {
             video_track,
             connected_rx,
             keyframe_requests,
-            estimated_bitrate_bps,
-            received_bitrate_estimate,
+            bandwidth_estimate,
         })
     }
 
@@ -140,9 +145,15 @@ impl WebRtcSignalingState {
     }
 
     pub fn estimated_bitrate_bps(&self) -> Option<u64> {
-        self.received_bitrate_estimate
-            .load(Ordering::Acquire)
-            .then(|| self.estimated_bitrate_bps.load(Ordering::Relaxed))
+        self.bandwidth_estimate()
+            .map(|estimate| estimate.bitrate_bps)
+    }
+
+    pub(crate) fn bandwidth_estimate(&self) -> Option<BandwidthEstimate> {
+        *self
+            .bandwidth_estimate
+            .lock()
+            .expect("WebRTC bandwidth estimate lock")
     }
 
     pub async fn create_offer(&self) -> Result<WebRtcOffer> {

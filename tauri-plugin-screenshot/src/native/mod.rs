@@ -1,6 +1,4 @@
 mod desktop;
-#[cfg(any(target_os = "windows", test))]
-mod frame;
 mod magnifier;
 
 #[cfg(target_os = "macos")]
@@ -14,9 +12,6 @@ use async_trait::async_trait;
 use tauri::{AppHandle, Runtime};
 
 use crate::{models::CaptureOptions, CaptureRegion, Result};
-
-#[cfg(target_os = "windows")]
-pub(crate) use frame::{CapturedFrame, PixelFormat};
 
 pub(crate) struct NativeCaptureImage {
     pub png: Vec<u8>,

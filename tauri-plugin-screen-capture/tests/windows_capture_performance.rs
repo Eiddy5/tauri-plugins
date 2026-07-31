@@ -189,6 +189,7 @@ async fn display_capture_sustains_smooth_1080p60_delivery() {
                 capture_cursor: Some(true),
                 publisher: None,
                 annotations: None,
+                quality: None,
             },
             Box::new(probe.clone()),
         )
@@ -282,6 +283,7 @@ async fn display_capture_resize_and_h264_encode_stay_realtime_end_to_end() {
                 capture_cursor: Some(true),
                 publisher: None,
                 annotations: None,
+                quality: None,
             },
             Box::new(ArcEncodingProbe(Arc::clone(&probe))),
         )
@@ -341,6 +343,7 @@ async fn display_capture_delivers_gpu_surfaces_without_cpu_readback() {
                 capture_cursor: Some(true),
                 publisher: None,
                 annotations: None,
+                quality: None,
             },
             Box::new(ArcGpuSurfaceProbe(Arc::clone(&probe))),
         )
@@ -397,6 +400,7 @@ async fn display_capture_encodes_gpu_surfaces_with_media_foundation() {
                 capture_cursor: Some(true),
                 publisher: None,
                 annotations: None,
+                quality: None,
             },
             Box::new(ArcGpuEncodingProbe(Arc::clone(&probe))),
         )

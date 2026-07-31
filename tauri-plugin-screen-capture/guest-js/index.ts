@@ -3,6 +3,7 @@ import { listen, type Event, type UnlistenFn } from '@tauri-apps/api/event'
 
 export type CaptureSourceKind = 'display' | 'window'
 export type PublisherKind = 'webRtcLoopback' | 'agora'
+export type QualityMode = 'fixed' | 'auto' | 'clarity' | 'motion'
 export type CaptureStatus =
   | 'idle'
   | 'starting'
@@ -21,6 +22,7 @@ export interface Capabilities {
   supportsCursorCapture: boolean
   supportsWebrtc: boolean
   supportsAnnotations: boolean
+  supportsAdaptiveQuality: boolean
   annotationTools: AnnotationToolKind[]
 }
 
@@ -124,6 +126,12 @@ export interface PublisherOptions {
   agora?: AgoraPublisherOptions | null
 }
 
+export interface QualityOptions {
+  mode?: QualityMode
+  minimumFps?: number | null
+  minimumBitrateKbps?: number | null
+}
+
 export interface StartCaptureOptions {
   sourceId: string
   sourceKind: CaptureSourceKind
@@ -133,6 +141,7 @@ export interface StartCaptureOptions {
   captureCursor?: boolean
   publisher?: PublisherOptions | null
   annotations?: AnnotationOptions | null
+  quality?: QualityOptions | null
 }
 
 export interface CaptureErrorPayload {
@@ -178,6 +187,12 @@ export interface CaptureStats {
   publishFps: number
   bitrateKbps: number
   encoderBackend?: string | null
+  qualityMode?: QualityMode | null
+  contentState?: string | null
+  targetFps?: number | null
+  targetBitrateKbps?: number | null
+  networkEstimateKbps?: number | null
+  adaptationReason?: string | null
   started: boolean
 }
 

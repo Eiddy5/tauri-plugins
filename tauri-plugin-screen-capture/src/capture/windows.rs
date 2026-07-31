@@ -17,7 +17,7 @@ impl CaptureBackend for WindowsCaptureBackend {
     }
 
     async fn request_permission(&self) -> Result<PermissionStatus> {
-        permissions::request_permission()
+        permissions::request_permission().await
     }
 
     async fn list_sources(&self, options: ListSourcesOptions) -> Result<Vec<CaptureSource>> {
@@ -29,6 +29,7 @@ impl CaptureBackend for WindowsCaptureBackend {
         options: StartCaptureOptions,
         consumer: Box<dyn FrameConsumer>,
     ) -> Result<Box<dyn RunningCapture>> {
+        permissions::require_borderless_capture().await?;
         graphics_capture::start_capture(options, consumer)
     }
 }

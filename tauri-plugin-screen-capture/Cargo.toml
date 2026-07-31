@@ -135,6 +135,7 @@ yuvutils-rs = "=0.3.2"
 windows-capture = "2.0.0"
 windows = { version = "0.62", features = [
   "Graphics_Capture",
+  "Security_Authorization_AppCapabilityAccess",
   "Win32_Foundation",
   "Win32_Graphics_Dwm",
   "Win32_Graphics_Direct3D11",

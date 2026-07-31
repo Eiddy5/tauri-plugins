@@ -9,7 +9,7 @@ use crate::{
     Result,
 };
 
-use super::NativeCaptureImage;
+use super::super::NativeCaptureImage;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PixelFormat {
