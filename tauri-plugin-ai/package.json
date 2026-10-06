@@ -1,0 +1,79 @@
+{
+  "name": "tauri-plugin-ai-api",
+  "version": "0.1.0",
+  "author": "zhuangjianqi",
+  "description": "TypeScript capability framework for Tauri and MCP",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Eiddy5/tauri-plugins.git",
+    "directory": "tauri-plugin-ai"
+  },
+  "type": "module",
+  "workspaces": [
+    "examples/tauri-app"
+  ],
+  "resolutions": {
+    "tauri-plugin-ai-api": "portal:.",
+    "piscina": "5.3.2"
+  },
+  "overrides": {
+    "piscina": "5.3.2"
+  },
+  "types": "./dist-js/index.d.ts",
+  "main": "./dist-js/index.cjs",
+  "module": "./dist-js/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist-js/index.d.ts",
+      "import": "./dist-js/index.js",
+      "require": "./dist-js/index.cjs"
+    },
+    "./tauri": {
+      "types": "./dist-js/tauri.d.ts",
+      "import": "./dist-js/tauri.js",
+      "require": "./dist-js/tauri.cjs"
+    },
+    "./angular": {
+      "types": "./dist-js/angular.d.ts",
+      "import": "./dist-js/angular.js",
+      "require": "./dist-js/angular.cjs"
+    }
+  },
+  "files": [
+    "dist-js",
+    "README.md"
+  ],
+  "scripts": {
+    "prebuild": "node -e \"require('node:fs').rmSync('dist-js', { recursive: true, force: true })\"",
+    "build": "rollup -c",
+    "check": "tsc --noEmit && tsc -p tests/tsconfig.json --noEmit",
+    "test": "tsx --tsconfig tests/tsconfig.json --test tests/*.test.ts",
+    "example:install": "npm --prefix examples/tauri-app install",
+    "example:dev": "npm --prefix examples/tauri-app start",
+    "example:build": "npm --prefix examples/tauri-app run build",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "ajv": "^8.17.1"
+  },
+  "peerDependencies": {
+    "@angular/core": ">=20 <23"
+  },
+  "peerDependenciesMeta": {
+    "@angular/core": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@angular/core": "21.2.25",
+    "@rollup/plugin-typescript": "^12.0.0",
+    "@types/node": "^22.20.5",
+    "rollup": "^4.9.6",
+    "rxjs": "^7.8.2",
+    "tslib": "^2.6.2",
+    "tsx": "^4.20.0",
+    "typescript": "~5.9.3"
+  }
+}

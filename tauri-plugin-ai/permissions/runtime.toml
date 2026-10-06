@@ -1,0 +1,6 @@
+"$schema" = "schemas/schema.json"
+
+[[set]]
+identifier = "runtime"
+description = "Allows the trusted application frontend to bind, invoke and cancel runtime tools."
+permissions = ["allow-runtime-connect", "allow-runtime-ready", "allow-runtime-invoke", "allow-runtime-cancel", "allow-runtime-resolve", "allow-runtime-disconnect"]

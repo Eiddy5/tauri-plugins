@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-runtime-invoke"
+description = "Enables the runtime_invoke command without any pre-configured scope."
+commands.allow = ["runtime_invoke"]
+
+[[permission]]
+identifier = "deny-runtime-invoke"
+description = "Denies the runtime_invoke command without any pre-configured scope."
+commands.deny = ["runtime_invoke"]

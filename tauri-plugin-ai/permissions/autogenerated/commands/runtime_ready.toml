@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-runtime-ready"
+description = "Enables the runtime_ready command without any pre-configured scope."
+commands.allow = ["runtime_ready"]
+
+[[permission]]
+identifier = "deny-runtime-ready"
+description = "Denies the runtime_ready command without any pre-configured scope."
+commands.deny = ["runtime_ready"]
