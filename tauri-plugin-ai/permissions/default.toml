@@ -1,5 +1,0 @@
-"$schema" = "schemas/schema.json"
-
-[default]
-description = "No runtime access by default. Enable ai:runtime for the trusted application frontend."
-permissions = []

@@ -1,0 +1,29 @@
+[package]
+name = "tauri-plugin-mcp"
+version = "0.1.0"
+authors = [ "zhuangjianqi" ]
+description = "Expose TypeScript capabilities to MCP clients through Tauri"
+edition = "2021"
+rust-version = "1.90"
+license = "Apache-2.0"
+repository = "https://github.com/Eiddy5/tauri-plugins"
+exclude = ["/examples", "/dist-js", "/guest-js", "/node_modules"]
+links = "tauri-plugin-mcp"
+
+[dependencies]
+tauri = { version = "2.12.1", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2"
+serde_json = "1"
+tokio = { version = "1", features = ["sync", "time", "rt", "macros", "net"] }
+tokio-util = "0.7"
+uuid = { version = "1", features = ["v4"] }
+jsonschema = { version = "0.33", default-features = false }
+rmcp = { version = "3.5", default-features = false, features = ["server", "transport-streamable-http-server"] }
+axum = "0.8"
+
+[dev-dependencies]
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+
+[build-dependencies]
+tauri-plugin = { version = "2.7.1", features = ["build"] }
